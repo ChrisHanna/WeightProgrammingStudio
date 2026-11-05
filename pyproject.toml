@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin==1.16.0"]
+build-backend = "maturin"
+
+[project]
+name = "neural-foundry"
+version = "0.1.0"
+description = "Local-first tools for verifiable neural weight programming"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "python/neural_foundry/data/THIRD_PARTY_NOTICES.txt"]
+readme = "README.md"
+dependencies = []
+
+[project.optional-dependencies]
+# Install with the explicit CPU index documented in protocols/core-testing-v1.md.
+differential = ["torch==2.9.1+cpu"]
+dev = [
+    "pytest==8.4.2",
+    "maturin==1.16.0",
+    "build==1.6.1",
+    "ruff==0.17.3",
+    "mypy==1.20.2",
+]
+
+[tool.maturin]
+manifest-path = "crates/nf-python/Cargo.toml"
+python-source = "python"
+module-name = "neural_foundry._native"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

@@ -1,0 +1,7 @@
+[
+  {"input":"{\"a\":1,\"a\":2}","code":"DUPLICATE_KEY","path":"/a"},
+  {"input":"18446744073709551616","code":"INTEGER_OUT_OF_RANGE","path":""},
+  {"input":"1e400","code":"NON_FINITE","path":""},
+  {"input":"NaN","code":"INVALID_JSON","path":""},
+  {"input":"{} {}","code":"INVALID_JSON","path":""}
+]

@@ -1,0 +1,16 @@
+Neural Programming Foundry
+
+Project source is provided under the Apache License, Version 2.0.
+Copyright in original contributions remains with their contributors.
+
+This distribution includes Rust components from the locked dependency graph.
+Their original license and notice texts are retained in:
+  neural_foundry/data/THIRD_PARTY_NOTICES.txt (installed Python package)
+  python/neural_foundry/data/THIRD_PARTY_NOTICES.txt (source tree)
+The reviewed names, versions, declared license expressions and text digests
+are recorded in licenses/dependencies.json in the source distribution.
+
+Optional development and CPU reference tools, including PyTorch, are not
+bundled as Python runtime dependencies. They retain their own licenses and
+notices in their upstream distributions. See licenses/python-tools.json and
+docs/dependency-policy.md. No model weights or datasets are distributed.

@@ -1,0 +1,29 @@
+[package]
+name = "nf-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+nf-core.workspace = true
+nf-checkpoint.workspace = true
+nf-weight-ir.workspace = true
+nf-surgeon.workspace = true
+nf-patches.workspace = true
+nf-experiments.workspace = true
+nf-graph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pyo3.workspace = true
+
+[lints]
+workspace = true

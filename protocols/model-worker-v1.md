@@ -1,0 +1,43 @@
+# Fixed trusted PyTorch CPU workers v1
+
+Inference receipt/output schema v2 adds explicit per-input seed schedules and a native seed-schedule digest. Existing inference calls now run explicit zero seeds; paired controls supply their frozen seeds. Historical v1 receipts do not establish seeded evidence. Probe/edit schema versions and the trusted runtime tier are unchanged. See `paired-controls-v1.md`.
+
+## Trust tiers and default-off qualification
+
+`models.qualify(private_root, enabled=False)` is default off. Explicit operator enablement selects the local CPython3.12 executable and installed, pinned Torch2.9.1+cpu dependency directory, snapshots the fixed adapter and native extension into a physical owner-held0700 root, hashes runtime files and performs an ACTUAL child-process Torch/kernel probe. Installed packages, mocked versions and descriptors alone cannot qualify it. Base SDK/model-facade import never imports Torch; real Torch initialization stays in the child.
+
+This is a fixed **trusted model adapter**, not the T026 hostile Python/gym sandbox. The OS/interpreter/prlimit, selected installed dependency tree, fixed adapter and operator are trusted. Untrusted checkpoint/config bytes are data only. No gym/agent source, arbitrary Python factory, callback, import hook, pickle, `torch.load`, remote custom architecture or mutable model object enters this process or crosses its boundary. Agent gyms/calculations still require their separately qualified OCI domain; selecting this API cannot downgrade that rule. The trusted worker is not an adversarial host-filesystem/network/account boundary, confidential-data enclave or proof against a hostile host/root/same-UID runtime modifier.
+
+## Registered model profiles
+
+- `fixture.cpu`, version1, exact empty config: dense f32/f64 linear weight `w` and required factory-tied `tied`, same span/shape/dtype. Dimensions are positive and at most64. No buffers.
+- `nf.arithmetic.relu`, version1: the exact T031 f64 six-ReLU/five-head graph/config and integer-pair domain. The real Torch `Linear→ReLU→Linear` factory must match native forward values, not a stub/table.
+- `nf.fixture.linear_buffered`, version1, exact registered2×2 config: f32/f64 `w`/`tied` and `offset`/`offset_alias` buffers, true same-span aliases within each role and separate weight/buffer storage. The buffer participates in the actual forward.
+
+Additional/missing tensor names, unknown versions/config fields, remote-code flags, unsupported dtype/packing/device, cross-role aliases and fake ties reject. Equal independent tensors are NOT aliases. These are small fixed CPU profiles, not a full HF/Transformer registry or GPU/serving qualification.
+
+## Safe bytes and actual storage checks
+
+The caller supplies an opaque verified native SourceHandle, not an executable model. Rust verifies source integrity and actual Safetensors/config inventory before dispatch, bounds source payload to1MiB and a batch to64 vectors of at most64 finite values, and computes an independent native forward reference for the selected registered profile. Invalid/unknown/pickle/truncated input never becomes Python deserialization code.
+
+Manifest/checkpoint/assets and bounded request JSON are copied into an immutable private job snapshot. Asset file names are encoded from native hashes; a caller asset name never becomes a traversal path. Child Python starts `-I -S -B`, with no current-directory, user-site, PYTHONPATH, `.pth` or sitecustomize execution. Only the operator-approved package directory and snapshotted native extension are loaded. The child re-verifies all checkpoint bytes through the real native loader before constructing a recognized static `nn.Module`.
+
+Each physical logical group is copied once out of the verified source, staged in owned mutable bytes, cloned into Torch and assigned through the trusted factory. Factory parameters are not trainable. Actual `named_parameters`/`named_buffers(remove_duplicate=False)` provide tensor inventory; runtime dtype, shape, contiguous strides, CPU device, byte digests, requires_grad/grad state and true storage-span equality groups are observed before and after inference. Raw pointers stay process-local and NEVER cross IPC; only opaque physical-group equality labels are returned. The native parent compares every observation and alias membership with the frozen source, rejecting state drift or silent casts. No mutable source checkpoint view is exposed to Torch.
+
+The fixed forward runs under actual `torch.inference_mode()`, with gradients disabled and `.eval()`. There is no optimizer/backward/training API or code registration path. Source Rust bytes remain unchanged; model/torch objects never enter a gym or coordinator. Parent verifies copied numeric outputs against native references with fixed f32 tolerance1e-5/f64 tolerance1e-10, finite values and exact dimensions. It never trusts a bare worker `success` string.
+
+## Kernel limits, lifecycle and measurements
+
+The native supervisor installs kernel CPU seconds, address-space, file-size, FD and core limits BEFORE the interpreter starts. Default CPU is10s, wall15s, AS2GiB, FD64, core0 and file size1MiB. Supported limits are finite: CPU1–30s, wall100–30000ms, AS512MiB–4GiB, output1KiB–1MiB, plus separately bounded stderr. The actual probe verifies installed RLIMIT values, CPU-only package/version, one Torch intra/inter-op thread and one observed kernel thread. AS is a genuine address-space ceiling, NOT a Linux RLIMIT_RSS claim. The fixed trusted adapter never forks or accepts subprocess commands; no shared-UID RLIMIT_NPROC is misrepresented as a per-job process sandbox.
+
+The child has an empty inherited environment except fixed PATH/thread settings and its private scratch TMPDIR. Inherited FDs≥3 become close-on-exec. No coordinator credential/session env, source filesystem handle or model pointer is inherited. A parent-death SIGKILL is installed with a race check before exec. Cancellation/timeout/output overflow signal an owned kernel pidfd, not an integer PID that might have been reused. An owned-child guard terminates/reaps unfinished work on error; normal completion is reaped exactly once. No post-reap process-group signals are sent. All normal/failure/cancel outputs remain ineligible for promotion.
+
+`wait4` measures whole single-process CPU (all threads) and kernel peak RSS. BOOTTIME bounds wall execution. The parent records those values, actual runtime/manifest/checkpoint/input/parameter identities and immutable intent/process/completion data. No worker timing is substituted for host/kernel observation. Runtime qualification/file-copy/setup costs outside the measured child interval remain unknown overhead, which a study dispatcher must conservatively reserve/charge. This low-level runtime is NOT a study coordinator lease or budget reservation; generic study preflight remains fail-closed.
+
+Explicit factory/group-copy, mutable staging, Torch clone and input allocation byte counts are checked. Zero-copy is explicitly false. Counts name their limited scope and do not pretend to capture all interpreter/library allocation/copies. Peak RSS includes runtime overhead. Missing/failed reports remain missing, not zero. Runtime/source hashes are rechecked after work. An interrupted or invalid job cannot mint a verified output; incomplete private intent records are retained, not used as successful model/acceptance evidence.
+
+## Native/SDK authority and actual tests
+
+`QualifiedTorch` and `Inference` are private-field, non-deserializable native witnesses. Python exposes frozen unconstructible `TorchRuntimeHandle` and `ModelInferenceHandle`, copied `outputs`, `status` and canonical `receipt_bytes()`. `models.infer(runtime, source, inputs, limits, cancellation)` releases the GIL and supports sticky native cancellation. A receipt DTO cannot substitute a runtime/witness or accept weights. `promotion_status=not_evaluated` and `outputs_eligible=false` are retained even for verified forward values.
+
+`python -m pytest -q -k model_worker` runs real pinned CPU Torch processes. It exercises f32/f64 true tied weights, live bias-buffer/alias reconstruction, actual ReLU parity across all split roles, before/after source/buffer identity, independent-equal fake ties, unknown/remote factories/versions/configs, unsafe file/packing/input/limit cases, wall/output/cancel cleanup and no parent Torch import/host env leakage. It inspects actual process termination and kernel memory/time receipts. No missing-runtime skip or fake Torch callback qualifies these tests. These are software fixtures, not a trained-model research gain or a PyTorch edit-backend qualification; edits are the next task.

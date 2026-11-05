@@ -1,0 +1,23 @@
+# Standalone dense export and core restore v1
+
+`nf_checkpoint::export` publishes a standalone immutable bundle in the FD-rooted artifact store. Its checkpoint blob contains standard Safetensors bytes, not a delta, pickle, executable constructor, or reference to source weights. The root is a canonical, content-addressed ExportManifest with complete ModelManifest, checkpoint/asset lengths and digests, and an explicit alias reconstruction contract. Config and all declared tokenizer/other assets are included. Restore needs only this root and its blobs, not an original model, patch graph, teacher, optimizer, or programmer.
+
+## Publication and restore
+
+Input byte limits are checked before hashing. The exporter checks dense format, versions, factory config JSON/digest, complete asset bindings, every serialized tensor's shape/dtype/content, complete storage-group coverage, parameter-set identity, buffers and aliases before writes. Unknown tensor names, missing groups, unsupported packing, malformed roots and unknown fields/contracts fail closed.
+
+The existing store enforces finite quotas, no-follow FD-rooted paths, single-link regular files, digest verification, exclusive publication locks, fsync and atomic no-replace blob publication. Checkpoint/assets are published first. The root manifest is published last. An interrupted write or exhausted quota may leave verified orphan blobs counted against quota, but never a complete root for the failed export. No active/accepted/source pointer is opened or changed. Roots are immutable explicit restore targets; this API does not select a latest checkpoint or erase history.
+
+Restore reads root bytes with a pre-allocation caller bound. It validates metadata and aggregate declared lengths before reading blobs, uses bounded verified reads for each exact dependency, and rechecks every byte identity and tensor invariant. One range per declared storage group is mapped to every logical member. Serialized duplicate members must match the same dtype/shape/content. Equal independent tensors are not tied. Actual reconstructed shared spans are checked with the native inventory verifier; unqualified zero-size tie claims fail closed.
+
+Restore's byte limits cover encoded payload plus metadata and logical inventory scans. They are conservative admission bounds, not a process-RSS measurement. Caller-owned bytes, duplicate source/candidate instances and OS caches need separate process supervision. This M1 API uses bounded whole-file dense checkpoints. The preexisting streaming/sharded API remains separate; no claim of zero-copy whole-model export is made.
+
+## Native candidate gate
+
+`nf_surgeon::export::export_candidate` accepts only an opaque VerifiedCandidate, binds the original smoke suite, materializes actual edited values, checks smoke parity before publication, publishes, then reloads through store verification and SourceState construction. A second real registered forward smoke checks identical output identity. Its CoreExportReceipt retains the complete transaction receipt (effective effects, actual changes, per-tensor/buffer hashes, shape/dtype/alias evidence and smoke), export root, model identity, reload mode and parity evidence. Core restore exposes the same verified loader separately.
+
+Actual coordinate evidence uses row-major spans grouped by physical storage ID; aliased names are counted once. The transaction records the compiler's effective write regions separately. At most 4096 disjoint changed spans are admitted per receipt; excessive fragmentation fails the isolated transaction without touching its source. Metadata remains subject to the canonical document limit. Large dense contiguous edits do not allocate one record per element.
+
+The current registered adapter is the finite native CPU linear fixture only; unknown adapters are not silently substituted. The runtime receipt honestly names `fresh_native_cpu_instance_in_process`. A subprocess integration test independently reopens exported standard bytes, reconstructs actual aliases, checks parameter/buffer/config/tokenizer identities and computes known forward outputs without source/candidate handles. Broader fresh-process model adapters, experiment restore events, authoritative active pointers and full scientific promotion belong to later workflow gates.
+
+Export roots certify tensor/asset integrity, not candidate acceptance. A post-publication reload failure produces no successful core receipt and never advances a pointer. All core receipts retain `promotion_status=not_evaluated`; full frozen target, retention, private evaluation and backend gates remain required for acceptance. Software fixture parity is not evidence of research gains.

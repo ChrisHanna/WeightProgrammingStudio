@@ -1,0 +1,29 @@
+[package]
+name = "nf-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nf"
+path = "src/main.rs"
+
+[[bin]]
+name = "weightctl"
+path = "src/weightctl.rs"
+
+[dependencies]
+nf-core.workspace = true
+nf-checkpoint.workspace = true
+nf-weight-ir.workspace = true
+nf-experiments.workspace = true
+nf-graph.workspace = true
+nf-patches.workspace = true
+nf-surgeon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+
+[lints]
+workspace = true

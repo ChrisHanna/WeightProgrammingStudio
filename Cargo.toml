@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nf-core",
+    "crates/nf-checkpoint",
+    "crates/nf-weight-ir",
+    "crates/nf-surgeon",
+    "crates/nf-graph",
+    "crates/nf-patches",
+    "crates/nf-experiments",
+    "crates/nf-cli",
+    "crates/nf-python",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+nf-core = { path = "crates/nf-core", version = "=0.1.0" }
+nf-checkpoint = { path = "crates/nf-checkpoint", version = "=0.1.0" }
+nf-graph = { path = "crates/nf-graph", version = "=0.1.0" }
+nf-weight-ir = { path = "crates/nf-weight-ir", version = "=0.1.0" }
+nf-surgeon = { path = "crates/nf-surgeon", version = "=0.1.0" }
+nf-patches = { path = "crates/nf-patches", version = "=0.1.0" }
+nf-experiments = { path = "crates/nf-experiments", version = "=0.1.0" }
+pyo3 = { version = "=0.24.2", features = ["abi3-py311"] }
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.140"
+sha2 = "=0.10.8"
+libc = "=0.2.191"
+rustix = { version = "=1.0.5", features = ["fs"] }
+safetensors = "=0.5.3"
+rusqlite = { version = "=0.37.0", features = ["bundled", "limits"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+duplicate_mod = "allow"
+manual_saturating_arithmetic = "allow"
+type_complexity = "allow"
+unnecessary_cast = "allow"
+too_many_arguments = "allow"
+chunks_exact_to_as_chunks = "allow"
+needless_borrow = "allow"
+redundant_closure = "allow"
+items_after_test_module = "allow"
+single_element_loop = "allow"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

@@ -1,0 +1,49 @@
+name: M1 native and isolated wheel
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  linux-cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      KIROCREW_SCRATCH: ${{ runner.temp }}/nf-m1
+      UV_LINK_MODE: copy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Pinned development and CPU reference tools
+        run: |
+          mkdir -p "$KIROCREW_SCRATCH"
+          python -m pip install uv==0.13.5
+          uv venv --python "$(command -v python)" .venv
+          UV_CACHE_DIR="$KIROCREW_SCRATCH/uv-cache" uv pip install --python .venv/bin/python -r requirements-dev.lock
+      - name: Native gates and executable example without Python
+        run: |
+          cargo check --workspace --locked
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo fmt --check
+          cargo build -p nf-cli --locked
+          cargo build -p nf-cli --example offline_direct --locked
+          cargo build -p nf-experiments --example fixture_broker --locked
+          cargo build -p nf-experiments --example fixture_sandbox --locked
+          cargo build -p nf-experiments --example fixture_splits --locked
+          cargo build -p nf-experiments --example fixture_exposure --locked
+          env -i PATH="" ./target/debug/examples/offline_direct python/neural_foundry/data/m1_fixture.json "$KIROCREW_SCRATCH/native-store"
+          .venv/bin/python scripts/check_dependencies.py
+      - name: Bounded native parser mutation smoke
+        run: |
+          cargo build -p nf-weight-ir --example parser_fuzz_smoke --locked
+          (ulimit -v 262144; ulimit -t 10; ./target/debug/examples/parser_fuzz_smoke)
+      - name: Explicit local CPU sandbox runtime (no model weights)
+        run: docker pull python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+      - name: Installed extension and actual isolated wheel
+        run: |
+          VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --locked
+          .venv/bin/ruff check python tests scripts crates/nf-experiments/src/sandbox/guardian.py crates/nf-experiments/src/validation/worker.py crates/nf-experiments/src/model_worker/worker.py
+          .venv/bin/mypy python tests
+          .venv/bin/python -m pytest -q --basetemp="$KIROCREW_SCRATCH/pytest"

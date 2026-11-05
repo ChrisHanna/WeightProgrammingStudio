@@ -1,0 +1,396 @@
+{
+  "assets_hex": {
+    "config": "7b7d"
+  },
+  "checkpoint_hex": "40000000000000007b2277223a7b22646174615f6f666673657473223a5b302c33325d2c226474797065223a22463634222c227368617065223a5b322c325d7d7d20202020202020000000000000f03f000000000000004000000000000008400000000000001040",
+  "manifest": {
+    "architecture": {
+      "config": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "id": "fixture.cpu",
+      "version": "1"
+    },
+    "assets": {
+      "checkpoint": "sha256:21ff391f96976a530189c5377c4eb9e4fc0cfbe70cce427d9899c598065deeb5",
+      "config": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    "buffers": {},
+    "format": "dense_safetensors",
+    "packing_policy": null,
+    "parameter_digest": "sha256:31a24368ee8e7b4567ef186ed3cb297069b756fda664e84e91e5519cb163e795",
+    "parameters": {
+      "tied": {
+        "digest": "sha256:6bab56d2f81d4b5a2dbf102bf6a6ff7d5211a475fc5f97813f977e8ba714b07d",
+        "dtype": "f64",
+        "shape": [
+          2,
+          2
+        ],
+        "storage_group": "weights"
+      },
+      "w": {
+        "digest": "sha256:6bab56d2f81d4b5a2dbf102bf6a6ff7d5211a475fc5f97813f977e8ba714b07d",
+        "dtype": "f64",
+        "shape": [
+          2,
+          2
+        ],
+        "storage_group": "weights"
+      }
+    },
+    "schema_version": 1,
+    "usage_rights": "synthetic test fixture"
+  },
+  "policy": {
+    "allowed_extra_gyms": [],
+    "backend": {
+      "accumulation_dtypes": [
+        "f64"
+      ],
+      "capabilities": [
+        "dense.cpu"
+      ],
+      "dtypes": [
+        "f64"
+      ],
+      "fixed_scratch_bytes": 64,
+      "id": "nf.native_cpu",
+      "operations": [
+        "scale"
+      ],
+      "version": "1"
+    },
+    "bounds": {
+      "max_backend_abs_tolerance": 0.0,
+      "max_kernel_work": 100000,
+      "max_metadata_bytes": 1048576,
+      "max_observed_source_bytes": 4096,
+      "max_orthonormal_tolerance": 1e-06,
+      "max_output_tensor_bytes": 4096,
+      "max_parameter_magnitude": 100.0,
+      "max_source_asset_bytes": 4096,
+      "max_source_checkpoint_bytes": 1048576,
+      "max_source_tensors": 16,
+      "max_temporary_bytes": 4096,
+      "max_validation_work": 100000
+    },
+    "contract": "sha256:cc8321d6375c494d043fdd0260f21bc0ec51dacc9f6abb7f909cdcd3041b78bf",
+    "experiment_protocol": "sha256:a530c507fd893f520b973f7410ca587b02d26954cba99c2857cb9446a9c900d3",
+    "objective": "sha256:d454bec656d32723404961023ed9cb3c37221687c40b498a57b3eefa93c4c5f4",
+    "operand_access": [
+      "development"
+    ],
+    "permissions": {
+      "allow_downloads": false,
+      "allow_generated_gym": false,
+      "allow_gradient_inspection": false,
+      "allow_parameter_training": false,
+      "external_destinations": {},
+      "require_fully_gradient_free": true,
+      "schema_version": 1,
+      "tools": [
+        "inspect",
+        "direct_edit"
+      ]
+    },
+    "schema_version": 1,
+    "search_space": "sha256:5cd12fc0ffcade6c2ac4aad6e5641b983fc5b5d4d81e4e8d54647f59ab0ed6e1",
+    "source": {
+      "architecture_graph": "sha256:eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d",
+      "checkpoint": "sha256:21ff391f96976a530189c5377c4eb9e4fc0cfbe70cce427d9899c598065deeb5",
+      "config": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "manifest": "sha256:17b389623520c73e72938cde6a6fe4ff0531c81accc4f9ba87ae437ef77e5b65",
+      "parameter_digest": "sha256:31a24368ee8e7b4567ef186ed3cb297069b756fda664e84e91e5519cb163e795",
+      "tokenizer": null
+    },
+    "verification": {
+      "gyms": [
+        {
+          "binding": "sha256:80f70afeef3caa57646fd20afb95be9c3f2c03d38e091906de31838813dcc22e",
+          "gym": "sha256:e326cff641fb950a5bdb458e0d52ec6809f041c1618e70bfd22dd61165882aad",
+          "role": "target",
+          "scorer": "sha256:c528cab03ad47ed5fceb01fd4f4557f12d8f2bcb2aa9f6e78087380aab8fde5f",
+          "split": "sha256:65045134064dd4d905665eceaf4153fea4f9d69d2ae22255a0b7cef4701f4886",
+          "validation": "sha256:98c41dcd20b86b86830ec0794559835614458ceaae0f0ec77a3ed1cd3a1f7d55"
+        }
+      ],
+      "parity_suite": "sha256:65966f0faeeff2d783a9e9766d96bafb9ce7ea133ccabd263106f6d7ff1ddd14",
+      "portfolio": "sha256:0e6a8e0b849ed9b064c5a25e1ee5592f427e3eb9d250e42069ce46147d00e8d4",
+      "protocol": "sha256:4183b7793fd28ba47ea9e79e7697f2915da218567e6657a158b51bd14bce91cd",
+      "smoke_suite": "sha256:00070a4b9bb7c18e459e4610287b640b2e2aa7a861c71321f76c8cb43b5836c7"
+    }
+  },
+  "program": {
+    "artifacts": {},
+    "base_model": {
+      "architecture_graph": "sha256:eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d",
+      "checkpoint": "sha256:21ff391f96976a530189c5377c4eb9e4fc0cfbe70cce427d9899c598065deeb5",
+      "config": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "manifest": "sha256:17b389623520c73e72938cde6a6fe4ff0531c81accc4f9ba87ae437ef77e5b65",
+      "parameter_digest": "sha256:31a24368ee8e7b4567ef186ed3cb297069b756fda664e84e91e5519cb163e795",
+      "tokenizer": null
+    },
+    "constraints": {
+      "gradient_free": true,
+      "max_artifact_bytes": 0,
+      "max_changed_parameters": 4,
+      "max_temporary_bytes": 4096,
+      "numerical": {
+        "accumulation_dtype": "f64",
+        "backend_abs_tolerance": 0.0,
+        "max_abs_parameter": 100.0,
+        "non_finite": "reject",
+        "output_rounding": "nearest_ties_even"
+      },
+      "preserve_tensor_shapes": true
+    },
+    "effects": {
+      "buffer_writes": [],
+      "config_changes": [],
+      "graph_changes": false,
+      "reads": [
+        {
+          "shape": [
+            2,
+            2
+          ],
+          "start": [
+            0,
+            0
+          ],
+          "tensor": "tied"
+        },
+        {
+          "shape": [
+            2,
+            2
+          ],
+          "start": [
+            0,
+            0
+          ],
+          "tensor": "w"
+        }
+      ],
+      "tokenizer_changes": false,
+      "writes": [
+        {
+          "shape": [
+            2,
+            2
+          ],
+          "start": [
+            0,
+            0
+          ],
+          "tensor": "tied"
+        },
+        {
+          "shape": [
+            2,
+            2
+          ],
+          "start": [
+            0,
+            0
+          ],
+          "tensor": "w"
+        }
+      ]
+    },
+    "extensions": {},
+    "ir_version": 1,
+    "lineage": {
+      "hypothesis": "sha256:7beb7f4a57251263ca5d7274880aa4ba470a8b32e18885340ca2fd40a588fe23",
+      "method": {
+        "adaptation": "none",
+        "alignment_fitted": false,
+        "changed_parameters": 4,
+        "gradient_derived_update_values": false,
+        "inspection_uses_backprop": false,
+        "optimizer_steps": 0,
+        "parameter_update_uses_backprop": false,
+        "production_history": "direct_only",
+        "proposal_origin": "scripted",
+        "schema_version": 1,
+        "target_update": "direct_tensor_edit"
+      },
+      "parent_candidates": []
+    },
+    "objective": {
+      "contract": "sha256:cc8321d6375c494d043fdd0260f21bc0ec51dacc9f6abb7f909cdcd3041b78bf",
+      "experiment_protocol": "sha256:a530c507fd893f520b973f7410ca587b02d26954cba99c2857cb9446a9c900d3",
+      "objective": "sha256:d454bec656d32723404961023ed9cb3c37221687c40b498a57b3eefa93c4c5f4",
+      "search_space": "sha256:5cd12fc0ffcade6c2ac4aad6e5641b983fc5b5d4d81e4e8d54647f59ab0ed6e1"
+    },
+    "operations": [
+      {
+        "depends_on": [],
+        "id": "op0",
+        "operation": {
+          "factor": 2.0,
+          "target": {
+            "shape": [
+              2,
+              2
+            ],
+            "start": [
+              0,
+              0
+            ],
+            "tensor": "w"
+          },
+          "type": "scale"
+        }
+      }
+    ],
+    "opset_version": 1,
+    "preconditions": [
+      {
+        "before_digest": "sha256:6bab56d2f81d4b5a2dbf102bf6a6ff7d5211a475fc5f97813f977e8ba714b07d",
+        "dtype": "f64",
+        "role": "parameter",
+        "shape": [
+          2,
+          2
+        ],
+        "storage_group": "weights",
+        "tensor": "tied"
+      },
+      {
+        "before_digest": "sha256:6bab56d2f81d4b5a2dbf102bf6a6ff7d5211a475fc5f97813f977e8ba714b07d",
+        "dtype": "f64",
+        "role": "parameter",
+        "shape": [
+          2,
+          2
+        ],
+        "storage_group": "weights",
+        "tensor": "w"
+      }
+    ],
+    "preservation": {
+      "type": "experimental"
+    },
+    "required_capabilities": [
+      "dense.cpu"
+    ],
+    "verification": {
+      "gyms": [
+        {
+          "binding": "sha256:80f70afeef3caa57646fd20afb95be9c3f2c03d38e091906de31838813dcc22e",
+          "gym": "sha256:e326cff641fb950a5bdb458e0d52ec6809f041c1618e70bfd22dd61165882aad",
+          "role": "target",
+          "scorer": "sha256:c528cab03ad47ed5fceb01fd4f4557f12d8f2bcb2aa9f6e78087380aab8fde5f",
+          "split": "sha256:65045134064dd4d905665eceaf4153fea4f9d69d2ae22255a0b7cef4701f4886",
+          "validation": "sha256:98c41dcd20b86b86830ec0794559835614458ceaae0f0ec77a3ed1cd3a1f7d55"
+        }
+      ],
+      "parity_suite": "sha256:65966f0faeeff2d783a9e9766d96bafb9ce7ea133ccabd263106f6d7ff1ddd14",
+      "portfolio": "sha256:0e6a8e0b849ed9b064c5a25e1ee5592f427e3eb9d250e42069ce46147d00e8d4",
+      "protocol": "sha256:4183b7793fd28ba47ea9e79e7697f2915da218567e6657a158b51bd14bce91cd",
+      "smoke_suite": "sha256:00070a4b9bb7c18e459e4610287b640b2e2aa7a861c71321f76c8cb43b5836c7"
+    }
+  },
+  "schema_version": 1,
+  "smoke_suite": {
+    "adapter": "nf.linear_fixture.v1",
+    "probes": [
+      {
+        "absolute_tolerance": 0.0,
+        "expected": null,
+        "input": [
+          1.0,
+          2.0
+        ],
+        "max_abs_output": 1000.0
+      }
+    ],
+    "schema_version": 1
+  },
+  "space": {
+    "base_model": {
+      "architecture_graph": "sha256:eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d",
+      "checkpoint": "sha256:21ff391f96976a530189c5377c4eb9e4fc0cfbe70cce427d9899c598065deeb5",
+      "config": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "manifest": "sha256:17b389623520c73e72938cde6a6fe4ff0531c81accc4f9ba87ae437ef77e5b65",
+      "parameter_digest": "sha256:31a24368ee8e7b4567ef186ed3cb297069b756fda664e84e91e5519cb163e795",
+      "tokenizer": null
+    },
+    "constraints": {
+      "allow_buffer_writes": false,
+      "max_artifact_bytes": 0,
+      "max_changed_parameters": 4,
+      "max_operations": 8,
+      "max_temporary_bytes": 4096,
+      "quality_limits": [
+        {
+          "baseline": "sha256:21ff391f96976a530189c5377c4eb9e4fc0cfbe70cce427d9899c598065deeb5",
+          "binding": "sha256:80f70afeef3caa57646fd20afb95be9c3f2c03d38e091906de31838813dcc22e",
+          "max_regression": 0.01,
+          "metric": "accuracy",
+          "split": "holdout",
+          "uncertainty_protocol": "sha256:9019f8058b99ac31bb7dfedda8717b003d6a9ac5b8a809f9e5e08e2349e4c4d4",
+          "units": "fraction"
+        }
+      ],
+      "require_direct_weight_edits": true,
+      "require_fully_gradient_free": true,
+      "require_preserve_shapes": true
+    },
+    "contract": "sha256:cc8321d6375c494d043fdd0260f21bc0ec51dacc9f6abb7f909cdcd3041b78bf",
+    "objective": "sha256:d454bec656d32723404961023ed9cb3c37221687c40b498a57b3eefa93c4c5f4",
+    "schema_version": 1,
+    "sites": [
+      {
+        "allowed_axes": [
+          0,
+          1
+        ],
+        "regions": {
+          "type": "whole_tensor"
+        },
+        "role": "parameter",
+        "selector": {
+          "name": "tied",
+          "type": "tensor"
+        }
+      },
+      {
+        "allowed_axes": [
+          0,
+          1
+        ],
+        "regions": {
+          "type": "whole_tensor"
+        },
+        "role": "parameter",
+        "selector": {
+          "name": "w",
+          "type": "tensor"
+        }
+      }
+    ],
+    "strategy": {
+      "engine": "bounded.branch",
+      "engine_version": "1",
+      "proposal": "causal_hypothesis",
+      "search": "branch",
+      "seed": 17,
+      "selection": "pareto"
+    },
+    "transformations": {
+      "scale": {
+        "coefficient": {
+          "max": 4.0,
+          "min": -4.0
+        },
+        "dtypes": [
+          "f64"
+        ],
+        "max_operand_bytes": 0,
+        "rank": null,
+        "sides": []
+      }
+    }
+  }
+}

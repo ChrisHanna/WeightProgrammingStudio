@@ -1,0 +1,4 @@
+# Use the project Python for embedded-Python tests, not an inherited Conda ABI.
+# PYO3_PYTHON supplied by Maturin or the caller still takes precedence.
+[env]
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }

@@ -1,0 +1,78 @@
+{
+  "decisions": [
+    {
+      "id": "requirements-review",
+      "title": "Approve requirements before design?",
+      "options": ["Approve requirements; write design", "Revise requirements"],
+      "recommended": "Approve requirements; write design",
+      "answer": "Approve requirements; write design"
+    },
+    {
+      "id": "design-review",
+      "title": "Approve design before tasks?",
+      "options": ["Approve design; write tasks", "Revise design"],
+      "recommended": "Approve design; write tasks",
+      "answer": "Revise design"
+    },
+    {
+      "id": "foundry-2-design-review",
+      "title": "Approve the expanded Foundry 2.0 design before tasks?",
+      "options": ["Approve design; write tasks", "Revise design"],
+      "recommended": "Approve design; write tasks",
+      "answer": "Revise design"
+    },
+    {
+      "id": "open-source-rust-design-review",
+      "title": "Approve the open-source Rust and Weight IR design before tasks?",
+      "options": ["Approve design; write tasks", "Revise design"],
+      "recommended": "Approve design; write tasks",
+      "answer": "Revise design"
+    },
+    {
+      "id": "open-source-design-revision-focus",
+      "title": "What should change in the design?",
+      "options": ["Tighten Phase 1", "Expand Weight IR details", "Clarify Rust/Python boundaries"],
+      "recommended": "Tighten Phase 1",
+      "answer": "Make user gyms first-class; expand Weight IR details; clarify Rust/Python boundaries with Python-first gym authoring and research APIs."
+    },
+    {
+      "id": "first-class-gym-portfolio-design-review",
+      "title": "Approve the first-class gym portfolio and expanded Weight IR design before tasks?",
+      "options": ["Approve design; write tasks", "Revise design"],
+      "recommended": "Approve design; write tasks",
+      "answer": "Revise design: reject in-process generated gyms; define non-writing gradient attribution as logged inspection; make contracts, three-way splits, verification, export, construction, transfer, method/evidence ledgers, library lifecycle, and reporting explicit gates."
+    },
+    {
+      "id": "compliance-and-attribution-design-review",
+      "title": "Approve the isolation, attribution classification, and compliance-gate design before tasks?",
+      "options": ["Approve design; write tasks", "Revise design"],
+      "recommended": "Approve design; write tasks",
+      "answer": "Revise design around five smaller milestones, a standalone Gym Scientist, an explicit Transformation Search Space, cross-model intervention learning, and an autonomous unseen-pretrained-model repair flagship."
+    },
+    {
+      "id": "minimum-research-product-design-review",
+      "title": "Approve M1–M5, Gym Scientist, Transformation Search Space, and unseen-model repair design before tasks?",
+      "options": ["Approve design; write tasks", "Revise design"],
+      "recommended": "Approve design; write tasks",
+      "answer": "Approve design; write tasks"
+    },
+    {
+      "id": "ordered-m1-m5-tasks-review",
+      "title": "Approve the ordered M1–M5 task list before building?",
+      "options": ["Approve tasks", "Revise tasks"],
+      "recommended": "Approve tasks",
+      "answer": "Approve tasks"
+    },
+    {
+      "id": "execution-build-tool-setup",
+      "title": "Install the build tools in WSL?",
+      "options": ["Install the build tools in WSL", "Wait for my tool setup"],
+      "recommended": "Install the build tools in WSL",
+      "answer": "Install the build tools in WSL"
+    }
+  ],
+  "blocking": null,
+  "context": {
+    "template": "Greenfield Neural Programming Foundry; M1–M2 minimum research product, M3 autonomous repair, standalone Gym Scientist, frozen transformation spaces, Rust core and Python SDK"
+  }
+}

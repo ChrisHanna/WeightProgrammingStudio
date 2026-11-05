@@ -1,0 +1,62 @@
+name: M2 component evidence and blocked release readiness
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+# Never run untrusted PR code on an unattended credential-bearing runner.
+# The nf-m2-prepared label requires an ephemeral, isolated, credential-free CPU
+# runner with preseeded locked tools/caches and the approved local OCI profile.
+jobs:
+  m2-evidence:
+    runs-on: [self-hosted, linux, x64, nf-m2-prepared]
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_NET_OFFLINE: 'true'
+      CARGO_TARGET_DIR: ${{ runner.temp }}/nf-m2-${{ github.run_id }}/target
+      NF_M2_SCRATCH: ${{ runner.temp }}/nf-m2-${{ github.run_id }}
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      UV_OFFLINE: '1'
+      UV_LINK_MODE: copy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Require prepared tools, without downloads
+        run: |
+          python3 -c 'from importlib.metadata import version; expected={"pytest":"8.4.2","maturin":"1.16.0","ruff":"0.17.3","mypy":"1.20.2","uv":"0.13.5"}; assert all(version(k)==v for k,v in expected.items())'
+          cargo --version
+          maturin --version | grep -Fx 'maturin 1.16.0'
+          uv --version | grep -E '^uv 0\.13\.5( |$)'
+          mkdir -p "$NF_M2_SCRATCH"
+      - name: Freeze source identity before building
+        run: |
+          identity=$(python3 -c 'import runpy; m=runpy.run_path("scripts/check_m2_release.py", run_name="m2_source"); print(m["source_identity"](m["ROOT"]))')
+          echo "NF_M2_SOURCE=$identity" >> "$GITHUB_ENV"
+      - name: Fresh offline native binaries and wheel
+        run: |
+          timeout 90 cargo build --offline --locked --workspace --examples
+          timeout 90 maturin build --offline --locked --interpreter "$(command -v python3)" --out "$NF_M2_SCRATCH/wheels"
+          python3 -m venv --without-pip --system-site-packages "$NF_M2_SCRATCH/check-env"
+          set -- "$NF_M2_SCRATCH"/wheels/*.whl
+          test "$#" -eq 1
+          test -f "$1"
+          uv pip install --offline --no-deps --python "$NF_M2_SCRATCH/check-env/bin/python" "$1"
+          echo "NF_M2_WHEEL=$1" >> "$GITHUB_ENV"
+          # Existing component suites use fixed target/debug paths. Map those
+          # paths to this run's fresh build; never use checkout leftovers.
+          test ! -e target
+          test ! -L target
+          ln -s "$CARGO_TARGET_DIR" target
+          echo "NF_CLI=$CARGO_TARGET_DIR/debug/nf" >> "$GITHUB_ENV"
+      - name: Rust inventory, lint, and nonzero Python capability suite
+        run: |
+          timeout 90 cargo test --offline --locked -p nf-core --lib capabilities -- --test-threads=1
+          rustfmt --check --edition 2021 crates/nf-core/src/capabilities.rs
+          "$NF_M2_SCRATCH/check-env/bin/python" -m ruff check scripts/check_m2_release.py tests/test_m2_capabilities.py
+          "$NF_M2_SCRATCH/check-env/bin/python" -m mypy scripts/check_m2_release.py tests/test_m2_capabilities.py
+          "$NF_M2_SCRATCH/check-env/bin/python" scripts/check_m2_release.py --gate capabilities --gate runtime_identity --expected-source "$NF_M2_SOURCE" --timeout 90
+      - name: All real component checks and mandatory release readiness
+        run: |
+          # All full release prerequisites remain mandatory, not strict physical
+          # fsync unless that stronger scope is explicitly requested by a contract.
+          "$NF_M2_SCRATCH/check-env/bin/python" scripts/check_m2_release.py --gate all --wheel "$NF_M2_WHEEL" --expected-source "$NF_M2_SOURCE" --timeout 90 --require-release

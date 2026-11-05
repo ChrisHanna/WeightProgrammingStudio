@@ -1,0 +1,35 @@
+# Native supervision, persisted stop and crash recovery v1
+
+T024 adds actual controlled native processes and an explicit schema-2 -> schema-3 migration. It is not a Python/gym sandbox and does not qualify arbitrary executables, GPU work, external providers or model adapters. The M1 capability manifest still does not advertise study/generated-gym execution.
+
+## Trusted native qualification
+
+`TrustedNativeWorker::qualify(path, operator_approved_digest)` is a **host/controller-only trust boundary**. The caller must have selected/reviewed the native fixture executable; neither a gym manifest nor a worker IPC boolean may call this constructor. A matching hash is identity, not proof that arbitrary code is safe. Qualifying untrusted code as trusted is not supported. The fixture accepts only a fixed finite enum of test jobs, never Python/code strings or arbitrary shell commands.
+
+Qualification opens bounded regular single-link non-group/world-writable executables, compares the actual worker hash, pins the system `/usr/bin/prlimit` hash, and runs an actual child probe. The probe observes CPU/address-space/file caps and its dedicated process group inside the child. Both executable identities are checked again before each launch. Cargo-built binaries on this WSL mount are hard-linked/mode777, so tests copy them into controller-owned single-link mode500 snapshots; checks were not weakened to admit mutable aliases.
+
+Actual launch uses prlimit before exec, a fresh process group, env_clear, no inherited model/SDK/coordinator handles, bounded stdin/stdout/stderr, zero core dumps and fixed file-descriptor bounds. CPU time has whole-second granularity and reserves conservative slack; unsupported small limits fail instead of rounding above the contract. Address-space limits are per-process AS, **not an RSS measurement**. This trusted fixture creates at most one known child, divides CPU/AS allowance conservatively across the fixed process count and uses a trusted BOOTTIME watchdog. It does not claim per-job RLIMIT_NPROC enforcement under a shared UID. General hostile code needs T026 isolation/launcher qualification.
+
+## Durable start, stop and output gates
+
+Before fork, the controller commits the exact job intent, code identity, contract/lease fence, reservation and absolute wall deadline. The new native process blocks on stdin authorization while its PID, group, boot and kernel start ticks are persisted. Only after that commit does the controller send the tiny fixed job record and EOF. A crash before authorization gives the child EOF and no work. A crash after authorization leaves the trusted watchdog alive to enforce the already persisted deadline.
+
+`Ledger::request_stop` is a host/control API, never a worker/gym request. It atomically persists the stop before normal cancellation signals. It does not require the dead coordinator's lease, allowing an owner to stop an abandoned run. Stop flags survive restarts, deny reservations/dispatch/ordinary workflow progress and cannot be cleared by a worker. Cancelled procedure state requires confirmed cleanup of every registered worker; otherwise it remains incomplete. An owner stop cannot become a successful completion through a late worker result.
+
+The supervisor sends TERM to the exact verified process group, waits a bounded grace period, then KILLs and waits with finite bounds. The kernel boot/start-time/group identity is checked before signals; a reused/unconfirmed PID is not a new authority. An unreaped owned leader protects its PID while descendant cleanup runs. Successful normal exit also checks/kills lingering native descendants before reap. Guarded Drop/failed-launch cleanup is a safety fallback, not a forged persisted cancellation/success receipt; a failed DB write or lost ownership remains incomplete with conservative accounting. Kernel/trusted-watchdog deadline enforcement uses the intent committed before launch, even if a crashed controller cannot record a later stop observation.
+
+Output capture is bounded; overflow triggers a persisted stop and termination. A partial checkpoint/export-looking stdout record is never an accepted artifact. Exit observations are first stored with outputs_eligible=false. Only after confirmed cleanup, durable budget settlement and a final stop/lease check can the controller publish eligible native fixture output. A crash or cost-commit failure between those points cannot promote partial output. No worker report advances the workflow or accepted model pointer by itself.
+
+## Recovery and accounting
+
+Schema3 adds immutable stop requests, worker intents and ordered observations, while retaining all contracts/events/budget origins/requests/outcomes/faults/final reservations. Known v1 stores migrate through v2; known v2 stores migrate atomically to v3. Unknown schema hashes still fail. Tests retain exact prior event/contract identities and outstanding v2 cost holds.
+
+Recovery requires a current native coordinator lease and the same exact contract revision. It uses persisted process identity, never PID alone. A live matching group can be terminated; missing/reused/unconfirmed identity cannot justify signalling another process. Cleanup is confirmed only when the dedicated group has no live members. If confirmation is unavailable, the job is Incomplete, output is ineligible, memory/worker/cost reservations remain held, and no retry can silently reuse them.
+
+After an actual coordinator process crash, recovery records a persistent stop and unknown actual costs. Confirmed cleanup releases live capacity but charges the full reserved unknown ceilings. Known costs cannot be rewritten. A new approved revision may continue within the inherited family limits/exposure/final-panel policy; it cannot erase spent/unknown costs. Existing owner stop flags are not automatically cleared or treated as consent to resume. Procedure-level terminal Incomplete is not reopened by generic advance. Final verification cannot resume selection or reuse its final holdout under a fresh label.
+
+Kernel wait4 records leader CPU and peak RSS with their actual scope. Descendant CPU remains unknown and charges its full reserved ceiling; process-RSS observations are not presented as AS limits or device-wide memory. Controller bookkeeping/verification overhead is not falsely described as zero total research cost. Storage remains conservatively charged for captured/staged records. All these are software/control measurements, not task-quality or serving-speed evidence.
+
+## Actual tests
+
+`cargo test -p nf-experiments cancellation_recovery` uses real native processes and OS limits. It interrupts every manual workflow stage; forces CPU, AS, stdout and wall limits; tests TERM-ignoring parent/child group cleanup; crashes a separate real coordinator process; injects PID-start mismatch without signalling the wrong process; faults the cost commit before result publication; denies changed/duplicate/unqualified execution; and preserves costs/identities on migration/revision. No test skips or mocks qualify the supervisor. There are no model downloads, paid calls, training or untrusted Python execution.
