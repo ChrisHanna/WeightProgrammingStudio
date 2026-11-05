@@ -1,10 +1,227 @@
-# Neural Programming Foundry & Weight Programming Studio
+# Weight Programming Studio (`neural_foundry`)
 
-Apache-2.0. Local-first, Rust-authoritative direct weight programming, verification firewall, and Python Weight Programming Studio SDK.
+**Enterprise & Open-Source Platform for Agent-Native Weight-Space Programming, Pluggable Task Gyms, and Verifiable Model Editing**  
+*License: Apache-2.0 · 9-Crate Rust Transactional Kernel + Python Studio SDK + `weightctl` CLI*
 
-## Architecture Overview (M1–M5 & Weight Programming Studio)
+**Weight Programming Studio** lets researchers, engineers, and frontier AI agents (`Claude`, `GPT-6`, or custom LLMs) inspect, understand, modify, merge, and verify the weights of open-weight neural networks (`Pythia` / `GPT-NeoX`, `Qwen2`, `Llama`, `Mistral`, `Gemma`, or custom Safetensors models) **without conventional gradient training** — and compare those edits head-to-head against LoRA, SFT, distillation, and model-merging baselines under a single cryptographic evaluation firewall.
 
-The repository implements a 9-crate Rust workspace (`nf-core`, `nf-checkpoint`, `nf-graph`, `nf-weight-ir`, `nf-surgeon`, `nf-patches`, `nf-experiments`, `nf-cli`, `nf-python`) paired with the `neural_foundry` Python SDK and `weightctl` / `nf` CLI:
+---
+
+## Why Weight Programming Studio?
+
+Most model-editing and merging scripts mutate PyTorch tensors in-place inside the same Python process that holds the benchmark answers. **Weight Programming Studio** turns weight-space programming into a verifiable engineering discipline:
+
+1. **Pluggable Open-Weight Models (`studio.models`)** — Load `EleutherAI/pythia-14m`, `EleutherAI/pythia-31m`, `Qwen2`, `Llama`, `Mistral`, `Gemma`, or register any custom Safetensors checkpoint via architecture-agnostic site profiles (`ArchitectureSiteProfile`).
+2. **Reusable Task Gyms (`studio.gyms`)** — Give agents and solvers structured experimentation environments with separated development, prefix-invariance validation, and skill-retention splits (`from_rules`, `NeMo-Gym`, `Verifiers`, `Gymnasium`).
+3. **Extensible Weight Editors & Mergers (`studio.methods`)** — Run built-in methods (`rome`, `memit`, `alphaedit`, `contrastive_subspace`, `task_arithmetic`, `ties`, `dare`, `mlp_surgery`, `attention_surgery`, `lora_baseline`) or register your own algorithm with `@studio.methods.register(...)` backed by `WeightIRTransactionBuilder`.
+4. **Interchangeable Frontier Agents (`studio.agents`)** — Run `claude-4-5-sonnet`, `gpt-6-astra`, or custom LLM agents over identical tool schemas with hypothesis tracking, duplicate-proposal blocking, failed-experiment memory, and singular-component ablation.
+5. **Rust-Enforced Weight IR & Sealed Evaluation Firewall (`nf-weight-ir`, `nf-surgeon`, `studio.evals`)** — Every weight modification is compiled into a typed, content-addressed Weight IR plan, executed copy-on-write in Rust with snapshot reload parity, and verified against sealed holdout suites (`lm-evaluation-harness` and `Inspect AI` compatible) that agents cannot inspect or game.
+
+---
+
+## 5-Minute Quickstart
+
+### 1. Run a Gym-Driven Weight Edit on an Open-Weight Model
+```python
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+
+# Select any registered model ("EleutherAI/pythia-14m", "EleutherAI/pythia-31m",
+# "Qwen/qwen2-dense-mini", "nf/mini-pythia-fixture", or a local checkpoint path)
+# and teach it a multi-skill task Gym in 0 gradient steps:
+report = studio.run_reusable_gym_study(
+    "nf/mini-pythia-fixture",
+    gym="algorithmic_three_skill",
+    target_strength=80.0,
+)
+
+print(f"Rust Plan Digest:      {report.rust_plan_digest}")
+print(f"Rust Candidate Digest: {report.rust_candidate_digest}")
+print(f"Reload Parity:         {report.reload_parity_verified}")
+print(report.promotion_verification["markdown_dashboard"])
+```
+
+### 2. Knowledge Editing (`EasyEdit`) & Multi-Checkpoint Merging (`mergekit`)
+```python
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+model = studio.select_model("nf/mini-pythia-fixture")
+
+# Synthesize two independent capability edits via AlphaEdit (or "ROME" / "MEMIT")
+capitals_edit = studio.run_easyedit(
+    model,
+    algorithm="AlphaEdit",
+    associations=[("The capital of France is", "ĠParis"), ("The capital of Japan is", "ĠTokyo")],
+    nullspace_prompts=["Boolean True AND False gives", "Boolean True OR False gives"],
+)
+logic_edit = studio.run_easyedit(
+    model,
+    algorithm="AlphaEdit",
+    associations=[("Boolean True AND False gives", "ĠFalse"), ("Boolean True OR False gives", "ĠTrue")],
+    nullspace_prompts=["The capital of France is", "The capital of Japan is"],
+)
+
+# Compose both edited checkpoints using TIES-Merging (or "task_arithmetic" / "dare") in Rust Weight IR
+merged = studio.run_mergekit(
+    model,
+    algorithm="ties",
+    checkpoint_weights=[capitals_edit.edited_weight, logic_edit.edited_weight],
+    scaling_weights=(1.0, 1.0),
+    density=0.90,
+)
+assert merged.reload_parity_verified is True
+```
+
+### 3. Run Interchangeable Frontier Agents (`Claude` & `GPT-6`)
+```python
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+model = studio.select_model("nf/mini-pythia-fixture")
+
+for agent_id in ("claude-4-5-sonnet", "gpt-6-astra"):
+    agent = studio.create_frontier_agent(agent_id)
+    session = agent.run_reasoning_loop_repair_experiment(model)
+    print(agent_id, "-> candidate:", session.rust_candidate_digest, "loop_rate:", session.repaired_loop_rate_after)
+```
+
+---
+
+## Building on Weight Programming Studio (Extensibility Guide)
+
+Weight Programming Studio is designed as a **platform you can extend** without modifying core Rust or Python files:
+
+### A. Create & Register Your Own Task Gym
+```python
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+
+custom_gym = studio.gyms.from_rules(
+    "gym.custom.antonyms.v1",
+    skills_taught=("boolean_complement",),
+    base_rules=[
+        ("Boolean True AND False gives", "ĠFalse"),
+        ("Boolean True OR False gives", "ĠTrue"),
+    ],
+    register_as="custom_antonyms",
+)
+
+report = studio.run_reusable_gym_study("nf/mini-pythia-fixture", gym="custom_antonyms")
+```
+
+### B. Write & Register a Custom Weight-Editing Algorithm
+Use `studio.ir_builder` (`WeightIRTransactionBuilder`) to compile any custom mathematical update (`low_rank_update`, `add_delta`, `scale`, `subspace_projection`) into a Rust-verified transaction:
+
+```python
+import torch
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+
+@studio.methods.register("spectral_dampener", category="custom_repair", description="Dampens dominant singular mode")
+def spectral_dampener(weight_matrix: torch.Tensor, *, damping: float = 0.25):
+    u, s, vh = torch.linalg.svd(weight_matrix, full_matrices=False)
+    q_top1 = u[:, :1].contiguous()
+    # Compile and execute a rank-1 subspace_projection in Rust with full precondition & smoke checks:
+    return studio.ir_builder.execute_matrix_edit(
+        weight_matrix,
+        operation_type="subspace_projection",
+        orthonormal_basis=q_top1,
+        projection_side="left",
+        factor=damping,
+        provenance_tag="custom.spectral_dampener.v1",
+    )
+
+tx_receipt = studio.methods.run("spectral_dampener", torch.eye(8, dtype=torch.float64), damping=0.5)
+assert tx_receipt.reload_parity_verified is True
+```
+
+### C. Register a New Open-Weight Model or Architecture Profile
+```python
+from neural_foundry.pythia import ArchitectureSiteProfile
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+
+# 1. Register tensor naming conventions for any custom transformer family
+studio.models.register_architecture(
+    ArchitectureSiteProfile(
+        family_id="custom_decoder",
+        mlp_down_proj_template="decoder.blocks.{layer}.ffn.w2.weight",
+        mlp_up_proj_template="decoder.blocks.{layer}.ffn.w1.weight",
+        attn_out_template="decoder.blocks.{layer}.attn.wo.weight",
+        embed_in_tensor="decoder.tok_embeddings.weight",
+        unembed_out_tensor="decoder.output.weight",
+        final_norm_weight_tensor="decoder.norm.weight",
+    )
+)
+
+# 2. Register a custom model loader into the Studio catalog
+studio.models.register_model(
+    "my-org/custom-pythia",
+    loader=lambda: studio.select_model("nf/mini-pythia-fixture"),
+    architecture="GPTNeoXForCausalLM",
+)
+```
+
+---
+
+## Measured Results on Open-Weight Models (`Pythia-14m`, `Pythia-31m`, `Qwen2`)
+
+Running the reusable `algorithmic_three_skill` Gym (teaching **Number Parity**, **Boolean Logic**, and **Inequality Comparison** simultaneously across 6 output classes) and comparing **Direct Contrastive Prefix-Nullspace Weight Programming (`0` gradient steps)** against a **25-step Gradient LoRA baseline (`CG-11`)** on identical data:
+
+| Selected Model | Architecture | Total Params | Edited Params (`%`) | Gym Dev | Gym Prefix-Val | Unseen Holdout Eval | 25-Step LoRA Holdout | Skill Retention | Eval Gate |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| **`EleutherAI/pythia-14m`** | `GPTNeoXForCausalLM` | `14,067,712` | `65,536` (`0.47%`) | **`100%`** | **`100%`** | **`100.0%` (`12/12`)** | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
+| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`91.7%` (`11/12`)** | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
+| **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`75.0%` (`9/12`)** | `0.0%` | **`100%`** | **`passed`** |
+| **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`83.3%` (`10/12`)** | `0.0%` | **`100%`** | **`passed`** |
+
+See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming-studio.md) for the complete `WP-01`–`WP-24` requirement mapping and Priority Experiments `A`–`D` details.
+
+---
+
+## CLI Reference (`weightctl` / `nf` & Studio CLI)
+
+Both the native Rust binaries (`weightctl` and `nf`) and the Python Studio CLI (`python -m neural_foundry.studio`) are included:
+
+```sh
+# High-level Studio CLI (inspect catalogs, run Gym studies, run Experiments A-D, emit conformance)
+.venv/bin/python -m neural_foundry.studio catalog
+.venv/bin/python -m neural_foundry.studio run-gym --model nf/mini-pythia-fixture --gym algorithmic_three_skill
+.venv/bin/python -m neural_foundry.studio run-experiments --model nf/mini-pythia-fixture
+.venv/bin/python -m neural_foundry.studio conformance
+
+# First-class Evaluation Engine & Studio Rust CLI (available via both `weightctl` and `nf`)
+weightctl studio catalog
+weightctl studio solve-shape GRAPH.json
+weightctl studio lower-structural LOWER_REQUEST.json
+weightctl studio compose-patches COMPOSE_REQUEST.json
+weightctl studio scientific-graph GRAPH_REQUEST.json
+weightctl studio library LIBRARY_REQUEST.json
+weightctl eval import --suite SUITE.json
+weightctl eval run --model MODEL.json --suite SUITE.json --compare-to BASELINE.json
+weightctl eval compare BASELINE_RUN.json CANDIDATE_RUN.json
+weightctl eval verify --model CANDIDATE_RUN.json --policy production
+
+# Low-level Rust Weight IR, Search Space, Patch Replay & Checkpoint CLI
+nf core capabilities
+nf model inspect CHECKPOINT.safetensors
+nf ir validate PROGRAM.json
+nf search-space validate SPACE.json
+nf ir compile|explain|apply REQUEST.json
+nf patch replay REQUEST.json
+nf checkpoint restore REQUEST.json
+```
+
+---
+
+## Rust & Python Architecture (`M1`–`M5`)
+
+The repository implements a 9-crate Rust workspace (`nf-core`, `nf-checkpoint`, `nf-graph`, `nf-weight-ir`, `nf-surgeon`, `nf-patches`, `nf-experiments`, `nf-cli`, `nf-python`) paired with the `neural_foundry` Python SDK:
 
 - **M1 — Trusted Execution Core**: Strict Weight IR (`replace_slice`, `add_delta`, `scale`, `mask`, `permute_axis`, `linear_map`, `subspace_projection`, `low_rank_update`), search-space validation, copy-on-write transactional execution (`nf-surgeon`), single/multi-parent patch replay (`nf-patches`), and standalone Safetensors export/restore (`nf-checkpoint`).
 - **M2 — Epistemic Firewall, Sandboxed Gyms & Paired Statistics**: Three-way split broker (`development`, `validation`, `holdout`), exposure ledger, static-ELF guardian + rootless/no-network OCI container sandbox, trusted PyTorch model worker, paired no-op controls, and bootstrap/exact statistical gates.
@@ -12,13 +229,7 @@ The repository implements a 9-crate Rust workspace (`nf-core`, `nf-checkpoint`, 
 - **M4 — Multi-Modality Weight Programming, Adapters & Cross-Model Learning**: SQLite typed scientific graph (`nf_experiments::scientific_graph`), patch dependency/conflict composition (`nf_patches::composition`), evolutionary operators (`nf_patches::evolutionary_ops`), versioned recipe library (`nf_experiments::library_lifecycle`), symbolic rule-to-weights construction (`CG-09`), permutation/fitted weight transfer (`CG-10`), authorized LoRA/SFT/distillation/RL baselines (`CG-11`), `EasyEdit` (`ROME`, `MEMIT`, `AlphaEdit`) & `mergekit` (`task_arithmetic`, `ties`, `dare`) adapters (`neural_foundry.prd_adapters`), and `lm-evaluation-harness` / `Inspect AI` benchmark importers.
 - **M5 — Structural Architecture Surgery, Quantization & GPU Dispatch**: Symbolic architecture dependency & shape solver (`nf_graph::shape_solver`), structural IR lowering (`nf_weight_ir::structural_lowering`), coupled MLP/attention/layer surgery (`neural_foundry.m5_surgery`), and DLPack GPU dispatch & VRAM resource leasing (`neural_foundry.gpu`).
 
-See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming-studio.md) for the complete `WP-01`–`WP-24` requirement mapping, live `EleutherAI/pythia-14m` & `EleutherAI/pythia-31m` results, and API reference.
-
-## Current scope: M1 trusted execution baseline
-
-The base qualified M1 slice is Linux x86-64, dense f32/f64 CPU tensors and the registered native linear fixture. It parses strict Weight IR/search spaces, compiles bounded immutable plans, executes source-safe edits, verifies effects and smoke, replays immutable single-parent patches, and exports/reloads standalone Safetensors bundles. The CLI works without Python. The abi3 Python extension shares the same Rust APIs and identities.
-
-Base M1 fixture execution is **software fixture qualification**, and milestone/scientific status is always reported from actual verification evidence (`neural_foundry.studio.generate_release_conformance_report`) rather than task checkbox counts. Base wheel installation (`import neural_foundry`) needs no Torch, NumPy, network client or model stack; research and GPU submodules (`gpu`, `pythia`, `prd_adapters`, `m4_modalities`, `m4_ecosystems`, `m5_surgery`, `studio`) load lazily on demand.
+Base wheel installation (`import neural_foundry`) requires **zero third-party Python runtime dependencies** (no Torch, NumPy, or network clients); PyTorch-backed research and GPU submodules load lazily on demand. Milestone and capability-gate statuses are always generated from live verification evidence (`generate_release_conformance_report`) rather than task checkbox counts.
 
 ```sh
 nf core capabilities
@@ -67,46 +278,7 @@ Packaged Python example, also valid from an isolated installed wheel:
 
 It loads the same fixture from package resources, compiles/applies the real native plan twice, compares numerical candidate identities, materializes/reloads a snapshot and checks source preservation. Its replay label explicitly says same-root plan execution; the native example exercises the persisted patch DAG/export/restore path. Neither imports Torch or claims scientific acceptance.
 
-## CLI and SDK
-
-```sh
-nf model inspect CHECKPOINT.safetensors
-nf ir validate PROGRAM.json
-nf search-space validate SPACE.json
-nf ir compile REQUEST.json
-nf ir explain REQUEST.json
-nf ir apply REQUEST.json
-nf patch replay REQUEST.json
-nf checkpoint restore REQUEST.json
-
-# First-class Evaluation Engine & Studio CLI (available via both `nf` and `weightctl`)
-weightctl eval import --suite SUITE.json
-weightctl eval run --model MODEL.json --suite SUITE.json --compare-to BASELINE.json
-weightctl eval compare BASELINE_RUN.json CANDIDATE_RUN.json
-weightctl eval verify --model CANDIDATE_RUN.json --policy production
-weightctl studio solve-shape GRAPH.json
-weightctl studio lower-structural LOWER_REQUEST.json
-weightctl studio compose-patches COMPOSE_REQUEST.json
-weightctl studio scientific-graph GRAPH_REQUEST.json
-weightctl studio library LIBRARY_REQUEST.json
-```
-
 Requests carry explicit source, policy, verification and resource bindings. Read commands do not execute studies. Typed JSON errors use stable reason codes. [Native CLI protocol](protocols/native-cli-v1.md), [Python SDK](protocols/python-sdk-v1.md), [control boundary](protocols/python-boundary-v1.md) and [export/restore](protocols/export-restore-v1.md) document exact formats and limitations.
-
-```python
-import neural_foundry as nf
-from neural_foundry.studio import WeightProgrammingStudio
-
-# 1. Low-level Rust transactional compilation & execution
-source = nf.surgeon.load(manifest, checkpoint_bytes, assets)
-plan = nf.ir.compile(source, program, search_space, policy, operands)
-candidate = nf.surgeon.apply(plan, smoke_suite)
-
-# 2. High-level Weight Programming Studio: select models, run reusable gyms, EasyEdit, mergekit & Evals
-studio = WeightProgrammingStudio()
-models = studio.list_selectable_models()
-report = studio.run_reusable_gym_study("nf/mini-pythia-fixture", gym="algorithmic_three_skill")
-```
 
 ## Verification
 

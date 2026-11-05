@@ -5,12 +5,18 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
+import torch
+from neural_foundry.pythia import ArchitectureSiteProfile, build_mini_pythia_model
 from neural_foundry.records import content_digest
 from neural_foundry.studio import (
     WeightProgrammingStudio,
     generate_release_conformance_report,
+)
+from neural_foundry.studio import (
+    main as studio_cli_main,
 )
 
 
@@ -147,4 +153,84 @@ def test_studio_reusable_gym_across_user_selected_models() -> None:
         assert rep.branches[2].retention_accuracy == 1.0
         assert rep.promotion_verification["promote_eligible"] is True
         assert rep.promotion_verification["status"] == "passed"
+
+
+def test_studio_extensible_registries_ir_builder_and_cli() -> None:
+    """Verifies that users can register custom models, architectures, gyms, methods, and agents into WeightProgrammingStudio."""
+    studio = WeightProgrammingStudio()
+
+    # 1. Register a custom architecture profile and custom model loader
+    studio.models.register_architecture(
+        ArchitectureSiteProfile(
+            family_id="custom_decoder",
+            mlp_down_proj_template="decoder.blocks.{layer}.ffn.w2.weight",
+            mlp_up_proj_template="decoder.blocks.{layer}.ffn.w1.weight",
+            attn_out_template="decoder.blocks.{layer}.attn.wo.weight",
+            embed_in_tensor="decoder.tok_embeddings.weight",
+            unembed_out_tensor="decoder.output.weight",
+            final_norm_weight_tensor="decoder.norm.weight",
+        )
+    )
+    assert "custom_decoder" in studio.models.list_architectures()
+
+    studio.models.register_model(
+        "org/custom-pythia-model",
+        loader=build_mini_pythia_model,
+        architecture="GPTNeoXForCausalLM",
+    )
+    loaded = studio.select_model("org/custom-pythia-model")
+    assert loaded.total_parameters > 0
+
+    # 2. Register a custom Task Gym from prompt-target rules
+    custom_gym = studio.gyms.from_rules(
+        "gym.custom.boolean_logic.v1",
+        skills_taught=("boolean_logic",),
+        base_rules=[
+            ("Boolean True AND False gives", "ĠFalse"),
+            ("Boolean True OR False gives", "ĠTrue"),
+            ("Boolean False AND True gives", "ĠFalse"),
+            ("Boolean False OR True gives", "ĠTrue"),
+        ],
+        register_as="custom_boolean",
+    )
+    assert custom_gym.gym_id == "gym.custom.boolean_logic.v1"
+    custom_rep = studio.methods.run(
+        "contrastive_subspace",
+        "org/custom-pythia-model",
+        gym="custom_boolean",
+        target_strength=80.0,
+    )
+    assert custom_rep.reload_parity_verified is True
+    assert custom_rep.branches[2].gym_dev_accuracy == 1.0
+
+    # 3. Register a custom weight-editing method using studio.ir_builder (WeightIRTransactionBuilder)
+    @studio.methods.register("spectral_dampener", category="custom_repair", description="Rank-1 singular mode projection")
+    def _spectral_dampener(weight_matrix: torch.Tensor, *, damping: float = 0.5) -> Any:
+        u, _, _ = torch.linalg.svd(weight_matrix, full_matrices=False)
+        q_top1 = u[:, :1].contiguous()
+        return studio.ir_builder.execute_matrix_edit(
+            weight_matrix,
+            operation_type="subspace_projection",
+            orthonormal_basis=q_top1,
+            projection_side="left",
+            factor=damping,
+            provenance_tag="custom.spectral_dampener.v1",
+        )
+
+    tx_receipt = studio.methods.run("spectral_dampener", torch.eye(4, dtype=torch.float64), damping=0.5)
+    assert tx_receipt.reload_parity_verified is True
+    assert tx_receipt.before_parameter_digest != tx_receipt.after_parameter_digest
+
+    # 4. Register a custom Frontier Agent
+    studio.agents.register_agent(
+        "local-llama-scientist",
+        extra_tool_schemas=[{"name": "custom_circuit_probe", "version": "1.0.0", "input_schema": {"type": "object"}}],
+    )
+    custom_agent = studio.create_frontier_agent("local-llama-scientist")
+    assert custom_agent.agent_id == "local-llama-scientist"
+    assert len(custom_agent.tool_schemas) == 6
+
+    # 5. Verify CLI `catalog` entrypoint
+    assert studio_cli_main(["catalog"]) == 0
+
 

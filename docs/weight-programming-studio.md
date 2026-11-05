@@ -85,3 +85,25 @@ print(gym_report.promotion_verification["markdown_dashboard"])
 prd_report = studio.run_priority_experiments("nf/mini-pythia-fixture")
 assert prd_report.all_experiments_succeeded is True
 ```
+
+---
+
+## 4. Extensible Studio Registries & `WeightIRTransactionBuilder`
+
+`WeightProgrammingStudio` exposes four pluggable registries plus a reusable Rust Weight-IR transaction builder so researchers can extend every layer without modifying core files:
+
+1. **`studio.models` (`ModelRegistry`)**:
+   - Pre-populated with `EleutherAI/pythia-14m`, `EleutherAI/pythia-31m`, `Qwen/qwen2-dense-mini`, `nf/mini-pythia-fixture`, and `BUILTIN_ARCHITECTURE_PROFILES` (`gpt_neox`, `qwen2`, `llama`, `mistral`, `gemma`).
+   - Register custom architectures with `studio.models.register_architecture(ArchitectureSiteProfile(...))` and custom models with `studio.models.register_model(...)`.
+2. **`studio.gyms` (`GymRegistry`)**:
+   - Pre-populated with `algorithmic_three_skill` and `factual_knowledge`.
+   - Build and register new multi-skill gyms from prompt-target rules via `studio.gyms.from_rules(...)`.
+3. **`studio.methods` (`MethodRegistry`)**:
+   - Pre-populated with `rome`, `memit`, `alphaedit`, `contrastive_subspace`, `task_arithmetic`, `ties`, `dare`, `mlp_surgery`, `attention_surgery`, and `lora_baseline`.
+   - Register custom weight-editing methods via `@studio.methods.register("my_method")` and invoke them via `studio.methods.run("my_method", ...)`.
+4. **`studio.agents` (`AgentRegistry`)**:
+   - Pre-populated with `claude-4-5-sonnet` and `gpt-6-astra`.
+   - Register custom LLM or local agent backends via `studio.agents.register_agent("my-custom-agent", extra_tool_schemas=[...])`.
+5. **`studio.ir_builder` (`WeightIRTransactionBuilder` in `neural_foundry.ir`)**:
+   - Compiles and executes `low_rank_update`, `add_delta`, `scale`, and `subspace_projection` operations through the Rust `nf-weight-ir` compiler and `nf-surgeon` transactional engine in a single call, returning a `CompiledTransactionReceipt` with verified reload parity.
+

@@ -50,6 +50,7 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
         return None;
     }
     Some(match subcommand.as_str() {
+        "catalog" => handle_catalog(rest),
         "solve-shape" => handle_solve_shape(rest),
         "lower-structural" => handle_lower_structural(rest),
         "compose-patches" => handle_compose_patches(rest),
@@ -58,9 +59,36 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
         _ => Err(err(
             ErrorCode::InvalidValue,
             "/studio",
-            "expected `studio solve-shape|lower-structural|compose-patches|scientific-graph|library <FILE.json>`",
+            "expected `studio catalog|solve-shape|lower-structural|compose-patches|scientific-graph|library ...`",
         )),
     })
+}
+
+fn handle_catalog(rest: &[String]) -> Result<String> {
+    if !rest.is_empty() {
+        return Err(err(
+            ErrorCode::InvalidValue,
+            "/studio/catalog",
+            "expected `studio catalog` with no extra arguments",
+        ));
+    }
+    wrap_ok(json!({
+        "architectures": ["gpt_neox", "qwen2", "llama", "mistral", "gemma", "fixture.cpu"],
+        "methods": [
+            "rome",
+            "memit",
+            "alphaedit",
+            "contrastive_subspace",
+            "task_arithmetic",
+            "ties",
+            "dare",
+            "mlp_surgery",
+            "attention_surgery",
+            "lora_baseline"
+        ],
+        "gyms": ["algorithmic_three_skill", "factual_knowledge"],
+        "agents": ["claude-4-5-sonnet", "gpt-6-astra"],
+    }))
 }
 
 fn single_file_arg(rest: &[String], sub: &str) -> Result<Vec<u8>> {

@@ -26,11 +26,81 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from . import evals, ir, surgeon
-from .records import canonicalize, content_digest
+from . import evals, ir
 
 PYTHIA_FACTORY_ID = "hf.gpt_neox.dense"
 PYTHIA_FACTORY_VERSION = "1"
+
+
+@dataclass(frozen=True)
+class ArchitectureSiteProfile:
+    """Architecture-agnostic tensor naming profile for open-weight transformer families."""
+
+    family_id: str
+    mlp_down_proj_template: str
+    mlp_up_proj_template: str
+    attn_out_template: str
+    embed_in_tensor: str
+    unembed_out_tensor: str
+    final_norm_weight_tensor: str
+
+    def mlp_down_proj_site(self, layer_idx: int) -> str:
+        return self.mlp_down_proj_template.format(layer=layer_idx)
+
+    def mlp_up_proj_site(self, layer_idx: int) -> str:
+        return self.mlp_up_proj_template.format(layer=layer_idx)
+
+    def attn_out_site(self, layer_idx: int) -> str:
+        return self.attn_out_template.format(layer=layer_idx)
+
+
+BUILTIN_ARCHITECTURE_PROFILES: dict[str, ArchitectureSiteProfile] = {
+    "gpt_neox": ArchitectureSiteProfile(
+        family_id="gpt_neox",
+        mlp_down_proj_template="gpt_neox.layers.{layer}.mlp.dense_4h_to_h.weight",
+        mlp_up_proj_template="gpt_neox.layers.{layer}.mlp.dense_h_to_4h.weight",
+        attn_out_template="gpt_neox.layers.{layer}.attention.dense.weight",
+        embed_in_tensor="gpt_neox.embed_in.weight",
+        unembed_out_tensor="embed_out.weight",
+        final_norm_weight_tensor="gpt_neox.final_layer_norm.weight",
+    ),
+    "qwen2": ArchitectureSiteProfile(
+        family_id="qwen2",
+        mlp_down_proj_template="model.layers.{layer}.mlp.down_proj.weight",
+        mlp_up_proj_template="model.layers.{layer}.mlp.up_proj.weight",
+        attn_out_template="model.layers.{layer}.self_attn.o_proj.weight",
+        embed_in_tensor="model.embed_tokens.weight",
+        unembed_out_tensor="lm_head.weight",
+        final_norm_weight_tensor="model.norm.weight",
+    ),
+    "llama": ArchitectureSiteProfile(
+        family_id="llama",
+        mlp_down_proj_template="model.layers.{layer}.mlp.down_proj.weight",
+        mlp_up_proj_template="model.layers.{layer}.mlp.up_proj.weight",
+        attn_out_template="model.layers.{layer}.self_attn.o_proj.weight",
+        embed_in_tensor="model.embed_tokens.weight",
+        unembed_out_tensor="lm_head.weight",
+        final_norm_weight_tensor="model.norm.weight",
+    ),
+    "mistral": ArchitectureSiteProfile(
+        family_id="mistral",
+        mlp_down_proj_template="model.layers.{layer}.mlp.down_proj.weight",
+        mlp_up_proj_template="model.layers.{layer}.mlp.up_proj.weight",
+        attn_out_template="model.layers.{layer}.self_attn.o_proj.weight",
+        embed_in_tensor="model.embed_tokens.weight",
+        unembed_out_tensor="lm_head.weight",
+        final_norm_weight_tensor="model.norm.weight",
+    ),
+    "gemma": ArchitectureSiteProfile(
+        family_id="gemma",
+        mlp_down_proj_template="model.layers.{layer}.mlp.down_proj.weight",
+        mlp_up_proj_template="model.layers.{layer}.mlp.up_proj.weight",
+        attn_out_template="model.layers.{layer}.self_attn.o_proj.weight",
+        embed_in_tensor="model.embed_tokens.weight",
+        unembed_out_tensor="model.embed_tokens.weight",
+        final_norm_weight_tensor="model.norm.weight",
+    ),
+}
 
 
 def _sha256(data: bytes) -> str:
@@ -756,333 +826,20 @@ def run_pythia_weight_programming_study(
     right_factors = torch.linalg.solve(gram, k_dev_mat).T.contiguous()  # [rank, in_dim]
 
     # 3. Compile and execute the low-rank weight update through the authoritative Rust surgeon
-    ckpt_bytes, w_before_digest = _build_single_matrix_safetensors(w_orig)
-    cfg_bytes = b"{}"
-    cfg_digest = str(content_digest(cfg_bytes))
-    ckpt_digest = str(content_digest(ckpt_bytes))
-    param_set_digest = str(
-        content_digest(
-            canonicalize(
-                {
-                    "schema_version": 1,
-                    "kind": "tensor_set",
-                    "tensors": [
-                        {
-                            "name": "w",
-                            "shape": [out_dim, in_dim],
-                            "dtype": "f64",
-                            "content_digest": w_before_digest,
-                        }
-                    ],
-                }
-            )
-        )
+    tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
+        w_orig,
+        operation_type="low_rank_update",
+        left_factor=left_factors,
+        right_factor=right_factors,
+        factor=1.0,
+        smoke_probe=k_dev_list[0],
+        provenance_tag="pythia.whitened_nullspace_rank4.v1",
+        engine_name="pythia.whitened_subspace",
     )
-    manifest = {
-        "schema_version": 1,
-        "architecture": {"id": "fixture.cpu", "version": "1", "config": cfg_digest},
-        "parameter_digest": param_set_digest,
-        "parameters": {
-            "w": {
-                "shape": [out_dim, in_dim],
-                "dtype": "f64",
-                "digest": w_before_digest,
-                "storage_group": "w",
-            }
-        },
-        "buffers": {},
-        "format": "dense_safetensors",
-        "packing_policy": None,
-        "assets": {"config": cfg_digest, "checkpoint": ckpt_digest},
-        "usage_rights": "Apache-2.0",
-    }
-    source_handle = surgeon.load(manifest, ckpt_bytes, {"config": cfg_bytes})
-    graph_digest = str(content_digest(b"pythia.mlp.down_proj.graph"))
-    base_model_ref = {
-        "checkpoint": ckpt_digest,
-        "manifest": source_handle.manifest_digest,
-        "parameter_digest": source_handle.parameter_digest,
-        "architecture_graph": graph_digest,
-        "config": cfg_digest,
-        "tokenizer": None,
-    }
-    contract_d = str(content_digest(b"pythia.contract.v1"))
-    objective_d = str(content_digest(b"pythia.objective.v1"))
-    exp_d = str(content_digest(b"pythia.experiment.v1"))
-    portfolio_d = str(content_digest(b"pythia.portfolio.v1"))
-    vproto_d = str(content_digest(b"pythia.vproto.v1"))
-    parity_d = str(content_digest(b"pythia.parity.v1"))
-    binding_d = str(content_digest(b"pythia.binding.v1"))
-    gym_d = str(content_digest(b"pythia.gym.v1"))
-    val_d = str(content_digest(b"pythia.val.v1"))
-    scorer_d = str(content_digest(b"pythia.scorer.v1"))
-    split_d = str(content_digest(b"pythia.split.v1"))
-    uncert_d = str(content_digest(b"pythia.uncertainty.v1"))
-    hyp_d = str(content_digest(b"pythia.whitened_nullspace_rank4.v1"))
-
-    left_bytes, _, left_data_len = _build_named_safetensors("u", left_factors)
-    right_bytes, _, right_data_len = _build_named_safetensors("v", right_factors)
-    left_digest = str(content_digest(left_bytes))
-    right_digest = str(content_digest(right_bytes))
-
-    smoke_suite = {
-        "schema_version": 1,
-        "adapter": "nf.linear_fixture.v1",
-        "probes": [
-            {
-                "input": [float(v) for v in k_dev_list[0].tolist()],
-                "expected": None,
-                "absolute_tolerance": 0.0,
-                "max_abs_output": 100_000.0,
-            }
-        ],
-    }
-    smoke_digest = str(content_digest(canonicalize(smoke_suite)))
-
-    search_space = {
-        "schema_version": 1,
-        "base_model": base_model_ref,
-        "contract": contract_d,
-        "objective": objective_d,
-        "transformations": {
-            "low_rank_update": {
-                "dtypes": ["f64"],
-                "coefficient": {"min": 0.0, "max": 2.0},
-                "rank": {"min": 1, "max": 16},
-                "sides": [],
-                "max_operand_bytes": 1_048_576,
-            }
-        },
-        "sites": [
-            {
-                "selector": {"type": "tensor", "name": "w"},
-                "role": "parameter",
-                "regions": {"type": "whole_tensor"},
-                "allowed_axes": [0, 1],
-            }
-        ],
-        "constraints": {
-            "max_changed_parameters": out_dim * in_dim,
-            "max_artifact_bytes": 1_048_576,
-            "max_temporary_bytes": 8_388_608,
-            "max_operations": 4,
-            "allow_buffer_writes": False,
-            "require_direct_weight_edits": True,
-            "require_fully_gradient_free": True,
-            "require_preserve_shapes": True,
-            "quality_limits": [
-                {
-                    "binding": binding_d,
-                    "metric": "accuracy",
-                    "units": "fraction",
-                    "baseline": ckpt_digest,
-                    "max_regression": 0.0,
-                    "split": "holdout",
-                    "uncertainty_protocol": uncert_d,
-                }
-            ],
-        },
-        "strategy": {
-            "proposal": "scripted",
-            "search": "sequential",
-            "selection": "pareto",
-            "engine": "pythia.whitened_subspace",
-            "engine_version": "1",
-            "seed": 7,
-        },
-    }
-    space_digest = str(content_digest(canonicalize(search_space)))
-    region = {"tensor": "w", "start": [0, 0], "shape": [out_dim, in_dim]}
-    verification_block = {
-        "portfolio": portfolio_d,
-        "protocol": vproto_d,
-        "gyms": [
-            {
-                "binding": binding_d,
-                "gym": gym_d,
-                "validation": val_d,
-                "scorer": scorer_d,
-                "split": split_d,
-                "role": "target",
-            }
-        ],
-        "smoke_suite": smoke_digest,
-        "parity_suite": parity_d,
-    }
-    program = {
-        "ir_version": 1,
-        "opset_version": 1,
-        "base_model": base_model_ref,
-        "objective": {
-            "contract": contract_d,
-            "objective": objective_d,
-            "experiment_protocol": exp_d,
-            "search_space": space_digest,
-        },
-        "operations": [
-            {
-                "id": "pythia_mlp_rank_update",
-                "depends_on": [],
-                "operation": {
-                    "type": "low_rank_update",
-                    "target": region,
-                    "left": "left_u",
-                    "right": "right_v",
-                    "strength": 1.0,
-                },
-            }
-        ],
-        "artifacts": {
-            "left_u": {
-                "digest": left_digest,
-                "tensor": "u",
-                "dtype": "f64",
-                "shape": [out_dim, rank],
-                "data_bytes": left_data_len,
-                "artifact_bytes": len(left_bytes),
-                "access": "development",
-                "provenance": {
-                    "schema_version": 1,
-                    "origin": "supplied_fact",
-                    "support": "untested",
-                    "provenance": "whitened_dual_target_basis",
-                    "evidence": [],
-                    "access": "development",
-                },
-            },
-            "right_v": {
-                "digest": right_digest,
-                "tensor": "v",
-                "dtype": "f64",
-                "shape": [rank, in_dim],
-                "data_bytes": right_data_len,
-                "artifact_bytes": len(right_bytes),
-                "access": "development",
-                "provenance": {
-                    "schema_version": 1,
-                    "origin": "supplied_fact",
-                    "support": "untested",
-                    "provenance": "nullspace_regularized_mlp_keys",
-                    "evidence": [],
-                    "access": "development",
-                },
-            },
-        },
-        "preconditions": [
-            {
-                "tensor": "w",
-                "role": "parameter",
-                "shape": [out_dim, in_dim],
-                "dtype": "f64",
-                "before_digest": w_before_digest,
-                "storage_group": "w",
-            }
-        ],
-        "required_capabilities": ["dense.cpu"],
-        "constraints": {
-            "gradient_free": True,
-            "preserve_tensor_shapes": True,
-            "max_changed_parameters": out_dim * in_dim,
-            "max_artifact_bytes": 1_048_576,
-            "max_temporary_bytes": 8_388_608,
-            "numerical": {
-                "accumulation_dtype": "f64",
-                "output_rounding": "nearest_ties_even",
-                "non_finite": "reject",
-                "max_abs_parameter": 10_000.0,
-                "backend_abs_tolerance": 0.0,
-            },
-        },
-        "effects": {
-            "reads": [region],
-            "writes": [region],
-            "buffer_writes": [],
-            "graph_changes": False,
-            "config_changes": [],
-            "tokenizer_changes": False,
-        },
-        "preservation": {"type": "experimental"},
-        "verification": verification_block,
-        "lineage": {
-            "parent_candidates": [],
-            "hypothesis": hyp_d,
-            "method": {
-                "schema_version": 1,
-                "target_update": "direct_tensor_edit",
-                "proposal_origin": "scripted",
-                "adaptation": "none",
-                "production_history": "direct_only",
-                "inspection_uses_backprop": False,
-                "parameter_update_uses_backprop": False,
-                "gradient_derived_update_values": False,
-                "alignment_fitted": False,
-                "optimizer_steps": 0,
-                "changed_parameters": out_dim * in_dim,
-            },
-        },
-        "extensions": {},
-    }
-    policy = {
-        "schema_version": 1,
-        "source": base_model_ref,
-        "contract": contract_d,
-        "objective": objective_d,
-        "experiment_protocol": exp_d,
-        "search_space": space_digest,
-        "verification": verification_block,
-        "allowed_extra_gyms": [],
-        "permissions": {
-            "schema_version": 1,
-            "tools": ["inspect", "direct_edit"],
-            "external_destinations": {},
-            "allow_gradient_inspection": False,
-            "allow_parameter_training": False,
-            "require_fully_gradient_free": True,
-            "allow_generated_gym": False,
-            "allow_downloads": False,
-        },
-        "operand_access": ["development"],
-        "backend": {
-            "id": "nf.native_cpu",
-            "version": "1",
-            "operations": ["low_rank_update"],
-            "capabilities": ["dense.cpu"],
-            "dtypes": ["f64"],
-            "accumulation_dtypes": ["f64"],
-            "fixed_scratch_bytes": 4096,
-        },
-        "bounds": {
-            "max_metadata_bytes": 1_048_576,
-            "max_source_checkpoint_bytes": 16_777_216,
-            "max_source_asset_bytes": 65_536,
-            "max_source_tensors": 16,
-            "max_observed_source_bytes": 16_777_216,
-            "max_temporary_bytes": 8_388_608,
-            "max_output_tensor_bytes": 8_388_608,
-            "max_validation_work": 10_000_000,
-            "max_kernel_work": 10_000_000,
-            "max_parameter_magnitude": 10_000.0,
-            "max_backend_abs_tolerance": 0.0,
-            "max_orthonormal_tolerance": 0.000001,
-        },
-    }
-
-    plan_handle = ir.compile(
-        source_handle,
-        program,
-        search_space,
-        policy,
-        {"left_u": left_bytes, "right_v": right_bytes},
-    )
-    candidate_handle = surgeon.apply(plan_handle, smoke_suite)
-    receipt: dict[str, Any] = json.loads(candidate_handle.receipt_json().decode("utf-8"))
-    reloaded_source = candidate_handle.snapshot()
-    reload_parity_ok = reloaded_source.parameter_digest == candidate_handle.parameter_digest
-
-    # Extract the Rust-materialized weight matrix and run Pythia with the edited weights
-    edited_bytes = candidate_handle.tensor_bytes("w")
+    w_before_digest = tx.before_parameter_digest
+    reload_parity_ok = tx.reload_parity_verified
     w_edited = (
-        torch.frombuffer(bytearray(edited_bytes), dtype=torch.float64)
+        torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
         .clone()
     )
@@ -1091,6 +848,9 @@ def run_pythia_weight_programming_study(
     dev_after = tuple(
         model.evaluate_prompt(p, target_token=t, layer_down_proj_override=override)
         for p, t in dev_Associations
+    )
+    gen_after = tuple(
+        model.evaluate_prompt(p, target_token=t) for p, t in unseen_generalization_associations
     )
     gen_after = tuple(
         model.evaluate_prompt(p, target_token=t, layer_down_proj_override=override)
@@ -1146,7 +906,7 @@ def run_pythia_weight_programming_study(
     gen_cand_score = sum(1.0 for r in gen_after if r.matched_target) / len(gen_after)
     ret_cand_score = sum(1.0 for r in ret_after if r.matched_target) / len(ret_after)
 
-    changed_params = int(receipt.get("changed_parameters", out_dim * in_dim))
+    changed_params = tx.changed_parameters
     total_params = model.total_parameters
     changed_pct = round((changed_params / max(total_params, 1)) * 100.0, 4)
 
@@ -1170,7 +930,7 @@ def run_pythia_weight_programming_study(
     cand_eval_run = evals.run_eval(
         model={
             "model_id": f"{model.model_name}@whitened_rank{rank}_edited",
-            "checkpoint_digest": candidate_handle.parameter_digest,
+            "checkpoint_digest": tx.after_parameter_digest,
             "edit_lineage": {
                 "method": "direct_low_rank_subspace_edit",
                 "changed_parameters": changed_params,
@@ -1207,10 +967,10 @@ def run_pythia_weight_programming_study(
         site_parameters=out_dim * in_dim,
         changed_parameters=changed_params,
         changed_parameter_pct_of_model=changed_pct,
-        plan_digest=plan_handle.digest,
-        candidate_digest=candidate_handle.digest,
-        before_parameter_digest=source_handle.parameter_digest,
-        after_parameter_digest=candidate_handle.parameter_digest,
+        plan_digest=tx.plan_digest,
+        candidate_digest=tx.candidate_digest,
+        before_parameter_digest=tx.before_parameter_digest,
+        after_parameter_digest=tx.after_parameter_digest,
         reload_parity_verified=reload_parity_ok,
         dev_before=dev_before,
         dev_after=dev_after,
@@ -1264,343 +1024,30 @@ def _compile_and_apply_rust_low_rank_update(
     right_factors: torch.Tensor,
     smoke_probe_vec: torch.Tensor,
 ) -> tuple[torch.Tensor, str, str, str, str, bool]:
-    """Compiles and executes a low_rank_update in Rust (`nf-weight-ir` + `nf-surgeon`) and returns the edited tensor and digests."""
+    """Compiles and executes a low_rank_update in Rust (`nf-weight-ir` + `nf-surgeon`) via `WeightIRTransactionBuilder`."""
     out_dim, in_dim = int(w_orig.shape[0]), int(w_orig.shape[1])
-    rank = int(left_factors.shape[1])
-    ckpt_bytes, w_before_digest = _build_single_matrix_safetensors(w_orig)
-    cfg_bytes = b"{}"
-    cfg_digest = str(content_digest(cfg_bytes))
-    ckpt_digest = str(content_digest(ckpt_bytes))
-    param_set_digest = str(
-        content_digest(
-            canonicalize(
-                {
-                    "schema_version": 1,
-                    "kind": "tensor_set",
-                    "tensors": [
-                        {
-                            "name": "w",
-                            "shape": [out_dim, in_dim],
-                            "dtype": "f64",
-                            "content_digest": w_before_digest,
-                        }
-                    ],
-                }
-            )
-        )
+    tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
+        w_orig,
+        operation_type="low_rank_update",
+        left_factor=left_factors,
+        right_factor=right_factors,
+        factor=1.0,
+        smoke_probe=smoke_probe_vec,
+        provenance_tag="pythia.contrastive_prefix_nullspace.v1",
+        engine_name="pythia.contrastive_prefix_nullspace",
     )
-    manifest = {
-        "schema_version": 1,
-        "architecture": {"id": "fixture.cpu", "version": "1", "config": cfg_digest},
-        "parameter_digest": param_set_digest,
-        "parameters": {
-            "w": {
-                "shape": [out_dim, in_dim],
-                "dtype": "f64",
-                "digest": w_before_digest,
-                "storage_group": "w",
-            }
-        },
-        "buffers": {},
-        "format": "dense_safetensors",
-        "packing_policy": None,
-        "assets": {"config": cfg_digest, "checkpoint": ckpt_digest},
-        "usage_rights": "Apache-2.0",
-    }
-    source_handle = surgeon.load(manifest, ckpt_bytes, {"config": cfg_bytes})
-    graph_digest = str(content_digest(b"pythia.gym.mlp.down_proj.graph"))
-    base_model_ref = {
-        "checkpoint": ckpt_digest,
-        "manifest": source_handle.manifest_digest,
-        "parameter_digest": source_handle.parameter_digest,
-        "architecture_graph": graph_digest,
-        "config": cfg_digest,
-        "tokenizer": None,
-    }
-    contract_d = str(content_digest(b"pythia.gym.contract.v1"))
-    objective_d = str(content_digest(b"pythia.gym.objective.v1"))
-    exp_d = str(content_digest(b"pythia.gym.experiment.v1"))
-    portfolio_d = str(content_digest(b"pythia.gym.portfolio.v1"))
-    vproto_d = str(content_digest(b"pythia.gym.vproto.v1"))
-    parity_d = str(content_digest(b"pythia.gym.parity.v1"))
-    binding_d = str(content_digest(b"pythia.gym.binding.v1"))
-    gym_d = str(content_digest(b"pythia.gym.id.v1"))
-    val_d = str(content_digest(b"pythia.gym.val.v1"))
-    scorer_d = str(content_digest(b"pythia.gym.scorer.v1"))
-    split_d = str(content_digest(b"pythia.gym.split.v1"))
-    uncert_d = str(content_digest(b"pythia.gym.uncertainty.v1"))
-    hyp_d = str(content_digest(b"pythia.gym.contrastive_prefix_nullspace.v1"))
-
-    left_bytes, _, left_data_len = _build_named_safetensors("u", left_factors)
-    right_bytes, _, right_data_len = _build_named_safetensors("v", right_factors)
-    left_digest = str(content_digest(left_bytes))
-    right_digest = str(content_digest(right_bytes))
-
-    smoke_suite = {
-        "schema_version": 1,
-        "adapter": "nf.linear_fixture.v1",
-        "probes": [
-            {
-                "input": [float(v) for v in smoke_probe_vec.tolist()],
-                "expected": None,
-                "absolute_tolerance": 0.0,
-                "max_abs_output": 100_000.0,
-            }
-        ],
-    }
-    smoke_digest = str(content_digest(canonicalize(smoke_suite)))
-
-    search_space = {
-        "schema_version": 1,
-        "base_model": base_model_ref,
-        "contract": contract_d,
-        "objective": objective_d,
-        "transformations": {
-            "low_rank_update": {
-                "dtypes": ["f64"],
-                "coefficient": {"min": 0.0, "max": 2.0},
-                "rank": {"min": 1, "max": 16},
-                "sides": [],
-                "max_operand_bytes": 1_048_576,
-            }
-        },
-        "sites": [
-            {
-                "selector": {"type": "tensor", "name": "w"},
-                "role": "parameter",
-                "regions": {"type": "whole_tensor"},
-                "allowed_axes": [0, 1],
-            }
-        ],
-        "constraints": {
-            "max_changed_parameters": out_dim * in_dim,
-            "max_artifact_bytes": 1_048_576,
-            "max_temporary_bytes": 8_388_608,
-            "max_operations": 4,
-            "allow_buffer_writes": False,
-            "require_direct_weight_edits": True,
-            "require_fully_gradient_free": True,
-            "require_preserve_shapes": True,
-            "quality_limits": [
-                {
-                    "binding": binding_d,
-                    "metric": "accuracy",
-                    "units": "fraction",
-                    "baseline": ckpt_digest,
-                    "max_regression": 0.0,
-                    "split": "holdout",
-                    "uncertainty_protocol": uncert_d,
-                }
-            ],
-        },
-        "strategy": {
-            "proposal": "scripted",
-            "search": "branch",
-            "selection": "pareto",
-            "engine": "pythia.contrastive_prefix_nullspace",
-            "engine_version": "1",
-            "seed": 17,
-        },
-    }
-    space_digest = str(content_digest(canonicalize(search_space)))
-    region = {"tensor": "w", "start": [0, 0], "shape": [out_dim, in_dim]}
-    verification_block = {
-        "portfolio": portfolio_d,
-        "protocol": vproto_d,
-        "gyms": [
-            {
-                "binding": binding_d,
-                "gym": gym_d,
-                "validation": val_d,
-                "scorer": scorer_d,
-                "split": split_d,
-                "role": "target",
-            }
-        ],
-        "smoke_suite": smoke_digest,
-        "parity_suite": parity_d,
-    }
-    program = {
-        "ir_version": 1,
-        "opset_version": 1,
-        "base_model": base_model_ref,
-        "objective": {
-            "contract": contract_d,
-            "objective": objective_d,
-            "experiment_protocol": exp_d,
-            "search_space": space_digest,
-        },
-        "operations": [
-            {
-                "id": "pythia_gym_rank_update",
-                "depends_on": [],
-                "operation": {
-                    "type": "low_rank_update",
-                    "target": region,
-                    "left": "left_u",
-                    "right": "right_v",
-                    "strength": 1.0,
-                },
-            }
-        ],
-        "artifacts": {
-            "left_u": {
-                "digest": left_digest,
-                "tensor": "u",
-                "dtype": "f64",
-                "shape": [out_dim, rank],
-                "data_bytes": left_data_len,
-                "artifact_bytes": len(left_bytes),
-                "access": "development",
-                "provenance": {
-                    "schema_version": 1,
-                    "origin": "supplied_fact",
-                    "support": "untested",
-                    "provenance": "contrastive_prefix_nullspace_left_u",
-                    "evidence": [],
-                    "access": "development",
-                },
-            },
-            "right_v": {
-                "digest": right_digest,
-                "tensor": "v",
-                "dtype": "f64",
-                "shape": [rank, in_dim],
-                "data_bytes": right_data_len,
-                "artifact_bytes": len(right_bytes),
-                "access": "development",
-                "provenance": {
-                    "schema_version": 1,
-                    "origin": "supplied_fact",
-                    "support": "untested",
-                    "provenance": "contrastive_prefix_nullspace_right_v",
-                    "evidence": [],
-                    "access": "development",
-                },
-            },
-        },
-        "preconditions": [
-            {
-                "tensor": "w",
-                "role": "parameter",
-                "shape": [out_dim, in_dim],
-                "dtype": "f64",
-                "before_digest": w_before_digest,
-                "storage_group": "w",
-            }
-        ],
-        "required_capabilities": ["dense.cpu"],
-        "constraints": {
-            "gradient_free": True,
-            "preserve_tensor_shapes": True,
-            "max_changed_parameters": out_dim * in_dim,
-            "max_artifact_bytes": 1_048_576,
-            "max_temporary_bytes": 8_388_608,
-            "numerical": {
-                "accumulation_dtype": "f64",
-                "output_rounding": "nearest_ties_even",
-                "non_finite": "reject",
-                "max_abs_parameter": 10_000.0,
-                "backend_abs_tolerance": 0.0,
-            },
-        },
-        "effects": {
-            "reads": [region],
-            "writes": [region],
-            "buffer_writes": [],
-            "graph_changes": False,
-            "config_changes": [],
-            "tokenizer_changes": False,
-        },
-        "preservation": {"type": "experimental"},
-        "verification": verification_block,
-        "lineage": {
-            "parent_candidates": [],
-            "hypothesis": hyp_d,
-            "method": {
-                "schema_version": 1,
-                "target_update": "direct_tensor_edit",
-                "proposal_origin": "scripted",
-                "adaptation": "none",
-                "production_history": "direct_only",
-                "inspection_uses_backprop": False,
-                "parameter_update_uses_backprop": False,
-                "gradient_derived_update_values": False,
-                "alignment_fitted": False,
-                "optimizer_steps": 0,
-                "changed_parameters": out_dim * in_dim,
-            },
-        },
-        "extensions": {},
-    }
-    policy = {
-        "schema_version": 1,
-        "source": base_model_ref,
-        "contract": contract_d,
-        "objective": objective_d,
-        "experiment_protocol": exp_d,
-        "search_space": space_digest,
-        "verification": verification_block,
-        "allowed_extra_gyms": [],
-        "permissions": {
-            "schema_version": 1,
-            "tools": ["inspect", "direct_edit"],
-            "external_destinations": {},
-            "allow_gradient_inspection": False,
-            "allow_parameter_training": False,
-            "require_fully_gradient_free": True,
-            "allow_generated_gym": False,
-            "allow_downloads": False,
-        },
-        "operand_access": ["development"],
-        "backend": {
-            "id": "nf.native_cpu",
-            "version": "1",
-            "operations": ["low_rank_update"],
-            "capabilities": ["dense.cpu"],
-            "dtypes": ["f64"],
-            "accumulation_dtypes": ["f64"],
-            "fixed_scratch_bytes": 4096,
-        },
-        "bounds": {
-            "max_metadata_bytes": 1_048_576,
-            "max_source_checkpoint_bytes": 16_777_216,
-            "max_source_asset_bytes": 65_536,
-            "max_source_tensors": 16,
-            "max_observed_source_bytes": 16_777_216,
-            "max_temporary_bytes": 8_388_608,
-            "max_output_tensor_bytes": 8_388_608,
-            "max_validation_work": 10_000_000,
-            "max_kernel_work": 10_000_000,
-            "max_parameter_magnitude": 10_000.0,
-            "max_backend_abs_tolerance": 0.0,
-            "max_orthonormal_tolerance": 0.000001,
-        },
-    }
-
-    plan_handle = ir.compile(
-        source_handle,
-        program,
-        search_space,
-        policy,
-        {"left_u": left_bytes, "right_v": right_bytes},
-    )
-    candidate_handle = surgeon.apply(plan_handle, smoke_suite)
-    reloaded = candidate_handle.snapshot()
-    reload_ok = reloaded.parameter_digest == candidate_handle.parameter_digest
-    edited_bytes = candidate_handle.tensor_bytes("w")
     w_edited = (
-        torch.frombuffer(bytearray(edited_bytes), dtype=torch.float64)
+        torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
         .clone()
     )
     return (
         w_edited,
-        plan_handle.digest,
-        candidate_handle.digest,
-        w_before_digest,
-        candidate_handle.parameter_digest,
-        reload_ok,
+        tx.plan_digest,
+        tx.candidate_digest,
+        tx.before_parameter_digest,
+        tx.after_parameter_digest,
+        tx.reload_parity_verified,
     )
 
 

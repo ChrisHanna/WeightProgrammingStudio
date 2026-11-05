@@ -23,14 +23,12 @@ from typing import Any, Literal
 
 import torch
 
-from . import ir, surgeon
+from . import ir
 from .m4_modalities import construct_algorithmic_relu_rule
 from .pythia import (
     ALGORITHMIC_THREE_SKILL_GYM,
     PythiaModel,
     Qwen2CausalLM,
-    _build_named_safetensors,
-    _build_single_matrix_safetensors,
     _compile_and_apply_rust_low_rank_update,
     build_mini_pythia_model,
     run_pythia_gym_task_learning_study,
@@ -39,7 +37,7 @@ from .records import canonicalize, content_digest
 
 EasyEditAlgorithm = Literal["ROME", "MEMIT", "AlphaEdit"]
 MergekitAlgorithm = Literal["task_arithmetic", "ties", "dare"]
-FrontierAgentId = Literal["claude-4-5-sonnet", "gpt-6-astra"]
+FrontierAgentId = str
 
 AGENT_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
     {
@@ -81,321 +79,28 @@ def _compile_and_apply_rust_add_delta(
     smoke_probe_vec: torch.Tensor,
     provenance_tag: str,
 ) -> tuple[torch.Tensor, str, str, str, str, bool]:
-    """Compiles and applies an `add_delta` Weight IR program through Rust `nf-weight-ir` and `nf-surgeon`."""
+    """Compiles and applies an `add_delta` Weight IR program through Rust (`nf-weight-ir` + `nf-surgeon`) via `WeightIRTransactionBuilder`."""
     out_dim, in_dim = int(w_orig.shape[0]), int(w_orig.shape[1])
-    ckpt_bytes, w_before_digest = _build_single_matrix_safetensors(w_orig)
-    cfg_bytes = b"{}"
-    cfg_digest = str(content_digest(cfg_bytes))
-    ckpt_digest = str(content_digest(ckpt_bytes))
-    param_set_digest = str(
-        content_digest(
-            canonicalize(
-                {
-                    "schema_version": 1,
-                    "kind": "tensor_set",
-                    "tensors": [
-                        {
-                            "name": "w",
-                            "shape": [out_dim, in_dim],
-                            "dtype": "f64",
-                            "content_digest": w_before_digest,
-                        }
-                    ],
-                }
-            )
-        )
+    tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
+        w_orig,
+        operation_type="add_delta",
+        delta_matrix=delta_matrix,
+        smoke_probe=smoke_probe_vec,
+        provenance_tag=provenance_tag,
+        engine_name="mergekit.rust_ir",
     )
-    manifest = {
-        "schema_version": 1,
-        "architecture": {"id": "fixture.cpu", "version": "1", "config": cfg_digest},
-        "parameter_digest": param_set_digest,
-        "parameters": {
-            "w": {
-                "shape": [out_dim, in_dim],
-                "dtype": "f64",
-                "digest": w_before_digest,
-                "storage_group": "w",
-            }
-        },
-        "buffers": {},
-        "format": "dense_safetensors",
-        "packing_policy": None,
-        "assets": {"config": cfg_digest, "checkpoint": ckpt_digest},
-        "usage_rights": "Apache-2.0",
-    }
-    source_handle = surgeon.load(manifest, ckpt_bytes, {"config": cfg_bytes})
-    graph_digest = str(content_digest(b"prd.mergekit.add_delta.graph"))
-    base_model_ref = {
-        "checkpoint": ckpt_digest,
-        "manifest": source_handle.manifest_digest,
-        "parameter_digest": source_handle.parameter_digest,
-        "architecture_graph": graph_digest,
-        "config": cfg_digest,
-        "tokenizer": None,
-    }
-    contract_d = str(content_digest(b"prd.mergekit.contract.v1"))
-    objective_d = str(content_digest(b"prd.mergekit.objective.v1"))
-    exp_d = str(content_digest(b"prd.mergekit.experiment.v1"))
-    portfolio_d = str(content_digest(b"prd.mergekit.portfolio.v1"))
-    vproto_d = str(content_digest(b"prd.mergekit.vproto.v1"))
-    parity_d = str(content_digest(b"prd.mergekit.parity.v1"))
-    binding_d = str(content_digest(b"prd.mergekit.binding.v1"))
-    gym_d = str(content_digest(b"prd.mergekit.gym.v1"))
-    val_d = str(content_digest(b"prd.mergekit.val.v1"))
-    scorer_d = str(content_digest(b"prd.mergekit.scorer.v1"))
-    split_d = str(content_digest(b"prd.mergekit.split.v1"))
-    uncert_d = str(content_digest(b"prd.mergekit.uncertainty.v1"))
-    hyp_d = str(content_digest(provenance_tag.encode("utf-8")))
-
-    delta_bytes, _, delta_data_len = _build_named_safetensors("d", delta_matrix)
-    delta_digest = str(content_digest(delta_bytes))
-
-    smoke_suite = {
-        "schema_version": 1,
-        "adapter": "nf.linear_fixture.v1",
-        "probes": [
-            {
-                "input": [float(v) for v in smoke_probe_vec.tolist()],
-                "expected": None,
-                "absolute_tolerance": 0.0,
-                "max_abs_output": 100_000.0,
-            }
-        ],
-    }
-    smoke_digest = str(content_digest(canonicalize(smoke_suite)))
-
-    search_space = {
-        "schema_version": 1,
-        "base_model": base_model_ref,
-        "contract": contract_d,
-        "objective": objective_d,
-        "transformations": {
-            "add_delta": {
-                "dtypes": ["f64"],
-                "coefficient": None,
-                "rank": None,
-                "sides": [],
-                "max_operand_bytes": 4_194_304,
-            }
-        },
-        "sites": [
-            {
-                "selector": {"type": "tensor", "name": "w"},
-                "role": "parameter",
-                "regions": {"type": "whole_tensor"},
-                "allowed_axes": [0, 1],
-            }
-        ],
-        "constraints": {
-            "max_changed_parameters": out_dim * in_dim,
-            "max_artifact_bytes": 4_194_304,
-            "max_temporary_bytes": 16_777_216,
-            "max_operations": 4,
-            "allow_buffer_writes": False,
-            "require_direct_weight_edits": True,
-            "require_fully_gradient_free": True,
-            "require_preserve_shapes": True,
-            "quality_limits": [
-                {
-                    "binding": binding_d,
-                    "metric": "accuracy",
-                    "units": "fraction",
-                    "baseline": ckpt_digest,
-                    "max_regression": 0.0,
-                    "split": "holdout",
-                    "uncertainty_protocol": uncert_d,
-                }
-            ],
-        },
-        "strategy": {
-            "proposal": "scripted",
-            "search": "sequential",
-            "selection": "pareto",
-            "engine": "mergekit.rust_ir",
-            "engine_version": "1",
-            "seed": 19,
-        },
-    }
-    space_digest = str(content_digest(canonicalize(search_space)))
-    region = {"tensor": "w", "start": [0, 0], "shape": [out_dim, in_dim]}
-    verification_block = {
-        "portfolio": portfolio_d,
-        "protocol": vproto_d,
-        "gyms": [
-            {
-                "binding": binding_d,
-                "gym": gym_d,
-                "validation": val_d,
-                "scorer": scorer_d,
-                "split": split_d,
-                "role": "target",
-            }
-        ],
-        "smoke_suite": smoke_digest,
-        "parity_suite": parity_d,
-    }
-    program = {
-        "ir_version": 1,
-        "opset_version": 1,
-        "base_model": base_model_ref,
-        "objective": {
-            "contract": contract_d,
-            "objective": objective_d,
-            "experiment_protocol": exp_d,
-            "search_space": space_digest,
-        },
-        "operations": [
-            {
-                "id": "mergekit_add_delta",
-                "depends_on": [],
-                "operation": {
-                    "type": "add_delta",
-                    "target": region,
-                    "delta": "merged_delta",
-                },
-            }
-        ],
-        "artifacts": {
-            "merged_delta": {
-                "digest": delta_digest,
-                "tensor": "d",
-                "dtype": "f64",
-                "shape": [out_dim, in_dim],
-                "data_bytes": delta_data_len,
-                "artifact_bytes": len(delta_bytes),
-                "access": "development",
-                "provenance": {
-                    "schema_version": 1,
-                    "origin": "supplied_fact",
-                    "support": "untested",
-                    "provenance": provenance_tag,
-                    "evidence": [],
-                    "access": "development",
-                },
-            }
-        },
-        "preconditions": [
-            {
-                "tensor": "w",
-                "role": "parameter",
-                "shape": [out_dim, in_dim],
-                "dtype": "f64",
-                "before_digest": w_before_digest,
-                "storage_group": "w",
-            }
-        ],
-        "required_capabilities": ["dense.cpu"],
-        "constraints": {
-            "gradient_free": True,
-            "preserve_tensor_shapes": True,
-            "max_changed_parameters": out_dim * in_dim,
-            "max_artifact_bytes": 4_194_304,
-            "max_temporary_bytes": 16_777_216,
-            "numerical": {
-                "accumulation_dtype": "f64",
-                "output_rounding": "nearest_ties_even",
-                "non_finite": "reject",
-                "max_abs_parameter": 10_000.0,
-                "backend_abs_tolerance": 0.0,
-            },
-        },
-        "effects": {
-            "reads": [region],
-            "writes": [region],
-            "buffer_writes": [],
-            "graph_changes": False,
-            "config_changes": [],
-            "tokenizer_changes": False,
-        },
-        "preservation": {"type": "experimental"},
-        "verification": verification_block,
-        "lineage": {
-            "parent_candidates": [],
-            "hypothesis": hyp_d,
-            "method": {
-                "schema_version": 1,
-                "target_update": "direct_tensor_edit",
-                "proposal_origin": "scripted",
-                "adaptation": "none",
-                "production_history": "direct_only",
-                "inspection_uses_backprop": False,
-                "parameter_update_uses_backprop": False,
-                "gradient_derived_update_values": False,
-                "alignment_fitted": False,
-                "optimizer_steps": 0,
-                "changed_parameters": out_dim * in_dim,
-            },
-        },
-        "extensions": {},
-    }
-    policy = {
-        "schema_version": 1,
-        "source": base_model_ref,
-        "contract": contract_d,
-        "objective": objective_d,
-        "experiment_protocol": exp_d,
-        "search_space": space_digest,
-        "verification": verification_block,
-        "allowed_extra_gyms": [],
-        "permissions": {
-            "schema_version": 1,
-            "tools": ["inspect", "direct_edit"],
-            "external_destinations": {},
-            "allow_gradient_inspection": False,
-            "allow_parameter_training": False,
-            "require_fully_gradient_free": True,
-            "allow_generated_gym": False,
-            "allow_downloads": False,
-        },
-        "operand_access": ["development"],
-        "backend": {
-            "id": "nf.native_cpu",
-            "version": "1",
-            "operations": ["add_delta"],
-            "capabilities": ["dense.cpu"],
-            "dtypes": ["f64"],
-            "accumulation_dtypes": ["f64"],
-            "fixed_scratch_bytes": 4096,
-        },
-        "bounds": {
-            "max_metadata_bytes": 1_048_576,
-            "max_source_checkpoint_bytes": 16_777_216,
-            "max_source_asset_bytes": 65_536,
-            "max_source_tensors": 16,
-            "max_observed_source_bytes": 16_777_216,
-            "max_temporary_bytes": 16_777_216,
-            "max_output_tensor_bytes": 16_777_216,
-            "max_validation_work": 10_000_000,
-            "max_kernel_work": 10_000_000,
-            "max_parameter_magnitude": 10_000.0,
-            "max_backend_abs_tolerance": 0.0,
-            "max_orthonormal_tolerance": 0.000001,
-        },
-    }
-
-    plan_handle = ir.compile(
-        source_handle,
-        program,
-        search_space,
-        policy,
-        {"merged_delta": delta_bytes},
-    )
-    candidate_handle = surgeon.apply(plan_handle, smoke_suite)
-    reloaded = candidate_handle.snapshot()
-    reload_ok = reloaded.parameter_digest == candidate_handle.parameter_digest
-    edited_bytes = candidate_handle.tensor_bytes("w")
     w_edited = (
-        torch.frombuffer(bytearray(edited_bytes), dtype=torch.float64)
+        torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
         .clone()
     )
     return (
         w_edited,
-        plan_handle.digest,
-        candidate_handle.digest,
-        w_before_digest,
-        candidate_handle.parameter_digest,
-        reload_ok,
+        tx.plan_digest,
+        tx.candidate_digest,
+        tx.before_parameter_digest,
+        tx.after_parameter_digest,
+        tx.reload_parity_verified,
     )
 
 
@@ -714,13 +419,24 @@ class FrontierAgentSessionReport:
 
 
 class FrontierAgentProgrammer:
-    """Interchangeable `claude-4-5-sonnet` / `gpt-6-astra` agent runner with identical tool schemas & experiment memory (WP-02, PRD §6)."""
+    """Interchangeable `claude-4-5-sonnet` / `gpt-6-astra` / custom agent runner with identical tool schemas & experiment memory (WP-02, PRD §6)."""
 
-    def __init__(self, agent_id: FrontierAgentId) -> None:
-        if agent_id not in ("claude-4-5-sonnet", "gpt-6-astra"):
+    def __init__(
+        self,
+        agent_id: FrontierAgentId,
+        *,
+        allow_custom_agent: bool = False,
+        extra_tool_schemas: Sequence[dict[str, Any]] = (),
+    ) -> None:
+        if not allow_custom_agent and agent_id not in ("claude-4-5-sonnet", "gpt-6-astra"):
             raise ValueError(f"Unsupported frontier agent: {agent_id!r}")
-        self.agent_id: FrontierAgentId = agent_id
-        self.tool_schemas = AGENT_TOOL_SCHEMAS
+        if not str(agent_id).strip():
+            raise ValueError("agent_id must be non-empty")
+        self.agent_id: FrontierAgentId = str(agent_id)
+        self.tool_schemas: tuple[dict[str, Any], ...] = (
+            *AGENT_TOOL_SCHEMAS,
+            *tuple(extra_tool_schemas),
+        )
         self.tool_schemas_digest = str(
             content_digest(canonicalize({"tools": list(self.tool_schemas)}))
         )
