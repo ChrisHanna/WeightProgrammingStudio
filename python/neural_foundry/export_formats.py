@@ -22,7 +22,7 @@ from .ir import (
     build_rounding_contract,
     unpack_matrix_bytes,
 )
-from .provenance import sha256_file, write_artifact_manifest
+from .provenance import parse_strict_json, sha256_file, write_artifact_manifest
 from .records import canonicalize, content_digest
 
 GGUF_MAGIC = b"GGUF"
@@ -53,6 +53,81 @@ _TOKENIZER_ASSETS = (
 )
 
 
+def _is_count(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _parse_safetensors_header(blob: Any) -> tuple[dict[str, dict[str, Any]], int]:
+    """Validate a whole safetensors layout; raises `ValueError`.
+
+    Tensors must have known dtypes, sizes matching their shapes, and offsets that cover the data
+    section exactly once, with no gaps, overlaps, trailing bytes or references outside it.
+    """
+    size = len(blob)
+    if size < 8:
+        raise ValueError("Safetensors file is too short for a header")
+    (header_length,) = struct.unpack_from("<Q", blob, 0)
+    if header_length > size - 8:
+        raise ValueError(f"Safetensors header length {header_length} runs past the end of the file")
+    header_end = 8 + header_length
+    header = parse_strict_json(bytes(blob[8:header_end]))
+    if not isinstance(header, dict):
+        raise ValueError("Safetensors header must be a JSON object")
+    tensors = {name: meta for name, meta in header.items() if name != "__metadata__"}
+    spans: list[tuple[int, int, str]] = []
+    for name, meta in tensors.items():
+        if not isinstance(meta, dict):
+            raise ValueError(f"Safetensors tensor {name!r} has a malformed entry")
+        dtype, shape, offsets = meta.get("dtype"), meta.get("shape"), meta.get("data_offsets")
+        element_bytes = _SAFETENSORS_DTYPE_BYTES.get(dtype.upper()) if isinstance(dtype, str) else None
+        if element_bytes is None:
+            raise ValueError(f"Unsupported safetensors dtype {dtype!r} for tensor {name!r}")
+        if not isinstance(shape, list) or not all(_is_count(d) for d in shape):
+            raise ValueError(f"Safetensors tensor {name!r} has an invalid shape {shape!r}")
+        if not isinstance(offsets, list) or len(offsets) != 2 or not all(_is_count(o) for o in offsets) or offsets[0] > offsets[1]:
+            raise ValueError(f"Safetensors tensor {name!r} has invalid data_offsets {offsets!r}")
+        if offsets[1] - offsets[0] != math.prod(shape) * element_bytes:
+            raise ValueError(f"Safetensors tensor {name!r}: shape {shape} doesn't match data_offsets {offsets}")
+        spans.append((offsets[0], offsets[1], name))
+    position = 0
+    for start, end, name in sorted(spans):
+        if start != position:
+            raise ValueError(f"Safetensors tensor {name!r} overlaps another tensor or leaves a gap")
+        position = end
+    if position != size - header_end:
+        raise ValueError("Safetensors data section doesn't match its tensors: truncated, or has trailing bytes")
+    return tensors, header_end
+
+
+def _require_finite(tensors: Mapping[str, Any]) -> None:
+    import torch
+
+    bad = sorted(name for name, tensor in tensors.items() if not bool(torch.isfinite(tensor).all().item()))
+    if bad:
+        raise ValueError(f"Tensors contain non-finite values: {bad}")
+
+
+def _require_matches_reference(loaded: Mapping[str, Any], reference_model: Any) -> None:
+    """A reloaded file has to be the same set of same-shaped tensors, whether or not prompts are run."""
+    expected = _extract_model_state_tensors(reference_model)
+    missing, unexpected = sorted(set(expected) - set(loaded)), sorted(set(loaded) - set(expected))
+    if missing:
+        raise ValueError(f"Reloaded checkpoint is missing tensors: {missing}")
+    if unexpected:
+        raise ValueError(f"Reloaded checkpoint has unexpected tensors: {unexpected}")
+    for name, tensor in loaded.items():
+        if tuple(tensor.shape) != tuple(expected[name].shape):
+            raise ValueError(f"Tensor {name!r} has shape {tuple(tensor.shape)}, expected {tuple(expected[name].shape)}")
+
+
+def _card_value(label: str, value: Any) -> str:
+    """Values placed in a model card can't carry line breaks, which could forge its front matter or body."""
+    text = str(value)
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or c in "\u0085\u2028\u2029" for c in text):
+        raise ValueError(f"Model card field {label} contains control characters")
+    return text
+
+
 def _map_file(path: Path) -> mmap.mmap:
     """Map a file read-only, so large checkpoints are paged in as tensors are read."""
     with open(path, "rb") as handle:
@@ -76,6 +151,8 @@ def _pack_gguf_string(s: str) -> bytes:
 def _unpack_gguf_string(buf: bytes | memoryview, offset: int) -> tuple[str, int]:
     (length,) = struct.unpack_from("<Q", buf, offset)
     offset += 8
+    if length > len(buf) - offset:
+        raise ValueError(f"GGUF string of {length} bytes runs past the end of the file")
     raw = bytes(buf[offset : offset + length])
     return raw.decode("utf-8"), offset + length
 
@@ -598,8 +675,10 @@ class ShardedMmapCheckpoint:
     def _open_shards(self) -> None:
         index_path = self.checkpoint_dir / self.index_filename
         if index_path.is_file():
-            idx_doc = json.loads(index_path.read_bytes())
-            weight_map = dict(idx_doc.get("weight_map", {}))
+            idx_doc = parse_strict_json(index_path.read_bytes())
+            weight_map = idx_doc.get("weight_map") if isinstance(idx_doc, dict) else None
+            if not isinstance(weight_map, dict) or not all(isinstance(v, str) for v in weight_map.values()):
+                raise ValueError(f"{self.index_filename} has no valid weight_map index")
             shard_names = sorted(set(weight_map.values()))
         else:
             single = self.checkpoint_dir / "model.safetensors"
@@ -607,6 +686,7 @@ class ShardedMmapCheckpoint:
                 raise FileNotFoundError(
                     f"Neither {index_path} nor {single} found in {self.checkpoint_dir}"
                 )
+            weight_map = None
             shard_names = ["model.safetensors"]
 
         for shard_name in shard_names:
@@ -625,20 +705,25 @@ class ShardedMmapCheckpoint:
             self._mmaps[shard_name] = mm
             self.total_mapped_bytes += size
 
-            (hdr_len,) = struct.unpack_from("<Q", mm, 0)
-            hdr_end = 8 + hdr_len
-            hdr_obj = json.loads(bytes(mm[8:hdr_end]).decode("utf-8"))
-            for tname, meta in hdr_obj.items():
-                if tname == "__metadata__":
-                    continue
-                offsets = meta["data_offsets"]
-                self.tensors[tname] = ShardedMmapTensorSlice(
-                    shard_filename=shard_name,
-                    dtype=str(meta["dtype"]),
-                    shape=tuple(int(d) for d in meta["shape"]),
-                    data_offsets=(int(offsets[0]), int(offsets[1])),
-                    header_end_offset=hdr_end,
-                )
+            try:
+                entries, hdr_end = _parse_safetensors_header(mm)
+                for tname, meta in entries.items():
+                    if tname in self.tensors:
+                        raise ValueError(f"Tensor {tname!r} is in more than one shard")
+                    offsets = meta["data_offsets"]
+                    self.tensors[tname] = ShardedMmapTensorSlice(
+                        shard_filename=shard_name,
+                        dtype=str(meta["dtype"]),
+                        shape=tuple(meta["shape"]),
+                        data_offsets=(offsets[0], offsets[1]),
+                        header_end_offset=hdr_end,
+                    )
+            except ValueError:
+                self.close()
+                raise
+        if weight_map is not None and {name: info.shard_filename for name, info in self.tensors.items()} != weight_map:
+            self.close()
+            raise ValueError(f"{self.index_filename} doesn't match the tensors in its shards")
 
     def read_tensor_view(self, name: str) -> memoryview:
         """Return a zero-copy read-only memoryview into the mmap shard (or CoW buffer if modified)."""
@@ -816,6 +901,7 @@ def export_huggingface_safetensors(
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
+    _require_finite(tensors)
     dt = dtype.lower()
     st_dtype = {"f16": "F16", "bf16": "BF16", "f32": "F32", "f64": "F64"}[dt]
 
@@ -873,15 +959,11 @@ def reload_and_verify_huggingface_safetensors(
     st_path = ckpt_dir / "model.safetensors"
     blob_path = st_path
     blob = _map_file(st_path)
-    (hdr_len,) = struct.unpack_from("<Q", blob, 0)
-    hdr_end = 8 + hdr_len
-    header = json.loads(blob[8:hdr_end].decode("utf-8"))
+    header, hdr_end = _parse_safetensors_header(blob)
 
     loaded_tensors: dict[str, Any] = {}
     digest_items: list[dict[str, Any]] = []
     for name, meta in sorted(header.items()):
-        if name == "__metadata__":
-            continue
         dt = str(meta["dtype"]).upper()
         shape = tuple(int(d) for d in meta["shape"])
         s_off, e_off = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
@@ -900,6 +982,8 @@ def reload_and_verify_huggingface_safetensors(
         loaded_tensors[name] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
         digest_items.append({"name": name, "digest": _sha256(raw)})
 
+    _require_finite(loaded_tensors)
+    _require_matches_reference(loaded_tensors, reference_model)
     reloaded = _apply_state_tensors_to_clone(reference_model, loaded_tensors)
     matches = 0
     max_diff = 0.0
@@ -937,6 +1021,7 @@ def export_gguf_v3(
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
+    _require_finite(tensors)
     qmode = quantization.lower()
     if qmode == "q4_k_m":
         raise ValueError(
@@ -1050,22 +1135,18 @@ def export_gguf_v3(
     return out_path
 
 
-def reload_and_verify_gguf_v3(
-    gguf_path: str | Path,
-    reference_model: Any,
-    prompts: Sequence[str],
-) -> tuple[Any, ExportReloadRoundTripReceipt]:
-    """Parse and reload a GGUF v3 binary file into a fresh model instance and verify that behavioral gains survive."""
+def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read every tensor of a GGUF v3 file, refusing anything outside or inconsistent with the file."""
     import torch
 
-    path = Path(gguf_path).resolve()
-    blob_path = path
-    blob = _map_file(path)
+    size = len(blob)
     if blob[:4] != GGUF_MAGIC:
         raise ValueError(f"Invalid GGUF magic in {path}")
     (version, tensor_count, kv_count) = struct.unpack_from("<IQQ", blob, 4)
     if version != GGUF_VERSION_V3:
         raise ValueError(f"Unsupported GGUF version {version}; expected {GGUF_VERSION_V3}")
+    if tensor_count > size or kv_count > size:
+        raise ValueError(f"GGUF declares more entries than {path} could hold")
 
     offset = 24
     metadata: dict[str, Any] = {}
@@ -1093,6 +1174,8 @@ def reload_and_verify_gguf_v3(
         tname, offset = _unpack_gguf_string(blob, offset)
         (ndim,) = struct.unpack_from("<I", blob, offset)
         offset += 4
+        if ndim > (size - offset) // 8:
+            raise ValueError(f"GGUF tensor {tname!r} declares {ndim} dimensions")
         dims = []
         for _ in range(ndim):
             (d,) = struct.unpack_from("<Q", blob, offset)
@@ -1101,42 +1184,69 @@ def reload_and_verify_gguf_v3(
         (ggml_type, rel_offset) = struct.unpack_from("<IQ", blob, offset)
         offset += 12
         tensor_descriptors.append((tname, tuple(dims), int(ggml_type), int(rel_offset)))
+    if not tensor_descriptors:
+        raise ValueError(f"GGUF file {path} has no tensors")
 
-    alignment = int(metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT))
+    alignment = metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT)
+    if type(alignment) is not int or alignment <= 0 or alignment & (alignment - 1):
+        raise ValueError(f"Invalid GGUF alignment {alignment!r}")
     data_base = _align_offset(offset, alignment)
 
+    block_bytes = {GGML_TYPE_Q4_0: 18, GGML_TYPE_Q8_0: 34, NF_TYPE_Q4_BLOCK: 20}
+    element_bytes = {GGML_TYPE_F32: 4, GGML_TYPE_F16: 2}
+    dequantize = {GGML_TYPE_Q4_0: dequantize_matrix_q4_0, GGML_TYPE_Q8_0: dequantize_matrix_q8_0, NF_TYPE_Q4_BLOCK: dequantize_matrix_nf_q4}
     loaded_tensors: dict[str, Any] = {}
     digest_items: list[dict[str, Any]] = []
-    for tname, shape, ggml_type, rel_off in tensor_descriptors:
+    position = 0
+    for tname, shape, ggml_type, rel_off in sorted(tensor_descriptors, key=lambda d: d[3]):
+        if tname in loaded_tensors:
+            raise ValueError(f"Duplicate GGUF tensor {tname!r}")
         n = math.prod(shape)
-        start = data_base + rel_off
-        if ggml_type == GGML_TYPE_F32:
-            raw = blob[start : start + n * 4]
-            vals = [float(x) for x in struct.unpack(f"<{n}f", raw)]
-            loaded_tensors[tname] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
-        elif ggml_type == GGML_TYPE_F16:
-            raw = blob[start : start + n * 2]
-            vals = [float(x) for x in struct.unpack(f"<{n}e", raw)]
-            loaded_tensors[tname] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
-        elif ggml_type == GGML_TYPE_Q4_0:
-            num_blocks = (n + 31) // 32
-            raw = blob[start : start + num_blocks * 18]
-            mat = dequantize_matrix_q4_0(raw, (shape[0], shape[1]))
-            loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
-        elif ggml_type == GGML_TYPE_Q8_0:
-            num_blocks = (n + 31) // 32
-            raw = blob[start : start + num_blocks * 34]
-            mat = dequantize_matrix_q8_0(raw, (shape[0], shape[1]))
-            loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
-        elif ggml_type == NF_TYPE_Q4_BLOCK:
-            num_blocks = (n + 31) // 32
-            raw = blob[start : start + num_blocks * 20]
-            mat = dequantize_matrix_nf_q4(raw, (shape[0], shape[1]))
-            loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
+        if ggml_type in element_bytes:
+            length = n * element_bytes[ggml_type]
+        elif ggml_type in block_bytes:
+            if len(shape) != 2:
+                raise ValueError(f"GGUF block-quantized tensor {tname!r} must be a matrix, got shape {shape}")
+            length = ((n + 31) // 32) * block_bytes[ggml_type]
         else:
             raise ValueError(f"Unsupported GGML tensor type {ggml_type}")
+        if rel_off % alignment or rel_off < position:
+            raise ValueError(f"GGUF tensor {tname!r} is misaligned or overlaps another tensor")
+        start = data_base + rel_off
+        if start + length > size:
+            raise ValueError(f"GGUF tensor {tname!r} runs past the end of the file")
+        raw = blob[start : start + length]
+        if ggml_type == GGML_TYPE_F32:
+            values: Any = [float(x) for x in struct.unpack(f"<{n}f", raw)]
+        elif ggml_type == GGML_TYPE_F16:
+            values = [float(x) for x in struct.unpack(f"<{n}e", raw)]
+        else:
+            values = dequantize[ggml_type](raw, (shape[0], shape[1]))
+        loaded_tensors[tname] = torch.tensor(values, dtype=torch.float64).reshape(shape)
         digest_items.append({"name": tname, "digest": _sha256(raw)})
+        position = rel_off + length
+    if data_base + position != size:
+        raise ValueError(f"GGUF file {path} has trailing bytes after its last tensor")
+    return loaded_tensors, digest_items
 
+
+def reload_and_verify_gguf_v3(
+    gguf_path: str | Path,
+    reference_model: Any,
+    prompts: Sequence[str],
+) -> tuple[Any, ExportReloadRoundTripReceipt]:
+    """Parse and reload a GGUF v3 binary file into a fresh model instance and verify that behavioral gains survive."""
+    import torch
+
+    path = Path(gguf_path).resolve()
+    blob_path = path
+    blob = _map_file(path)
+    try:
+        loaded_tensors, digest_items = _parse_gguf_tensors(blob, path)
+    except (struct.error, IndexError, OverflowError) as exc:
+        raise ValueError(f"Corrupt GGUF file {path}: {exc}") from exc
+    _require_finite(loaded_tensors)
+    _require_matches_reference(loaded_tensors, reference_model)
     reloaded = _apply_state_tensors_to_clone(reference_model, loaded_tensors)
     matches = 0
     max_diff = 0.0
@@ -1200,8 +1310,17 @@ def export_huggingface_hub_bundle(
         if isinstance(open_patch.get("security_scan"), Mapping)
         else {}
     )
-    base_model_id = str(sbom.get("base_model_id", getattr(edited_model, "model_name", "unknown")))
-    patch_digest = str(open_patch.get("patch_digest", content_digest(patch_bytes)))
+    base_model_id = _card_value("base_model", sbom.get("base_model_id", getattr(edited_model, "model_name", "unknown")))
+    patch_digest = _card_value("patch_digest", open_patch.get("patch_digest", content_digest(patch_bytes)))
+    _card_value("repo_id", repo_id)
+    for label, section, keys in (
+        ("sbom", sbom, ("base_checkpoint_digest", "candidate_checkpoint_digest", "changed_parameters")),
+        ("rounding_contract", r_contract, ("source_dtype", "accumulation_dtype", "output_dtype", "rounding_mode")),
+        ("evaluation_provenance", eval_prov, ("runtime", "evidence_grade")),
+        ("security_scan", sec_scan, ("backdoor_scan_passed",)),
+    ):
+        for key in keys:
+            _card_value(f"{label}.{key}", section.get(key))
 
     model_card = "\n".join(
         [

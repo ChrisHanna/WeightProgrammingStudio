@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .export_formats import _apply_state_tensors_to_clone, _extract_model_state_tensors
+from .provenance import load_signed_document
 from .records import canonicalize, content_digest
 
 
@@ -23,8 +24,10 @@ def _tensor_digest(t: Any) -> str:
     import struct
 
     flat = [float(x) for x in t.detach().cpu().reshape(-1).tolist()]
+    # The shape is hashed too: the same values reshaped are a different tensor.
+    shape = struct.pack(f"<Q{t.ndim}Q", t.ndim, *t.shape)
     raw = struct.pack(f"<{len(flat)}d", *flat)
-    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    return f"sha256:{hashlib.sha256(shape + raw).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,7 @@ def diff_model_weights(
     base_model: Any,
     edited_model: Any,
     *,
-    abs_tol: float = 1e-12,
+    abs_tol: float = 0.0,
 ) -> PatchDiffSummary:
     """Compute a human-readable and quantitative layer-by-layer diff between base and edited models."""
     import math
@@ -98,18 +101,22 @@ def diff_model_weights(
         n_elem = int(b_t.numel())
         total_params += n_elem
         delta = e_t - b_t
-        changed = int((delta.abs() > abs_tol).sum().item())
+        # A change to or from NaN makes a NaN delta, which no comparison with a tolerance would count.
+        changed = int(((delta.abs() > abs_tol) | delta.isnan()).sum().item())
         if changed > 0:
             layers_touched.append(name)
             total_changed += changed
-            frob = float(torch.linalg.norm(delta).item())
+            finite = bool(torch.isfinite(delta).all().item())
+            frob = float(torch.linalg.norm(delta).item()) if finite else math.inf
             sum_frob_sq += frob * frob
-            if delta.ndim == 2:
+            if not finite:
+                l2_spec = math.inf
+            elif delta.ndim == 2:
                 svals = torch.linalg.svdvals(delta)
                 l2_spec = float(svals[0].item()) if svals.numel() > 0 else 0.0
             else:
                 l2_spec = frob
-            linf = float(delta.abs().max().item())
+            linf = float(delta.abs().max().item()) if finite else math.inf
             if linf > max_linf:
                 max_linf = linf
             layer_diffs.append(
@@ -217,6 +224,21 @@ def sign_patch_envelope(
     }
 
 
+_ENVELOPE_KEYS = frozenset(
+    {"schema_version", "kind", "signature_scheme", "patch_digest", "signer_id", "public_key", "key_fingerprint", "signature", "patch"}
+)
+
+
+def _canonical(document: Mapping[str, Any]) -> bytes:
+    """Canonical bytes of an untrusted document; anything the bounded parser refuses is a `ValueError`."""
+    from . import _native
+
+    try:
+        return canonicalize(dict(document))
+    except (_native.NativeError, RecursionError, TypeError) as exc:
+        raise ValueError(f"Document can't be canonicalized: {exc}") from exc
+
+
 def verify_patch_signature(
     signed_envelope: Mapping[str, Any],
     *,
@@ -227,18 +249,27 @@ def verify_patch_signature(
 
     if signed_envelope.get("kind") != "nf_signed_patch_envelope":
         raise ValueError("Expected nf_signed_patch_envelope document")
+    if signed_envelope.get("schema_version") != 1 or type(signed_envelope.get("schema_version")) is not int:
+        raise ValueError("Unsupported signed patch envelope schema_version")
     patch_obj = signed_envelope.get("patch")
     if not isinstance(patch_obj, Mapping):
         raise ValueError("Signed patch envelope is missing 'patch' mapping")
-    actual_digest = str(content_digest(canonicalize(dict(patch_obj))))
+    unknown = set(signed_envelope) - _ENVELOPE_KEYS
+    if unknown:
+        raise ValueError(f"Signed patch envelope has unknown fields: {sorted(unknown)}")
+    actual_digest = str(content_digest(_canonical(patch_obj)))
     if actual_digest != str(signed_envelope.get("patch_digest", "")):
         raise ValueError("Tampered patch payload: canonical digest does not match declared patch_digest")
     if signed_envelope.get("signature_scheme") != SIGNATURE_SCHEME:
         raise ValueError(f"Unsupported signature scheme: {signed_envelope.get('signature_scheme')!r}")
-    signer_id = str(signed_envelope.get("signer_id", ""))
-    fingerprint = _native.ed25519_verify_digest(
-        public_key, signer_id, actual_digest, str(signed_envelope.get("signature", ""))
-    )
+    signer_id = signed_envelope.get("signer_id")
+    signature = signed_envelope.get("signature")
+    if not isinstance(signer_id, str) or not isinstance(signature, str):
+        raise ValueError("Signed patch envelope needs a string signer_id and signature")
+    try:
+        fingerprint = _native.ed25519_verify_digest(public_key, signer_id, actual_digest, signature)
+    except _native.NativeError as exc:
+        raise ValueError(f"Signature rejected: {exc}") from exc
     return {
         "verified": True,
         "signature_scheme": SIGNATURE_SCHEME,
@@ -464,6 +495,7 @@ def scan_patch_for_backdoor_patterns(
     # Limits scale with the tensors edited, so the check means the same thing at any model size.
     base_tensors = _extract_model_state_tensors(base_model)
     touched = [base_tensors[name].to(torch.float64) for name in diff.layers_touched if name in base_tensors]
+    touched = [t for t in touched if bool(torch.isfinite(t).all().item())]
     if max_spectral_norm is None:
         reference = max((float(torch.linalg.matrix_norm(t, ord=2)) for t in touched if t.ndim == 2), default=1.0)
         max_spectral_norm = relative_spectral_factor * max(reference, 1e-6)
@@ -475,9 +507,10 @@ def scan_patch_for_backdoor_patterns(
         {
             "check": "spectral_and_linf_spike_bound",
             "passed": spec_ok,
-            "max_observed_spectral_norm": round(max_obs_spec, 4),
+            # Infinity has no canonical JSON form; `null` here means the edit's norm wasn't finite.
+            "max_observed_spectral_norm": round(max_obs_spec, 4) if math.isfinite(max_obs_spec) else None,
             "max_spectral_norm_limit": round(max_spectral_norm, 4),
-            "max_observed_linf_norm": round(diff.max_linf_norm, 4),
+            "max_observed_linf_norm": round(diff.max_linf_norm, 4) if math.isfinite(diff.max_linf_norm) else None,
             "max_linf_norm_limit": round(max_linf_norm, 4),
         }
     )
@@ -524,7 +557,7 @@ def scan_patch_for_backdoor_patterns(
 
     # 6. Distribution of the edit: reported for review, not used to pass or fail.
     concentration = max(
-        (ld.spectral_l2_norm / ld.frobenius_norm for ld in diff.layer_diffs if ld.frobenius_norm > 0), default=0.0
+        (ld.spectral_l2_norm / ld.frobenius_norm for ld in diff.layer_diffs if 0 < ld.frobenius_norm < math.inf), default=0.0
     )
     checks.append({"check": "edit_rank_concentration", "passed": True, "informational": True, "value": round(concentration, 4)})
 
@@ -613,7 +646,7 @@ def build_open_patch_v1(
     unsigned_body = {
         "schema_version": 1,
         "kind": "nf_open_weight_patch_v1",
-        "format_version": "1.0.0",
+        "format_version": OPEN_PATCH_FORMAT_VERSION,
         "base_model": {
             "model_id": base_model_id,
             "checkpoint": diff_summary.base_parameter_digest,
@@ -636,6 +669,7 @@ def build_open_patch_v1(
 
 
 OPEN_PATCH_MAX_BYTES = 64 * 1024 * 1024
+OPEN_PATCH_FORMAT_VERSION = "1.0.0"
 _OPEN_PATCH_REQUIRED = frozenset(
     {
         "schema_version", "kind", "format_version", "base_model", "candidate_checkpoint_digest",
@@ -648,6 +682,12 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 def validate_open_patch_schema(payload: Mapping[str, Any]) -> None:
     """Strict structure check for a signed Open Patch v1 payload; raises `ValueError`. Mirrored in `nf verify`."""
 
+    def is_count(value: Any) -> bool:
+        return type(value) is int
+
+    def is_number(value: Any) -> bool:
+        return type(value) in (int, float)
+
     def require_digest(value: Any, label: str) -> None:
         if not isinstance(value, str) or not _DIGEST.match(value):
             raise ValueError(f"Open patch schema: {label} is not a sha256 digest")
@@ -657,8 +697,10 @@ def validate_open_patch_schema(payload: Mapping[str, Any]) -> None:
         raise ValueError(
             f"Open patch schema: missing {sorted(_OPEN_PATCH_REQUIRED - keys)}, unknown {sorted(keys - _OPEN_PATCH_REQUIRED)}"
         )
-    if payload["kind"] != "nf_open_weight_patch_v1" or payload["schema_version"] != 1:
+    if payload["kind"] != "nf_open_weight_patch_v1" or not is_count(payload["schema_version"]) or payload["schema_version"] != 1:
         raise ValueError("Open patch schema: unsupported kind or schema_version")
+    if payload["format_version"] != OPEN_PATCH_FORMAT_VERSION:
+        raise ValueError(f"Open patch schema: unsupported format_version {payload['format_version']!r}")
     base, sbom = payload["base_model"], payload["sbom"]
     if not isinstance(base, Mapping) or not isinstance(sbom, Mapping):
         raise ValueError("Open patch schema: base_model and sbom must be objects")
@@ -671,23 +713,25 @@ def validate_open_patch_schema(payload: Mapping[str, Any]) -> None:
     if sbom["candidate_checkpoint_digest"] != payload["candidate_checkpoint_digest"]:
         raise ValueError("Open patch schema: SBOM candidate digest differs from the patch")
     total, changed = payload["total_parameters"], sbom.get("changed_parameters")
-    if not isinstance(total, int) or not isinstance(changed, int) or not 0 < changed <= total or sbom.get("total_parameters") != total:
+    if not is_count(total) or not is_count(changed) or not is_count(sbom.get("total_parameters")) or not 0 < changed <= total or sbom["total_parameters"] != total:
         raise ValueError("Open patch schema: parameter counts are inconsistent")
     operations = payload["operations"]
     if not isinstance(operations, list) or not operations:
         raise ValueError("Open patch schema: operations must be a non-empty list")
     for op in operations:
         body = op.get("operation") if isinstance(op, Mapping) else None
-        if not isinstance(body, Mapping) or not isinstance(body.get("target"), Mapping) or not body.get("type"):
+        if not isinstance(body, Mapping) or not isinstance(body.get("target"), Mapping) or not body["target"].get("tensor"):
+            raise ValueError("Open patch schema: each operation needs a type and target")
+        if not isinstance(body.get("type"), str) or not body["type"] or not isinstance(body["target"]["tensor"], str):
             raise ValueError("Open patch schema: each operation needs a type and target")
         for metric in ("frobenius_norm", "l2_norm", "linf_norm"):
             value = body.get(metric, 0.0)
-            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            if not is_number(value) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"Open patch schema: invalid {metric}")
     controls = payload["evaluation_provenance"].get("controls") if isinstance(payload["evaluation_provenance"], Mapping) else None
     if isinstance(controls, Mapping):
         for name, value in controls.items():
-            if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
+            if not is_number(value) or not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"Open patch schema: control {name} is outside [0, 1]")
 
 
@@ -706,7 +750,9 @@ def verify_open_patch_v1(
     if isinstance(open_patch_or_path, (str, Path)):
         if Path(open_patch_or_path).stat().st_size > OPEN_PATCH_MAX_BYTES:
             raise ValueError("Open patch exceeds the maximum artifact size")
-        doc = json.loads(Path(open_patch_or_path).read_bytes())
+        doc = load_signed_document(open_patch_or_path)
+        if not isinstance(doc, Mapping):
+            raise ValueError("Open patch must be a JSON object")
     elif isinstance(open_patch_or_path, Mapping):
         doc = dict(open_patch_or_path)
     else:
@@ -719,8 +765,10 @@ def verify_open_patch_v1(
     payload = envelope["patch"]
     if "signature_envelope" in doc:
         body = {k: v for k, v in doc.items() if k not in {"signature_envelope", "patch_digest", "public_key"}}
-        if canonicalize(body) != canonicalize(dict(payload)):
+        if _canonical(body) != _canonical(payload):
             raise ValueError("Open patch body differs from its signed payload")
+        if doc.get("patch_digest", sig_res["patch_digest"]) != sig_res["patch_digest"]:
+            raise ValueError("Open patch's patch_digest differs from its signed digest")
 
     validate_open_patch_schema(payload)
 
@@ -739,7 +787,7 @@ def verify_open_patch_v1(
         raise ValueError("SBOM changed_parameters must be positive")
 
     rc = section("rounding_contract")
-    if not rc.get("source_dtype") or not rc.get("accumulation_dtype") or not rc.get("rounding_mode"):
+    if not all(isinstance(rc.get(k), str) and rc[k] for k in ("source_dtype", "accumulation_dtype", "rounding_mode")):
         raise ValueError("Incomplete rounding_contract in open patch")
 
     sec = section("security_scan")
