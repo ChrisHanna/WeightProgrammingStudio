@@ -1,0 +1,90 @@
+{
+ "lora": {
+  "config": {
+   "kind": "lora",
+   "lr": 0.0003,
+   "steps": 300,
+   "retention_weight": 1.0,
+   "targets": "all_down_proj",
+   "rank": 4,
+   "seed": 0,
+   "guard_batch": 8,
+   "checkpoints": []
+  },
+  "cost": {
+   "optimizer_steps": 300,
+   "wall_seconds": 57.9930471330008,
+   "trainable_parameters": 15360,
+   "changed_parameters": 393216,
+   "total_model_parameters": 14067712,
+   "peak_rss_bytes": 495181824,
+   "delta_l2_norm": 0.7072332080664001
+  },
+  "weights_digest": "67998b4dae78e2849bbaaa009eb17d75264be1f26831f4728b93545e275aa8ff",
+  "dev_accuracy": 1.0,
+  "val_accuracy": 1.0,
+  "practice_retention": 0.85,
+  "selected_on": {
+   "steps": 300,
+   "val_accuracy": 1.0,
+   "val_loss": 0.03625089403400609,
+   "retention_tune_accuracy": 0.8,
+   "dev_accuracy": 1.0,
+   "wall_seconds": 57.34330742896418
+  },
+  "tuning_trials": 60,
+  "tuning_optimizer_steps": 18000,
+  "tuning_wall_seconds": 5269.701835267857,
+  "other_seeds": [
+   {
+    "seed": 1,
+    "dev_accuracy": 1.0,
+    "val_accuracy": 1.0,
+    "practice_retention": 0.9
+   },
+   {
+    "seed": 2,
+    "dev_accuracy": 1.0,
+    "val_accuracy": 1.0,
+    "practice_retention": 0.9
+   }
+  ]
+ },
+ "sft": {
+  "config": {
+   "kind": "sft",
+   "lr": 3e-05,
+   "steps": 150,
+   "retention_weight": 1.0,
+   "targets": "all",
+   "rank": 0,
+   "seed": 0,
+   "guard_batch": 8,
+   "checkpoints": []
+  },
+  "cost": {
+   "optimizer_steps": 150,
+   "wall_seconds": 136.3274456099898,
+   "trainable_parameters": 14067712,
+   "changed_parameters": 7641205,
+   "total_model_parameters": 14067712,
+   "peak_rss_bytes": 1115824128,
+   "delta_l2_norm": 1.4664651916055855
+  },
+  "weights_digest": "0f2b8a7e1a595575ac0f9dfb59138723c29f98a59cd63bcae2a574f23b0ca391",
+  "dev_accuracy": 1.0,
+  "val_accuracy": 1.0,
+  "practice_retention": 0.8,
+  "selected_on": {
+   "steps": 150,
+   "val_accuracy": 1.0,
+   "val_loss": 0.0009605695230626883,
+   "retention_tune_accuracy": 0.8,
+   "dev_accuracy": 1.0,
+   "wall_seconds": 168.35625009896467
+  },
+  "tuning_trials": 22,
+  "tuning_optimizer_steps": 5400,
+  "tuning_wall_seconds": 4855.176544644783
+ }
+}
