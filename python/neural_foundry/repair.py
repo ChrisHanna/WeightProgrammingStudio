@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from .method_plans import VerifiedMethodSteps, low_rank_step, verify_method_steps
 from .pythia import _compile_and_apply_rust_low_rank_update
 
 
@@ -42,6 +43,7 @@ class AttractorRepair:
     edited_weight: torch.Tensor | None
     plan_digest: str
     candidate_digest: str
+    edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
 
 def diagnose_attractor(
@@ -68,6 +70,11 @@ def output_direction_for_token(model: Any, token_id: int) -> torch.Tensor:
     return vector / torch.linalg.norm(vector)
 
 
+def output_projection_factors(weight: torch.Tensor, direction: torch.Tensor, *, factor: float) -> tuple[torch.Tensor, torch.Tensor]:
+    w = weight.to(torch.float64)
+    return (-factor * direction).unsqueeze(1).contiguous(), (direction @ w).unsqueeze(0).contiguous()
+
+
 def project_out_output_direction(
     weight: torch.Tensor,
     direction: torch.Tensor,
@@ -77,8 +84,7 @@ def project_out_output_direction(
 ) -> tuple[torch.Tensor, str, str]:
     """Remove `factor` of `direction` from the weight's output, through the Rust executor."""
     w = weight.to(torch.float64)
-    left = (-factor * direction).unsqueeze(1).contiguous()
-    right = (direction @ w).unsqueeze(0).contiguous()
+    left, right = output_projection_factors(w, direction, factor=factor)
     edited, plan, candidate, _, _, reload_ok = _compile_and_apply_rust_low_rank_update(
         w_orig=w,
         left_factors=left,
@@ -150,7 +156,10 @@ def repair_repetition_attractor(
 
     if best is None:
         return AttractorRepair(diagnosis, tuple(tried), None, None, "", "")
-    return AttractorRepair(diagnosis, tuple(tried), best[1], best[2], best[3], best[4])
+    chosen = best[1]
+    left, right = output_projection_factors(model.tensors[chosen.site], direction, factor=chosen.factor)
+    steps = verify_method_steps(model, (low_rank_step(chosen.site, "attractor_projection", left, right),), {chosen.site: best[2]})
+    return AttractorRepair(diagnosis, tuple(tried), chosen, best[2], best[3], best[4], steps)
 
 
 def sham_output_projection(

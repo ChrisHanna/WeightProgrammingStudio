@@ -325,6 +325,7 @@ class OrthogonalPatchCompositionReceipt:
     rust_candidate_digest: str
     reload_parity_verified: bool
     composed_weight: Any
+    edit_steps: Any = ()
 
 
 def compose_overlapping_patches_orthogonal(
@@ -337,6 +338,7 @@ def compose_overlapping_patches_orthogonal(
     """Resolve overlapping multi-parent patch conflicts by projecting each subsequent patch delta onto the right-singular orthogonal complement of earlier patches, then compiling into Rust Weight IR."""
     import torch
     from .ir import WeightIRTransactionBuilder
+    from .method_plans import add_delta_step, verify_method_steps
 
     if len(edited_weights) < 2:
         raise ValueError("compose_overlapping_patches_orthogonal requires at least 2 edited weights")
@@ -396,6 +398,9 @@ def compose_overlapping_patches_orthogonal(
         rust_candidate_digest=tx.candidate_digest,
         reload_parity_verified=tx.reload_parity_verified,
         composed_weight=w_composed,
+        edit_steps=verify_method_steps(
+            {target_site: w0}, (add_delta_step(target_site, "orthogonal_patch_compose", accumulated_delta),), {target_site: w_composed}
+        ),
     )
 
 

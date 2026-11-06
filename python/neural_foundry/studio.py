@@ -651,6 +651,7 @@ class WeightEditorToolInterface:
                 failure=str(arguments.get("failure", "looping")),
             )
             candidate = result.pop("edited_model")
+            result.pop("edit_plan")  # Tool results stay JSON.
             transaction_id = ""
             if candidate is not None:
                 base = self._studio.select_model(str(arguments["model"]))
@@ -842,11 +843,8 @@ class WeightProgrammingStudio:
 
         A rejected candidate is returned with its reason and is never packaged for publishing.
         """
-        from .export_formats import (
-            _apply_state_tensors_to_clone,
-            _extract_model_state_tensors,
-            export_huggingface_hub_bundle,
-        )
+        from .export_formats import export_huggingface_hub_bundle
+        from .method_plans import edit_plan_from_steps
         from .prd_adapters import SEALED_RETENTION_PROMPTS
         from .provenance import evidence_grade_for_model
         from .repair import repair_repetition_attractor, sham_output_projection
@@ -857,7 +855,6 @@ class WeightProgrammingStudio:
         resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
         gym = self.gyms.get(gym_key)
         grade = evidence_grade_for_model(resolved_model)
-        tensors = _extract_model_state_tensors(resolved_model)
 
         def encodable(prompts: Any) -> list[str]:
             return [p for p in prompts if len(resolved_model.tokenizer.encode(p)) > 0]
@@ -885,11 +882,13 @@ class WeightProgrammingStudio:
                     "verification": {"verified": False, "rejection_reason": reason},
                     "public_key": None,
                     "hub_bundle": None,
+                    "edit_plan": None,
                 }
             attractor = found.diagnosis.token_id
             layer, site = found.selected.layer, found.selected.site
-            tensors[site] = found.edited_weight.detach().cpu()
-            edited_model = _apply_state_tensors_to_clone(resolved_model, tensors)
+            # The plan's candidate is the edited model, so the plan adds no model copy.
+            edit_plan = edit_plan_from_steps(resolved_model, found.edit_steps)
+            edited_model = edit_plan.execute().model
             declared_sites = [site]
             plan_digest, candidate_digest = found.plan_digest, found.candidate_digest
             sham = sham_output_projection(resolved_model, layer, factor=found.selected.factor)
@@ -915,9 +914,8 @@ class WeightProgrammingStudio:
                 use_covariance_cache=True,
                 target_strength=80.0,
             )
-            for l_idx, w_t in (edit_rec.edited_weights_by_layer or {}).items():
-                tensors[resolved_model.mlp_down_proj_site(l_idx)] = w_t
-            edited_model = _apply_state_tensors_to_clone(resolved_model, tensors)
+            edit_plan = edit_plan_from_steps(resolved_model, edit_rec.edit_steps)
+            edited_model = edit_plan.execute().model
             declared_sites = [resolved_model.mlp_down_proj_site(l_idx) for l_idx in edit_rec.target_layers]
             plan_digest, candidate_digest = edit_rec.rust_plan_digest, edit_rec.rust_candidate_digest
             study = self.run_reusable_gym_study(resolved_model, gym=gym_key, target_strength=80.0)
@@ -997,6 +995,7 @@ class WeightProgrammingStudio:
             "verification": ver,
             "public_key": kp["public_key"],
             "hub_bundle": hub_bundle,
+            "edit_plan": edit_plan,
         }
 
     @staticmethod

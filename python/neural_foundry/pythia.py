@@ -30,6 +30,7 @@ import torch.nn.functional as F
 
 from . import evals, ir
 from .gym_proposal import GymWeightProposalSpec, ProposedOperation, ResolvedGymWeightProposal, SemanticSite
+from .method_plans import VerifiedMethodSteps, low_rank_step, verify_method_steps
 from .provenance import evidence_grade_for_model
 from .records import canonicalize, content_digest
 
@@ -1364,6 +1365,8 @@ class PythiaGymTaskReport:
     pre_registration: evals.PreRegisteredStudyPlan | None = None
     # Frozen before any holdout evaluation. Empty for architectures with no resolver.
     gym_proposals: tuple[GymProposalCandidate, ...] = ()
+    edited_weight: torch.Tensor | None = None
+    edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
     @property
     def selected_proposal(self) -> ResolvedGymWeightProposal | None:
@@ -1987,7 +1990,12 @@ def run_pythia_gym_task_learning_study(
         caller_role="verifier",
     )
 
+    final_site = model.mlp_down_proj_site(final_layer)
     return PythiaGymTaskReport(
+        edited_weight=w_b3_rust,
+        edit_steps=verify_method_steps(
+            model, (low_rank_step(final_site, "gym_contrastive_prefix_nullspace", left_u3, right_v3),), {final_site: w_b3_rust}
+        ),
         model_name=model.model_name,
         gym_id=gym.gym_id,
         skills_taught=gym.skills_taught,
