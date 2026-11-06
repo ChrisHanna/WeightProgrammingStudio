@@ -324,11 +324,16 @@ def test_nan_constraint_is_not_treated_as_no_limit(model: Toy, field: str) -> No
         EditPlan(model, EditConstraints(**{field: NAN})).scale(SITE, 2.0).preview()
 
 
-@xfail("D4 edit_plan.py: tensor constraints are only checked when a step is added")
 def test_constraint_added_after_the_step_still_applies(model: Toy) -> None:
     plan = EditPlan(model).scale(SITE, 2.0).add_constraint(forbidden_tensors=(SITE,))
-    with pytest.raises(EditConstraintViolation):
+    with pytest.raises(EditConstraintViolation, match="not allowed by this plan's constraints"):
         plan.preview()
+
+
+def test_allow_list_added_after_the_step_still_applies(model: Toy) -> None:
+    plan = EditPlan(model).scale(SITE, 2.0).add_constraint(allowed_tensor_sites=("another.tensor",))
+    with pytest.raises(EditConstraintViolation, match="not allowed by this plan's constraints"):
+        plan.execute()
 
 
 def test_constraint_added_after_preview_is_not_skipped_by_the_cache(model: Toy) -> None:
@@ -451,29 +456,38 @@ MALFORMED_GRAPHS: dict[str, Callable[[dict[str, Any]], Any]] = {
 }
 
 
-MALFORMED_GRAPH_D13 = "D13 edit_plan.py: a malformed graph escapes as KeyError, TypeError, AttributeError or RuntimeError"
+# These used to escape as KeyError, TypeError, AttributeError or RuntimeError, or read "43" as a shape.
+# Each must be refused for the field that is wrong, not by some later failure.
+MALFORMED_GRAPH_REFUSALS = {
+    "step_not_object": "Step 0 is not an object",
+    "step_null": "Step 0 is not an object",
+    "no_tensor": "Step 0 has no string tensor",
+    "no_arguments": "Step 0 has no object arguments",
+    "no_operands": "Step 0 has no object operands",
+    "no_before": "Step 0 has no string before_parameter_digest",
+    "operands_list": "Step 1 has no object operands",
+    "no_operation_type": "Step 0 has no string operation_type",
+    "operand_not_object": "step 1 operand delta_matrix is not an object",
+    "operand_no_data": "step 1 operand delta_matrix has no string data_b64",
+    "operand_data_int": "step 1 operand delta_matrix has no string data_b64",
+    "operand_negative_shape": "step 1 operand delta_matrix shape must be",
+    "operand_string_shape": "step 1 operand delta_matrix shape must be",
+}
 
 
-@pytest.mark.parametrize(
-    "name",
-    _marked(
-        MALFORMED_GRAPHS,
-        {
-            **dict.fromkeys(
-                [
-                    "step_not_object", "step_null", "no_tensor", "no_arguments", "no_operands", "no_before", "operands_list",
-                    "no_operation_type", "operand_not_object", "operand_no_data", "operand_data_int", "operand_negative_shape",
-                ],
-                MALFORMED_GRAPH_D13,
-            ),
-            "operand_string_shape": "D13 edit_plan.py: the string shape '43' is read as [4, 3]",
-        },
-    ),
-)
+@pytest.mark.parametrize("name", MALFORMED_GRAPHS)
 def test_malformed_graph_gets_a_defined_refusal(model: Toy, name: str) -> None:
     graph = _graph_plan(model).to_graph()
     MALFORMED_GRAPHS[name](graph)
-    with pytest.raises(REFUSED):
+    with pytest.raises(REFUSED, match=MALFORMED_GRAPH_REFUSALS.get(name)):
+        apply_edit_graph(model, graph)
+
+
+@pytest.mark.parametrize("name", MALFORMED_GRAPH_REFUSALS)
+def test_malformed_graph_refusal_is_an_edit_graph_error(model: Toy, name: str) -> None:
+    graph = _graph_plan(model).to_graph()
+    MALFORMED_GRAPHS[name](graph)
+    with pytest.raises(EditGraphError):
         apply_edit_graph(model, graph)
 
 

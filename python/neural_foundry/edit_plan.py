@@ -135,8 +135,19 @@ def _encode_matrix(value: Any) -> dict[str, Any]:
     return {"shape": list(matrix.shape), "dtype": "f64", "data_b64": base64.b64encode(raw).decode("ascii")}
 
 
+def _require_operand_form(doc: Any, label: str = "operand") -> None:
+    if not isinstance(doc, Mapping):
+        raise EditGraphError(f"Graph {label} is not an object")
+    if not isinstance(doc.get("data_b64"), str):
+        raise EditGraphError(f"Graph {label} has no string data_b64")
+    shape = doc.get("shape")
+    if not isinstance(shape, (list, tuple)) or any(type(d) is not int or d < 0 for d in shape):
+        raise EditGraphError(f"Graph {label} shape must be a list of non-negative integers")
+
+
 def _decode_matrix(doc: Mapping[str, Any]) -> torch.Tensor:
-    shape = [int(d) for d in doc["shape"]]
+    _require_operand_form(doc)
+    shape = list(doc["shape"])
     if len(shape) != 2 or doc.get("dtype") != "f64":
         raise EditGraphError("Graph operands must be 2D f64 matrices")
     raw = base64.b64decode(doc["data_b64"], validate=True)
@@ -257,15 +268,18 @@ class EditPlan:
         self._last = None
         return self
 
+    def _require_tensor_allowed(self, tensor: str) -> None:
+        c = self.constraints
+        if tensor in c.forbidden_tensors or (c.allowed_tensor_sites is not None and tensor not in c.allowed_tensor_sites):
+            raise EditConstraintViolation(f"Tensor {tensor!r} is not allowed by this plan's constraints")
+
     def _add(self, tensor: str, op: str, build: Callable[[torch.Tensor], dict[str, Any]], spectral: bool = False) -> EditPlan:
         tensors = self.base_model.tensors
         if tensor not in tensors:
             raise ValueError(f"Unknown tensor {tensor!r}")
         if tensors[tensor].ndim != 2:
             raise ValueError(f"Direct edits need a matrix; {tensor!r} has {tensors[tensor].ndim} dimensions")
-        c = self.constraints
-        if tensor in c.forbidden_tensors or (c.allowed_tensor_sites is not None and tensor not in c.allowed_tensor_sites):
-            raise EditConstraintViolation(f"Tensor {tensor!r} is not allowed by this plan's constraints")
+        self._require_tensor_allowed(tensor)
         self._steps.append((tensor, op, build, spectral))
         self._last = None
         self._proposal = None
@@ -425,6 +439,9 @@ class EditPlan:
         """Run every step in Rust and check every limit, without changing the base model."""
         if not self._steps:
             raise ValueError("This plan has no steps")
+        # A constraint added after a step still applies to it.
+        for tensor, *_ in self._steps:
+            self._require_tensor_allowed(tensor)
         base = _extract_model_state_tensors(self.base_model)
         working: dict[str, torch.Tensor] = {}
         receipts: list[StepReceipt] = []
@@ -607,6 +624,21 @@ def _decoded_operand_bytes(steps: Sequence[Mapping[str, Any]]) -> int:
     return total
 
 
+def _require_step_form(steps: Sequence[Any]) -> None:
+    """Refuse a step whose fields can't be read, naming the field, before anything indexes into it."""
+    for index, step in enumerate(steps):
+        if not isinstance(step, Mapping):
+            raise EditGraphError(f"Step {index} is not an object")
+        for field in ("tensor", "operation", "before_parameter_digest", "after_parameter_digest"):
+            if not isinstance(step.get(field), str):
+                raise EditGraphError(f"Step {index} has no string {field}")
+        for field in ("arguments", "operands"):
+            if not isinstance(step.get(field), Mapping):
+                raise EditGraphError(f"Step {index} has no object {field}")
+        if not isinstance(step["arguments"].get("operation_type"), str):
+            raise EditGraphError(f"Step {index} has no string operation_type")
+
+
 def _require_graph_bounds(steps: Sequence[Mapping[str, Any]]) -> None:
     """Whole-graph limits that need nothing but the document. Runs before any tensor is decoded."""
     dependencies = sum(len(s["depends_on"]) for s in steps if isinstance(s.get("depends_on"), list))
@@ -668,13 +700,15 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
         raise EditGraphError("Graph has no steps")
     if len(steps) > EDIT_GRAPH_MAX_STEPS:
         raise EditGraphError(f"Graph has {len(steps)} steps, over the limit of {EDIT_GRAPH_MAX_STEPS}")
+    _require_step_form(steps)
+    _require_graph_bounds(steps)
     total = 0
-    for step in steps:
-        for operand in step.get("operands", {}).values():
+    for index, step in enumerate(steps):
+        for name, operand in step["operands"].items():
+            _require_operand_form(operand, f"step {index} operand {name}")
             total += len(operand["data_b64"])
     if total > EDIT_GRAPH_MAX_OPERAND_BYTES:
         raise EditGraphError("Graph operands exceed the size limit")
-    _require_graph_bounds(steps)
     _require_graph_structure(steps)
     declared_id, actual_id = graph.get("base_model_id"), str(getattr(base_model, "model_name", ""))
     if declared_id != actual_id:
