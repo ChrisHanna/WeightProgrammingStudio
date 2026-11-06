@@ -8,7 +8,10 @@ constraint passes, but not yet one Rust plan.
 
 from __future__ import annotations
 
+import argparse
 import base64
+import hashlib
+import json
 import struct
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -23,7 +26,7 @@ from .export_formats import (
     export_huggingface_safetensors,
 )
 from .ir import WeightIRTransactionBuilder, unpack_matrix_bytes
-from .records import canonicalize, content_digest
+from .records import NativeError, canonicalize, content_digest
 
 
 class EditConstraintViolation(ValueError):
@@ -82,6 +85,7 @@ class PlanCandidate:
     frobenius_delta: float
     spectral_delta: float
     retention: float | None
+    state_digest: str = ""
 
 
 EDIT_GRAPH_MAX_OPERAND_BYTES = 256 * 1024 * 1024
@@ -91,6 +95,20 @@ _SCALAR_ARGUMENTS = ("operation_type", "factor", "projection_side", "axis", "per
 
 class EditGraphError(ValueError):
     """An edit graph couldn't be replayed, or replay didn't reproduce the signed result."""
+
+
+def tensor_state_digest(tensors: Mapping[str, torch.Tensor]) -> str:
+    """Digest of a whole model's weights, simple enough to recompute without this package.
+
+    SHA-256 over each tensor in sorted name order: UTF-8 name, NUL, shape as comma-joined decimals,
+    NUL, then the values as little-endian f64.
+    """
+    hasher = hashlib.sha256()
+    for name in sorted(tensors):
+        tensor = tensors[name].detach().cpu().to(torch.float64)
+        hasher.update(name.encode("utf-8") + b"\0" + ",".join(str(d) for d in tensor.shape).encode("ascii") + b"\0")
+        hasher.update(tensor.numpy().astype("<f8").tobytes())
+    return f"sha256:{hasher.hexdigest()}"
 
 
 def _encode_matrix(value: Any) -> dict[str, Any]:
@@ -122,6 +140,7 @@ class EditPlan:
 
     def add_constraint(self, **limits: Any) -> EditPlan:
         self.constraints = replace(self.constraints, **limits)
+        self._last = None
         return self
 
     def _add(self, tensor: str, op: str, build: Callable[[torch.Tensor], dict[str, Any]], spectral: bool = False) -> EditPlan:
@@ -196,13 +215,21 @@ class EditPlan:
             raise ValueError("limit must be positive")
         return self._derived(tensor, "clamp", lambda w: torch.clamp(w, -limit, limit))
 
-    @staticmethod
-    def _rebuild(w: torch.Tensor, edit: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-        u, s, vh = torch.linalg.svd(w, full_matrices=False)
-        return (u * edit(s)) @ vh
+    def _spectral(self, tensor: str, op: str, edit: Callable[[torch.Tensor], torch.Tensor]) -> EditPlan:
+        """Build the delta from only the singular values that move, so an edit that moves none is exactly zero."""
+
+        def build(w: torch.Tensor) -> dict[str, Any]:
+            u, s, vh = torch.linalg.svd(w, full_matrices=False)
+            change = edit(s) - s
+            moved = change != 0
+            return {"operation_type": "add_delta", "delta_matrix": (u[:, moved] * change[moved]) @ vh[moved], **self._target(None, w.shape)}
+
+        return self._add(tensor, op, build, True)
 
     def spectral_clip(self, tensor: str, max_singular_value: float) -> EditPlan:
-        return self._derived(tensor, "spectral_clip", lambda w: self._rebuild(w, lambda s: torch.clamp(s, max=max_singular_value)), True)
+        if max_singular_value <= 0:
+            raise ValueError("max_singular_value must be positive")
+        return self._spectral(tensor, "spectral_clip", lambda s: torch.clamp(s, max=max_singular_value))
 
     def rank_truncate(self, tensor: str, rank: int) -> EditPlan:
         if rank < 1:
@@ -213,13 +240,13 @@ class EditPlan:
             out[rank:] = 0.0
             return out
 
-        return self._derived(tensor, "rank_truncate", lambda w: self._rebuild(w, keep), True)
+        return self._spectral(tensor, "rank_truncate", keep)
 
     def remove_noise_floor(self, tensor: str, relative_threshold: float) -> EditPlan:
-        return self._derived(tensor, "remove_noise_floor", lambda w: self._rebuild(w, lambda s: torch.where(s >= relative_threshold * s[0], s, torch.zeros_like(s))), True)
+        return self._spectral(tensor, "remove_noise_floor", lambda s: torch.where(s >= relative_threshold * s[0], s, torch.zeros_like(s)))
 
     def spectral_shift(self, tensor: str, shift: float) -> EditPlan:
-        return self._derived(tensor, "spectral_shift", lambda w: self._rebuild(w, lambda s: torch.clamp(s + shift, min=0.0)), True)
+        return self._spectral(tensor, "spectral_shift", lambda s: torch.clamp(s + shift, min=0.0))
 
     def interpolate(self, tensor: str, other: torch.Tensor, weight: float) -> EditPlan:
         if not 0.0 <= weight <= 1.0:
@@ -329,7 +356,10 @@ class EditPlan:
             if retention < c.min_retention:
                 raise EditConstraintViolation(f"retention {retention:.3f} is below the required {c.min_retention:.3f}")
         digest = str(content_digest(canonicalize({"schema_version": 1, "kind": "nf_edit_plan", "steps": [r.plan_digest for r in receipts]})))
-        self._last = PlanCandidate(candidate_model, working, tuple(receipts), digest, changed, frobenius, spectral_delta, retention)
+        self._last = PlanCandidate(
+            candidate_model, working, tuple(receipts), digest, changed, frobenius, spectral_delta, retention,
+            tensor_state_digest(candidate_model.tensors),
+        )
         return self._last
 
     def execute(self) -> PlanCandidate:
@@ -358,6 +388,8 @@ class EditPlan:
             "schema_version": 1,
             "kind": "nf_edit_graph_v1",
             "base_model_id": str(getattr(self.base_model, "model_name", "")),
+            "base_state_digest": tensor_state_digest(_extract_model_state_tensors(self.base_model)),
+            "candidate_state_digest": candidate.state_digest,
             "steps": steps,
             "plan_digest": candidate.plan_digest,
         }
@@ -418,7 +450,7 @@ def search_edits(
         try:
             build(plan)
             candidate = plan.preview()
-        except (EditConstraintViolation, ValueError, RuntimeError) as exc:
+        except (EditConstraintViolation, ValueError, RuntimeError, NativeError) as exc:
             results.append(SearchResult(label, None, 0.0, 0.0, 0.0, is_control, False, str(exc)))
             continue
         accuracy, kept = scores(candidate.model)
@@ -454,6 +486,9 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     if total > EDIT_GRAPH_MAX_OPERAND_BYTES:
         raise EditGraphError("Graph operands exceed the size limit")
     base = _extract_model_state_tensors(base_model)
+    # The per-step digests only cover edited tensors, so a base differing elsewhere needs this check.
+    if tensor_state_digest(base) != graph.get("base_state_digest"):
+        raise EditGraphError("This isn't the base model the graph was made for")
     working: dict[str, torch.Tensor] = {}
     receipts: list[StepReceipt] = []
     for step in steps:
@@ -485,8 +520,11 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
         changed += int((delta != 0).sum())
         frobenius += float(torch.linalg.norm(delta)) ** 2
         spectral = max(spectral, float(torch.linalg.matrix_norm(delta, ord=2)))
+    state = tensor_state_digest({**base, **working})
+    if state != graph.get("candidate_state_digest"):
+        raise EditGraphError("Replay produced a different whole-model digest")
     return PlanCandidate(
-        _apply_state_tensors_to_clone(base_model, {**base, **working}), working, tuple(receipts), digest, int(changed), frobenius**0.5, spectral, None
+        _apply_state_tensors_to_clone(base_model, {**base, **working}), working, tuple(receipts), digest, int(changed), frobenius**0.5, spectral, None, state
     )
 
 
@@ -502,3 +540,55 @@ def apply_signed_edit_graph(base_model: Any, envelope: Mapping[str, Any], *, pub
 
     verify_patch_signature(envelope, public_key=public_key)
     return apply_edit_graph(base_model, envelope["patch"])
+
+
+def verify_exported_candidate(checkpoint_dir: str | Path, expected_state_digest: str) -> str:
+    """Read an exported checkpoint from disk and raise unless its weights match the signed digest.
+
+    Only an f64 export can pass: narrower dtypes round the edit, so they aren't the signed weights.
+    """
+    blob = (Path(checkpoint_dir) / "model.safetensors").read_bytes()
+    (header_size,) = struct.unpack_from("<Q", blob, 0)
+    header = json.loads(blob[8 : 8 + header_size].decode("utf-8"))
+    tensors: dict[str, torch.Tensor] = {}
+    for name, meta in header.items():
+        if name == "__metadata__":
+            continue
+        if meta["dtype"] != "F64":
+            raise EditGraphError(f"Export stores {name!r} as {meta['dtype']}, which can't hold the signed f64 weights exactly")
+        start, end = meta["data_offsets"]
+        tensors[name] = torch.frombuffer(bytearray(blob[8 + header_size + start : 8 + header_size + end]), dtype=torch.float64).reshape(meta["shape"])
+    actual = tensor_state_digest(tensors)
+    if actual != expected_state_digest:
+        raise EditGraphError(f"Exported weights {actual} don't match the signed candidate {expected_state_digest}")
+    return actual
+
+
+def _replay_main(argv: Sequence[str] | None = None) -> int:
+    """Replay a signed graph from only a base checkpoint, the envelope and a public key."""
+    parser = argparse.ArgumentParser(prog="python -m neural_foundry.edit_plan", description=_replay_main.__doc__)
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--envelope", required=True)
+    parser.add_argument("--public-key-file", required=True)
+    parser.add_argument("--export-dir", help="Also export the replayed candidate as f64 safetensors and verify it")
+    args = parser.parse_args(argv)
+
+    from .pythia import PythiaModel
+
+    model = PythiaModel.from_pretrained_dir(args.checkpoint)
+    envelope = json.loads(Path(args.envelope).read_text(encoding="utf-8"))
+    candidate = apply_signed_edit_graph(model, envelope, public_key=Path(args.public_key_file).read_text(encoding="utf-8").strip())
+    report = {
+        "plan_digest": candidate.plan_digest,
+        "candidate_state_digest": candidate.state_digest,
+        "steps": [{"tensor": s.tensor, "operation": s.operation, "after_parameter_digest": s.after_parameter_digest} for s in candidate.steps],
+    }
+    if args.export_dir:
+        export_huggingface_safetensors(candidate.model, args.export_dir, dtype="f64", source_checkpoint_dir=args.checkpoint)
+        report["export_state_digest"] = verify_exported_candidate(args.export_dir, candidate.state_digest)
+    print(json.dumps(report, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_replay_main())
