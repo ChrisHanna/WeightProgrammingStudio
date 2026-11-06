@@ -666,17 +666,33 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
         .and_then(|c| c.get("preserve_tensor_shapes"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    wrap_ok(json!({
+    // Unsigned means unauthenticated, so an audit can't pass it, whatever the document says about itself.
+    let audit_passed =
+        is_signed && sig_check["verified"].as_bool().unwrap_or(false) && preserve_shapes;
+    let status = sig_check["status"].as_str().unwrap_or("verified").to_owned();
+    let report = json!({
         "schema_version": 1,
         "kind": "nf_patch_audit_report",
-        // Unsigned means unauthenticated, so an audit can't pass it, whatever the document says about itself.
-        "audit_passed": is_signed && sig_check["verified"].as_bool().unwrap_or(false) && preserve_shapes,
+        "audit_passed": audit_passed,
         "signed": is_signed,
         "signature_verification": sig_check,
         "gradient_free": gradient_free,
         "preserve_tensor_shapes": preserve_shapes,
         "diff_summary": diff,
-    }))
+    });
+    if audit_passed {
+        return wrap_ok(report);
+    }
+    // A script may check only the exit code, so a failed audit can't exit 0. The report still explains why.
+    println!(
+        "{}",
+        json!({"schema_version": 1, "ok": false, "result": report})
+    );
+    Err(err(
+        ErrorCode::IntegrityMismatch,
+        "/patch/audit",
+        format!("patch audit did not pass (signature status: {status}, preserve_tensor_shapes: {preserve_shapes})"),
+    ))
 }
 
 fn handle_patch_rollback(_rest: &[String]) -> Result<String> {

@@ -1068,8 +1068,19 @@ def test_nf_patch_audit_does_not_pass_an_unsigned_patch(tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_text(json.dumps(_body()))
     result = _run_nf("patch", "audit", str(path))
-    assert result.returncode != 0 or '"audit_passed":true' not in result.stdout.replace(" ", "")
-    assert '"status":"unsigned"' in result.stdout.replace(" ", "")
+    assert result.returncode == 5
+    stdout = result.stdout.replace(" ", "")
+    assert '"audit_passed":false' in stdout and '"status":"unsigned"' in stdout
+    assert "patch audit did not pass" in result.stderr
+
+
+def test_nf_patch_audit_does_not_pass_a_signed_patch_it_could_not_verify(keys: dict[str, Any], tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    path.write_bytes(canonicalize(patch_ux.sign_patch_envelope(_body(), signing_key=keys["private_key"], signer_id="nf.test")))
+    result = _run_nf("patch", "audit", str(path))
+    assert result.returncode == 5
+    stdout = result.stdout.replace(" ", "")
+    assert '"audit_passed":false' in stdout and '"status":"not_verified_no_trusted_key"' in stdout
 
 
 # ---------------------------------------------------------------- artifact manifests
