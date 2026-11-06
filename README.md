@@ -14,8 +14,29 @@ Most model-editing and merging scripts mutate PyTorch tensors in-place inside th
 1. **Pluggable Open-Weight Models (`studio.models`)** — Load `EleutherAI/pythia-14m`, `EleutherAI/pythia-31m`, `Qwen2`, `Llama`, `Mistral`, `Gemma`, or register any custom Safetensors checkpoint via architecture-agnostic site profiles (`ArchitectureSiteProfile`).
 2. **Reusable Task Gyms (`studio.gyms`)** — Give agents and solvers structured experimentation environments with separated development, prefix-invariance validation, and skill-retention splits (`from_rules`, `NeMo-Gym`, `Verifiers`, `Gymnasium`).
 3. **Extensible Weight Editors & Mergers (`studio.methods`)** — Run built-in methods (`rome`, `memit`, `alphaedit`, `contrastive_subspace`, `task_arithmetic`, `ties`, `dare`, `mlp_surgery`, `attention_surgery`, `lora_baseline`) or register your own algorithm with `@studio.methods.register(...)` backed by `WeightIRTransactionBuilder`.
-4. **Interchangeable Frontier Agents (`studio.agents`)** — Run `claude-4-5-sonnet`, `gpt-6-astra`, or custom LLM agents over identical tool schemas with hypothesis tracking, duplicate-proposal blocking, failed-experiment memory, and singular-component ablation.
-5. **Rust-Enforced Weight IR & Sealed Evaluation Firewall (`nf-weight-ir`, `nf-surgeon`, `studio.evals`)** — Every weight modification is compiled into a typed, content-addressed Weight IR plan, executed copy-on-write in Rust with snapshot reload parity, and verified against sealed holdout suites (`lm-evaluation-harness` and `Inspect AI` compatible) that agents cannot inspect or game.
+4. **Interchangeable Frontier Agents (`studio.agents`)** — Run `claude-4-5-sonnet`, `gpt-6-astra`, or custom LLM agents over identical tool schemas with live HTTP/callable transport, token/USD budgets, hypothesis tracking, duplicate-proposal blocking, failed-experiment memory, and singular-component ablation.
+5. **Rust-Enforced Weight IR & Sealed Evaluation Firewall (`nf-weight-ir`, `nf-surgeon`, `studio.evals`)** — Every weight modification (`f16`, `bf16`, `f32`, `f64`, or `Q8_0`) is compiled into a typed, content-addressed Weight IR plan, executed copy-on-write in Rust with snapshot reload parity, compared against mandatory **no-op and matched-budget random controls**, and verified against **operand-disjoint sealed holdout suites** that agents cannot inspect or game.
+6. **Production Export & "Git for Weights" UX (`export_formats`, `patch_ux`, `weightctl patch`)** — Export edited checkpoints to **HuggingFace Safetensors** and **GGUF v3** (`F32`, `F16`, `Q8_0`), verify 100% behavioral survival on reload, inspect layer-wise $\|\Delta W\|_F / \|\Delta W\|_2 / \|\Delta W\|_\infty$ diffs, cryptographically sign patches, and roll back in one command.
+
+```mermaid
+flowchart LR
+    subgraph Proposer["1. Proposer / Agent Sandbox (Dev & Val Only)"]
+        A["Open-Weight Model\n(Pythia / Qwen2 / Sharded mmap)"] --> B["Feedback Tools\nForward Pass · Activations · Practice Gym"]
+        B --> C["Frontier Agent / Solver\n(Claude · GPT-6 · AlphaEdit · TIES)"]
+    end
+    subgraph RustCore["2. Rust Transactional Kernel (nf-weight-ir + nf-surgeon)"]
+        C -->|"Declarative Weight IR"| D["Compile & Validate\n(f16 / bf16 / f32 / f64 / Q8_0)"]
+        D --> E["Copy-on-Write Execution\n+ No-Op & Random Controls"]
+    end
+    subgraph Verifier["3. Sealed Independent Verifier (nf-cli / evals)"]
+        E --> F["Operand-Disjoint Holdout\n+ Exposure Ledger Proof (0 Leaks)"]
+        F --> G["Pre-Registered Grouped Bootstrap CI\n+ Holm-Bonferroni & Side-Effect Gate"]
+    end
+    subgraph Artifact["4. Signed Release & Rebuild"]
+        G -->|"Promoted"| H["Signed Patch Envelope\n(diff · sign · audit · rollback)"]
+        H --> I["HF Safetensors & GGUF v3\nReload Parity Verified"]
+    end
+```
 
 ---
 
@@ -165,6 +186,174 @@ studio.models.register_model(
     loader=lambda: studio.select_model("nf/mini-pythia-fixture"),
     architecture="GPTNeoXForCausalLM",
 )
+```
+
+---
+
+## Key Features & End-to-End Cookbook
+
+### 1. Native `f16` / `bf16` & Quantized `Q8_0` Editing + Sharded `mmap` Checkpoints (`> 64 GiB`)
+Edit half-precision (`f16`, `bf16`) and 32-element block-quantized (`Q8_0`) tensors with `f32`/`f64` accumulation in Rust, and stage copy-on-write updates on multi-shard `model.safetensors.index.json` checkpoints via zero-copy `mmap` without rewriting unmodified shards:
+
+```python
+from neural_foundry import export_formats, ir
+
+# A. Native Rust bf16 / f16 Weight-IR transaction with f32 accumulation & nearest-even rounding
+tx_bf16 = ir.WeightIRTransactionBuilder.execute_matrix_edit(
+    [[1.0, 2.0, -1.0, 0.5], [0.25, -0.5, 1.5, 2.0]],
+    operation_type="add_delta",
+    dtype="bf16",
+    accumulation_dtype="f32",
+    delta_matrix=[[0.5, -0.5, 0.25, 0.0], [-0.25, 0.5, -0.5, 0.25]],
+)
+assert tx_bf16.reload_parity_verified is True
+
+# B. Block-quantized GGML Q8_0 matrix edit backed by Rust Weight IR
+q8_bytes, shape = export_formats.quantize_matrix_q8_0([[0.1 * ((r * 32 + c) % 15 - 7) for c in range(32)] for r in range(2)])
+q8_receipt = export_formats.execute_quantized_q8_matrix_edit(q8_bytes, shape, operation_type="scale", factor=1.25)
+assert q8_receipt.changed_parameters > 0 and q8_receipt.max_quantization_abs_error < 0.05
+
+# C. Zero-copy mmap loader + Copy-on-Write staging for sharded checkpoints (up to 64 GiB)
+with export_formats.ShardedMmapCheckpoint("/path/to/sharded_ckpt", max_checkpoint_bytes=68_719_476_736) as ckpt:
+    tensor_view = ckpt.read_tensor_view("model.layers.0.mlp.down_proj.weight")  # zero-copy memoryview
+    ckpt.stage_cow_tensor_update("model.layers.0.mlp.down_proj.weight", bytes(tensor_view))
+    cow_summary = ckpt.export_cow_sharded_checkpoint("/path/to/output_ckpt")
+    # Only dirty shards are rewritten; untouched shards are reused directly!
+```
+
+### 2. Rebuild & Export Round-Trip: HuggingFace Safetensors & `GGUF v3` (`F32`, `F16`, `Q8_0`)
+Every edited model can be exported to standard **HuggingFace Safetensors** (`config.json` + `model.safetensors`) and **GGUF v3** (for `llama.cpp` / `Ollama`), reloaded into a fresh model instance, and verified to preserve 100% of its behavioral gain:
+
+```python
+from pathlib import Path
+from neural_foundry import export_formats, prd_adapters, pythia
+
+model = pythia.build_mini_pythia_model()
+edit = prd_adapters.run_easyedit_adapter(
+    model,
+    algorithm="AlphaEdit",
+    associations=[("The capital of France is", "ĠParis"), ("The capital of Japan is", "ĠTokyo")],
+    target_strength=80.0,
+)
+tensors = export_formats._extract_model_state_tensors(model)
+tensors[model.mlp_down_proj_site(int(model.config["num_hidden_layers"]) - 1)] = edit.edited_weight
+edited_model = export_formats._apply_state_tensors_to_clone(model, tensors)
+probes = ["The capital of France is", "The capital of Japan is", "Hello world"]
+
+# 1. Export & reload HuggingFace Safetensors
+export_formats.export_huggingface_safetensors(edited_model, Path("/tmp/hf_edited"), dtype="f32")
+_, hf_receipt = export_formats.reload_and_verify_huggingface_safetensors("/tmp/hf_edited", edited_model, probes)
+assert hf_receipt.gain_preserved_after_rebuild is True
+
+# 2. Export & reload GGUF v3 (supports "f32", "f16", and quantized "q8_0")
+export_formats.export_gguf_v3(edited_model, Path("/tmp/edited_q8.gguf"), quantization="q8_0")
+_, gguf_receipt = export_formats.reload_and_verify_gguf_v3("/tmp/edited_q8.gguf", edited_model, probes)
+assert gguf_receipt.gain_preserved_after_rebuild is True
+```
+
+### 3. Patch Diffs, Cryptographic Signing & Instant Rollback ("Git for Weights")
+Inspect human-readable layer diffs ($\|\Delta W\|_F$, spectral $\|\Delta W\|_2$, and $\|\Delta W\|_\infty$), cryptographically sign patches, detect tampering, and roll back to the exact pre-edit parameter digest:
+
+```python
+from neural_foundry import patch_ux
+
+# 1. Capture pre-edit rollback handle & compute layer-by-layer norm summary
+rollback_handle = patch_ux.create_rollback_handle(model)
+diff = patch_ux.diff_model_weights(model, edited_model)
+print(diff.human_summary_markdown)
+
+# 2. Cryptographically sign and verify the patch envelope (fails closed if tampered)
+signed = patch_ux.sign_patch_envelope(
+    {"patch_digest": diff.patch_digest, "base_parameter_digest": diff.base_parameter_digest},
+    signer_id="release.auditor.v1",
+    signing_key="my-signing-key",
+)
+verification = patch_ux.verify_patch_signature(signed, signing_key="my-signing-key")
+assert verification["verified"] is True
+
+# 3. One-command bitwise rollback to the original checkpoint state
+restored_model, rb_receipt = patch_ux.rollback_model_patch(edited_model, rollback_handle)
+assert rb_receipt["rollback_verified"] is True
+```
+
+### 4. Live LLM Agent Harness, Token Budgets & Feedback Tools vs. Blind Weight-Reading
+Connect `FrontierAgentProgrammer` to a live Anthropic/OpenAI HTTP endpoint or custom `llm_transport` with strict token/USD budget enforcement, and empirically verify why live feedback tools (`run_forward_pass`, `probe_activations`, `evaluate_practice_gym_split`) are essential compared to static weight-reading alone:
+
+```python
+from neural_foundry import prd_adapters, pythia
+
+model = pythia.build_mini_pythia_model()
+
+# A. Run with a custom or live LLM transport, recording full turn transcripts and token/USD costs
+agent = prd_adapters.FrontierAgentProgrammer(
+    "claude-4-5-sonnet",
+    llm_transport=lambda messages, tools: {"usage": {"prompt_tokens": 140, "completion_tokens": 60}},
+    budget_usd=1.00,
+    max_total_tokens=50_000,
+)
+session = agent.run_reasoning_loop_repair_experiment(model, enable_feedback_tools=True)
+print(f"Turns: {len(session.transcript)} | Cost: ${session.total_cost_usd:.4f} | Holdout: {session.held_out_accuracy_after:.1%}")
+
+# B. Empirical ablation: Weight-Reading Alone (< 50% holdout) vs. Feedback-Tool Access (100% holdout)
+comparison = prd_adapters.compare_weight_reading_only_vs_feedback_enabled_agent(model)
+assert comparison.feedback_tools_proven_necessary is True
+```
+
+### 5. Fail-Closed Evals, Real Provenance, Pre-Registration & Multiplicity-Corrected Bootstrap CIs
+The evaluation engine (`neural_foundry.evals`) enforces **fail-closed validation** (rejecting unknown models or missing scores), separates `supplied_fact` dictionaries from `measured_result` live callables, binds decoding sampler (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `max_tokens`, `seed`) and `runtime` (`pytorch_cpu`, `pytorch_cuda`, `llama.cpp`, `vllm`) into `experiment_identity_digest`, and computes cluster-resampled bootstrap CIs with Holm-Bonferroni multiplicity correction:
+
+```python
+from neural_foundry import evals
+
+suite = evals.import_lm_eval_harness_task(
+    {
+        "task": "arithmetic_check",
+        "version": "1.0.0",
+        "metric_list": [{"metric": "exact_match"}],
+        "samples": [
+            {"id": "dev_1", "eval_type": "development", "doc": "2 + 2 =", "target": "4"},
+            {"id": "gen_1", "eval_type": "generalization", "doc": "5 + 5 =", "target": "10"},
+            {"id": "ret_1", "eval_type": "retention", "doc": "Hello", "target": "world"},
+        ],
+    }
+)
+
+# Freeze pre-registered hypothesis & multiplicity plan before running evaluations
+plan = evals.pre_register_study_plan(
+    hypothesis_id="H-direct-edit-vs-controls",
+    primary_metric_family="exact_match",
+    alpha=0.05,
+    num_hypotheses=4,
+    multiplicity_method="holm_bonferroni",
+)
+
+# Live callable execution is automatically labeled `origin: "measured_result"`
+cand_run = evals.run_eval(
+    model={
+        "model_id": "edited-candidate",
+        "runtime": "pytorch_cpu",
+        "predict_fn": lambda prompt: {"2 + 2 =": "4", "5 + 5 =": "10", "Hello": "world"}[prompt],
+        "edit_lineage": {"changed_parameters": 128, "total_parameters": 50_000},
+    },
+    suite=suite,
+    caller_role="verifier",
+    pre_registration=plan,
+)
+assert cand_run["evidence_label"]["origin"] == "measured_result"
+```
+
+### 6. Reproducible Flagship Loop-Repair Study Bundle
+Run the complete flagship study repairing a documented pathological repetition attractor on an unseen checkpoint and publishing all signed artifacts (`pre_registration.json`, `exposure_ledger.json`, `signed_patch_envelope.json`, `patch_diff_report.md`, `agent_transcript.json`, `verification_receipt.json`, `huggingface_export/`, and `repaired_model.gguf`):
+
+```python
+from neural_foundry import flagship
+
+bundle = flagship.run_flagship_loop_repair_study_and_publish_bundle(
+    output_dir="/tmp/nf_flagship_study_bundle",
+)
+assert bundle.repetition_loop_rate_before > 0.5 and bundle.repetition_loop_rate_after == 0.0
+assert bundle.holdout_accuracy_after == 1.0
+assert bundle.signature_verified and bundle.hf_roundtrip_verified and bundle.gguf_roundtrip_verified
 ```
 
 ---
