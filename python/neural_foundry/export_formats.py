@@ -1,4 +1,4 @@
-"""Large/sharded mmap checkpoints, quantized Q8_0 editing, and HuggingFace Safetensors + GGUF v3 export/reload round-trip."""
+"""Large/sharded mmap checkpoints, quantized Q8_0 editing, and HuggingFace Safetensors + package-readable GGUF v3 export/reload round-trip."""
 
 from __future__ import annotations
 
@@ -846,8 +846,12 @@ def export_huggingface_safetensors(
     raw_hdr += b" " * pad
     st_path = out / "model.safetensors"
     st_path.write_bytes(struct.pack("<Q", len(raw_hdr)) + raw_hdr + bytes(payload))
+    # The source config can declare another dtype (Pythia says float16); describe what was written.
+    config = dict(getattr(model, "config", {}) or {})
+    config["torch_dtype"] = {"f16": "float16", "bf16": "bfloat16", "f32": "float32", "f64": "float64"}[dt]
+    config.pop("dtype", None)
     (out / "config.json").write_text(
-        json.dumps(getattr(model, "config", {}), indent=2, sort_keys=True) + "\n",
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     # Tokenizer files come only from the verified source checkpoint; nothing is synthesized.
@@ -933,7 +937,13 @@ def export_gguf_v3(
     *,
     quantization: str = "f32",
 ) -> Path:
-    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, `Q8_0`, `Q4_0`, or the package-only `nf_q4`)."""
+    """Write a GGUF v3 container (`F32`, `F16`, `Q8_0`, `Q4_0`, or `nf_q4`) that reloads through `reload_and_verify_gguf_v3`.
+
+    This is not a llama.cpp model file. Reading llama.cpp b12164's loader source (the file has not
+    been run against it) shows these mismatches: the architecture is `gpt_neox` where llama.cpp
+    expects `gptneox`, tensors keep Hugging Face names and row-major dimension order, the
+    hyperparameter keys differ, and no tokenizer is embedded.
+    """
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
