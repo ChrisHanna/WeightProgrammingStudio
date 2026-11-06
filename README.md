@@ -470,7 +470,7 @@ Running the reusable `algorithmic_three_skill` Gym (teaching **Number Parity**, 
 | Selected Model | Architecture | Total Params | Edited Params (`%`) | Gym Dev | Gym Prefix-Val | Unseen Disjoint Holdout | No-Op / Random Controls | 25-Step LoRA Holdout | Skill Retention | Eval Gate |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
 | **`EleutherAI/pythia-14m`** | `GPTNeoXForCausalLM` | `14,067,712` | `65,536` (`0.47%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`83.3%` (`5/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
+| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,494,720` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`83.3%` (`5/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
 | **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`66.7%` (`4/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | `failed` |
 | **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`66.7%` (`4/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | `failed` |
 
