@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,69 @@ EVIDENCE_GRADES = frozenset(
 )
 ARTIFACT_MANIFEST_NAME = "artifact_manifest.json"
 _CHUNK = 1024 * 1024
+
+
+MAX_SIGNED_DOCUMENT_BYTES = 1024 * 1024  # The native canonical parser's limit, shared with `nf verify`.
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_MANIFEST_KEYS = frozenset({"schema_version", "kind", "open_patch_digest", "files"})
+
+
+def load_signed_document(path: str | Path) -> Any:
+    """Parse a signed JSON document with the same bounded Rust parser as `nf verify`; raises `ValueError`.
+
+    Python's own parser would accept duplicate keys, BOMs, UTF-16 and NaN, which `nf verify` refuses.
+    """
+    from . import _native
+    from .records import negotiate
+
+    target = Path(path)
+    try:
+        if target.stat().st_size > MAX_SIGNED_DOCUMENT_BYTES:
+            raise ValueError(f"{target.name} exceeds the maximum signed document size")
+        negotiate()
+        return json.loads(_native.canonical_json(target.read_bytes()))
+    except (OSError, _native.NativeError) as exc:
+        raise ValueError(f"{target.name} is not a valid signed document: {exc}") from exc
+
+
+def parse_strict_json(raw: bytes) -> Any:
+    """Parse UTF-8 JSON for files larger than a signed document; raises `ValueError` on ambiguous input."""
+
+    def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in out:
+                raise ValueError(f"Duplicate JSON key {key!r}")
+            out[key] = value
+        return out
+
+    def no_constant(name: str) -> None:
+        raise ValueError(f"JSON constant {name} is not allowed")
+
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constant)
+    except RecursionError as exc:
+        raise ValueError("JSON is nested too deeply") from exc
+
+
+def _require_plain_path(name: Any) -> None:
+    parts = name.split("/") if isinstance(name, str) else []
+    if not parts or "\\" in name or ":" in name or any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"Artifact manifest path escapes its directory or isn't normalized: {name!r}")
+
+
+def _artifact_entries(root: Path) -> set[str]:
+    """Every file under `root`, without following links. Any symlink, even a dangling one, is refused."""
+    found: set[str] = set()
+    for folder, directories, names in os.walk(root, followlinks=False):
+        for name in (*directories, *names):
+            entry = Path(folder) / name
+            relative = str(entry.relative_to(root)).replace(os.sep, "/")
+            if entry.is_symlink():
+                raise ValueError(f"Artifact directory contains a symlink: {relative}")
+            if name in names:
+                found.add(relative)
+    return found
 
 
 class CheckpointUnavailableError(RuntimeError):
@@ -64,12 +128,16 @@ def _find_in_hub_cache(repo_id: str, revision: str | None, cache_dir: Path) -> t
     repo_dir = cache_dir / f"models--{repo_id.replace('/', '--')}"
     if not repo_dir.is_dir():
         return None
+    if revision is not None and (Path(revision).is_absolute() or ".." in revision.replace("\\", "/").split("/")):
+        raise CheckpointUnavailableError(f"Revision {revision!r} is not a valid revision name")
     resolved = revision
     ref = repo_dir / "refs" / (revision or "main")
     if ref.is_file():
         resolved = ref.read_text(encoding="utf-8").strip()
     if resolved is None:
         return None
+    if "/" in resolved or "\\" in resolved or resolved in ("", ".", ".."):
+        raise CheckpointUnavailableError(f"Revision {resolved!r} doesn't name a snapshot")
     snapshot = repo_dir / "snapshots" / resolved
     return (snapshot, resolved) if (snapshot / "config.json").is_file() else None
 
@@ -127,15 +195,12 @@ def write_artifact_manifest(
     from .records import canonicalize
 
     root = Path(directory).resolve()
-    names = (
-        list(files)
-        if files is not None
-        else [
-            str(p.relative_to(root)).replace(os.sep, "/")
-            for p in sorted(root.rglob("*"))
-            if p.is_file() and p.name != ARTIFACT_MANIFEST_NAME
-        ]
-    )
+    if not isinstance(open_patch_digest, str) or not _DIGEST.match(open_patch_digest):
+        raise ValueError("open_patch_digest must be a sha256 digest")
+    present = _artifact_entries(root)
+    names = list(files) if files is not None else sorted(n for n in present if Path(n).name != ARTIFACT_MANIFEST_NAME)
+    for name in names:
+        _require_plain_path(name)
     body = {
         "schema_version": 1,
         "kind": "nf_artifact_manifest",
@@ -152,26 +217,40 @@ def verify_artifact_manifest(directory: str | Path, *, public_key: str) -> dict[
     from .patch_ux import verify_patch_signature
 
     root = Path(directory).resolve()
-    envelope: Mapping[str, Any] = json.loads((root / ARTIFACT_MANIFEST_NAME).read_bytes())
+    present = _artifact_entries(root)
+    if ARTIFACT_MANIFEST_NAME not in present:
+        raise ValueError(f"Artifact manifest not found in {root}")
+    envelope = load_signed_document(root / ARTIFACT_MANIFEST_NAME)
+    if not isinstance(envelope, Mapping):
+        raise ValueError("Artifact manifest is malformed")
     verify_patch_signature(envelope, public_key=public_key)
     body = envelope["patch"]
-    if body.get("kind") != "nf_artifact_manifest" or not body.get("files"):
+    files = body.get("files")
+    digest = body.get("open_patch_digest")
+    if (
+        set(body) != _MANIFEST_KEYS
+        or body["kind"] != "nf_artifact_manifest"
+        or type(body["schema_version"]) is not int
+        or body["schema_version"] != 1
+        or not isinstance(digest, str)
+        or not _DIGEST.match(digest)
+        or not isinstance(files, Mapping)
+        or not files
+    ):
         raise ValueError("Artifact manifest is malformed")
-    present = {str(p.relative_to(root)).replace(os.sep, "/") for p in root.rglob("*") if p.is_file()} - {ARTIFACT_MANIFEST_NAME}
-    unlisted = sorted(present - set(body["files"]))
+    for name in files:
+        _require_plain_path(name)
+    unlisted = sorted(present - set(files) - {ARTIFACT_MANIFEST_NAME})
     if unlisted:
         raise ValueError(f"Artifact directory has unlisted files: {unlisted}")
-    for name, expected in body["files"].items():
-        target = (root / name).resolve()
-        if root not in target.parents:
-            raise ValueError(f"Artifact manifest path escapes its directory: {name!r}")
-        if not target.is_file():
+    for name, expected in files.items():
+        if name not in present:
             raise ValueError(f"Artifact missing: {name}")
-        if sha256_file(target) != expected:
+        if sha256_file(root / name) != expected:
             raise ValueError(f"Artifact digest mismatch: {name}")
     for patch_name in ("open_patch_v1.json", "weight_patch.nf.json"):
-        if (root / patch_name).is_file():
-            enclosed = json.loads((root / patch_name).read_bytes())
-            if enclosed.get("patch_digest") != body["open_patch_digest"]:
+        if patch_name in present:
+            enclosed = load_signed_document(root / patch_name)
+            if not isinstance(enclosed, Mapping) or enclosed.get("patch_digest") != digest:
                 raise ValueError(f"{patch_name} is not the patch this manifest was signed for")
-    return {"verified": True, "open_patch_digest": body["open_patch_digest"], "files_verified": len(body["files"])}
+    return {"verified": True, "open_patch_digest": digest, "files_verified": len(files)}
