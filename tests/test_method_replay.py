@@ -266,3 +266,76 @@ def test_real_pythia_mergekit_replays(tmp_path: Path) -> None:
     checkpoints = [base + 0.01 * torch.randn(base.shape, dtype=torch.float64, generator=generator) for _ in range(2)]
     receipt = prd_adapters.run_mergekit_adapter(model, algorithm="ties", checkpoint_weights=checkpoints)
     _assert_replays(tmp_path, model, receipt.edit_steps, {receipt.target_site: receipt.merged_weight}, base_on_disk=True)
+
+
+# ---- Methods a plan can't honestly express. Each test pins the reason in docs/method_replay_status.md.
+
+
+def test_mlp_width_surgery_cannot_be_a_plan() -> None:
+    model = pythia.build_mini_pythia_model()
+    site = model.mlp_down_proj_site(0)
+    down = model.tensors[site].to(torch.float64)
+    inner = down.T
+    result = m5_surgery.execute_mlp_width_surgery(gate_proj=inner, up_proj=inner, down_proj=down, keep_indices=[0, 1])
+    assert result.down_proj.shape[1] != down.shape[1]
+    with pytest.raises(Exception, match=r"(?i)shape|dimension|mismatch"):
+        EditPlan(model).replace_slice(site, result.down_proj).preview()
+    # A region write keeps the tensor's shape, so it can never reach the surgery's narrower model.
+    written = EditPlan(model).replace_slice(site, result.down_proj, region=_region_of(result.down_proj)).preview()
+    assert written.edited_tensors[site].shape == down.shape
+
+
+def _region_of(matrix: torch.Tensor) -> Any:
+    from neural_foundry.edit_plan import Region
+
+    return Region(rows=(0, int(matrix.shape[0])), cols=(0, int(matrix.shape[1])))
+
+
+def test_attention_head_surgery_cannot_be_a_plan() -> None:
+    model = pythia.build_mini_pythia_model()
+    site = model.mlp_down_proj_site(0)
+    head_dim = 2
+    matrix = torch.ones((8, 8), dtype=torch.float64)
+    result = m5_surgery.execute_attention_head_surgery(
+        q_proj=matrix, k_proj=matrix, v_proj=matrix, o_proj=matrix, keep_q_heads=[0, 1], keep_kv_heads=[0], head_dim=head_dim
+    )
+    # Pruning changes tensor shapes and the head-count config. A graph has neither a shape nor a config operand.
+    assert result.q_proj.shape != matrix.shape and result.k_proj.shape != matrix.shape
+    assert result.num_attention_heads == 2
+    with pytest.raises(Exception, match=r"(?i)shape|dimension|mismatch"):
+        EditPlan(model).replace_slice(site, result.q_proj).preview()
+
+
+def test_layer_reorganization_cannot_be_a_plan() -> None:
+    model = pythia.build_mini_pythia_model()
+    layers = [model.tensors[model.mlp_down_proj_site(i)].to(torch.float64) for i in range(int(model.config["num_hidden_layers"]))]
+    result = m5_surgery.execute_layer_reorganization(layers, new_layer_order=[0])
+    assert result.num_hidden_layers == 1 < len(layers)
+    name = next(iter(result.layer_weights))
+    with pytest.raises(ValueError, match="Unknown tensor"):
+        EditPlan(model).replace_slice(name, result.layer_weights[name])
+
+
+def test_structural_constructor_edits_no_weights() -> None:
+    weight = torch.eye(3, dtype=torch.float64)
+    receipt = m5_surgery.apply_registered_structural_constructor(weight, weight, constructor_id="split_linear_channel_exact.v1")
+    assert not any(isinstance(v, torch.Tensor) for v in vars(receipt).values())
+
+
+def test_grouped_quantization_is_a_representation_not_a_model_edit() -> None:
+    weight = torch.tensor([[0.123, 0.456, 0.789, 0.321]], dtype=torch.float64)
+    artifact = m5_surgery.quantize_weight_grouped(weight, group_size=4)
+    assert artifact.qweight.dtype == torch.int8
+    assert artifact.max_roundtrip_abs_error > 0.0
+
+
+def test_status_table_lists_every_method() -> None:
+    table = (Path(__file__).parent.parent / "docs" / "method_replay_status.md").read_text(encoding="utf-8")
+    for name in (
+        "attractor_projection", "association_edit", "ROME", "MEMIT", "AlphaEdit", "task_arithmetic", "ties", "dare",
+        "run_autonomous_tool_loop", "execute_mlp_width_surgery", "execute_attention_head_surgery",
+        "execute_layer_reorganization", "apply_registered_structural_constructor", "quantize_weight_grouped",
+    ):
+        assert name in table, name
+
+
