@@ -497,7 +497,7 @@ Status: **experimental.** The reusable `algorithmic_three_skill` Gym compared wi
 
 ## Limitations
 
-- **No edit is qualified on a real checkpoint.** Milestone 1 is schema only. The vLLM check below currently fails. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
+- **No edit is qualified on a real checkpoint.** Milestone 1's replay and measurement pipeline runs on Pythia-14M, but the edit it selected is harmful. The vLLM check below currently fails. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
 - **Other architectures:** Llama, Mistral, Gemma, Gemma2 and Qwen3 can't be edited. `Qwen/qwen2-dense-mini` is a fixture despite its name.
 - **Not external packages:** EasyEdit, mergekit, NeMo-Gym, Verifiers, Gymnasium and circuit-tracer names refer to local code unless a receipt says otherwise. The gym adapter receipts record `sandbox_used=False` and `external_package_executed=False`.
 - **Not implemented:** `run_transfer_benchmark`, `run_proposer_training_study`, `qualify_tensorrt_llm_adapter`, `run_end_to_end_systems_profile` and `run_weight_efficiency_benchmark` raise `NotImplementedError` once their contract checks pass.

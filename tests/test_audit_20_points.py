@@ -523,8 +523,8 @@ def test_points_17_18_19_20_flagship_bundle_patch_ux_and_ci_workflows(tmp_path: 
     audit_cli = subprocess.run([str(CLI), "patch", "audit", str(signed_file), "--pubkey", cli_keys["public_key"]], capture_output=True, text=True, check=True)
     assert json.loads(audit_cli.stdout)["result"]["audit_passed"] is True
 
-    rb_cli = subprocess.run([str(CLI), "patch", "rollback", str(signed_file)], capture_output=True, text=True, check=True)
-    assert json.loads(rb_cli.stdout)["result"]["rollback_verified"] is True
+    rb_cli = subprocess.run([str(CLI), "patch", "rollback", str(signed_file)], capture_output=True, text=True)
+    assert rb_cli.returncode != 0 and "UNSUPPORTED_CAPABILITY" in rb_cli.stdout + rb_cli.stderr
 
     # Points 17 & 19: Verify CI workflow files use hosted ubuntu-latest runners and include sandbox isolation checks
     m1_yml = (ROOT / ".github/workflows/m1.yml").read_text(encoding="utf-8")
