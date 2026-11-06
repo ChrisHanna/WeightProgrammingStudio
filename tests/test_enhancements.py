@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -188,6 +189,59 @@ def test_missing_runtime_refuses_instead_of_falling_back(tmp_path: Path, monkeyp
     for adapter in (serving.VllmAdapter, serving.TransformersAdapter):
         with pytest.raises(serving.ServingRuntimeUnavailableError):
             adapter(tmp_path)
+
+
+class _FakeVllm:
+    """Stands in for the vllm module: records the variable at import and at engine start. No GPU, no server."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.seen: list[str | None] = []
+        self.error = error
+
+    def LLM(self, **_: object) -> object:  # noqa: N802
+        self.seen.append(os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"))
+        if self.error is not None:
+            raise self.error
+        return object()
+
+
+def _fake_vllm_import(monkeypatch: pytest.MonkeyPatch, fake: _FakeVllm) -> None:
+    def load(name: str) -> object:
+        assert name == "vllm"
+        fake.seen.append(os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"))
+        return fake
+
+    monkeypatch.setattr(serving.importlib, "import_module", load)
+
+
+@pytest.mark.parametrize("before", [None, "1"], ids=["unset", "caller_set"])
+def test_vllm_adapter_turns_off_flashinfer_only_during_startup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, before: str | None) -> None:
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    fake = _FakeVllm()
+    _fake_vllm_import(monkeypatch, fake)
+    if before is None:
+        monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", before)
+    serving.VllmAdapter(tmp_path)
+    assert fake.seen == ["0", "0"]
+    assert os.environ.get("VLLM_USE_FLASHINFER_SAMPLER") == before
+
+
+def test_vllm_adapter_reports_missing_ninja_and_still_restores_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    _fake_vllm_import(monkeypatch, _FakeVllm(FileNotFoundError(2, "No such file or directory", "ninja")))
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(serving.ServingRuntimeUnavailableError, match="needs ninja"):
+        serving.VllmAdapter(tmp_path)
+    assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "1"
+
+
+def test_vllm_adapter_does_not_relabel_other_missing_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    _fake_vllm_import(monkeypatch, _FakeVllm(FileNotFoundError(2, "No such file or directory", "config.json")))
+    with pytest.raises(FileNotFoundError, match="config.json"):
+        serving.VllmAdapter(tmp_path)
 
 
 def test_editor_transaction_lifecycle() -> None:

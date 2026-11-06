@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
 import shutil
 import subprocess
+import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -159,6 +162,31 @@ class TransformersAdapter:
 # vLLM's default TRITON_ATTN missed parity on Pythia-14M by up to 0.41 nats; see vllm_qualification.py.
 QUALIFIED_ATTENTION_BACKEND = "FLEX_ATTENTION"
 
+# FlashInfer can JIT-compile a sampler at startup, which fails with FileNotFoundError('ninja') where
+# ninja is missing. `vllm_qualification` serves with this off too; temperature 0 never uses that sampler.
+_VLLM_STARTUP_ENV = {"VLLM_USE_FLASHINFER_SAMPLER": "0"}
+_vllm_startup_lock = threading.Lock()
+
+
+@contextmanager
+def _vllm_startup_env() -> Iterator[None]:
+    """Set vLLM's startup variables only while it starts; the caller's values come back afterwards.
+
+    The environment is process-wide. The lock serializes adapters, but other threads can see the value
+    during startup.
+    """
+    with _vllm_startup_lock:
+        saved = {name: os.environ.get(name) for name in _VLLM_STARTUP_ENV}
+        os.environ.update(_VLLM_STARTUP_ENV)
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
 
 class VllmAdapter:
     """Run a checkpoint through vLLM in-process, with the settings `vllm_qualification` serves under.
@@ -174,18 +202,25 @@ class VllmAdapter:
     ) -> None:
         self.directory = Path(checkpoint_dir)
         self.model_digest = _weights_digest(self.directory, expected_digest)
-        try:
-            self._vllm = importlib.import_module("vllm")
-        except ImportError as exc:
-            raise ServingRuntimeUnavailableError("vllm is not installed") from exc
-        self.engine = self._vllm.LLM(
-            model=str(self.directory),
-            dtype="float32",
-            attention_backend=QUALIFIED_ATTENTION_BACKEND,
-            generation_config="vllm",
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=256,
-        )
+        # vLLM may read the variable at import, at engine start or in a worker it spawns, so all are covered.
+        with _vllm_startup_env():
+            try:
+                self._vllm = importlib.import_module("vllm")
+            except ImportError as exc:
+                raise ServingRuntimeUnavailableError("vllm is not installed") from exc
+            try:
+                self.engine = self._vllm.LLM(
+                    model=str(self.directory),
+                    dtype="float32",
+                    attention_backend=QUALIFIED_ATTENTION_BACKEND,
+                    generation_config="vllm",
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    max_model_len=256,
+                )
+            except FileNotFoundError as exc:
+                if exc.filename != "ninja" and "ninja" not in str(exc):
+                    raise
+                raise ServingRuntimeUnavailableError(f"vLLM needs ninja to start, even with the FlashInfer sampler off: {exc}") from exc
 
     def generate(self, prompt: str, sampler: Mapping[str, Any] | None = None) -> GenerationResult:
         s = normalize_sampler(sampler)
