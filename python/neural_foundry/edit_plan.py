@@ -30,6 +30,15 @@ from .ir import WeightIRTransactionBuilder, unpack_matrix_bytes
 from .records import NativeError, canonicalize, content_digest
 
 
+class ReloadParityError(ValueError):
+    """Rust reported that a reloaded candidate doesn't match the one it built."""
+
+
+def _require_reload_parity(tx: Any, *, tensor: str, operation: str) -> None:
+    if tx.reload_parity_verified is not True:
+        raise ReloadParityError(f"{operation} on {tensor}: the transaction's reload parity check failed")
+
+
 class EditConstraintViolation(ValueError):
     """A plan broke a declared limit. Nothing was applied."""
 
@@ -432,6 +441,7 @@ class EditPlan:
             current = working.get(tensor, base[tensor]).to(torch.float64)
             arguments = build(current)
             tx = WeightIRTransactionBuilder.execute_matrix_edit(current, provenance_tag=f"edit_plan.{op}.v1", engine_name="studio.edit_plan", **arguments)
+            _require_reload_parity(tx, tensor=tensor, operation=op)
             edited = torch.tensor(unpack_matrix_bytes(tx.edited_bytes, tuple(current.shape), "f64"), dtype=torch.float64)
             working[tensor] = edited
             receipts.append(
@@ -703,6 +713,7 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
         tx = WeightIRTransactionBuilder.execute_matrix_edit(
             current, provenance_tag=f"edit_plan.{op}.v1", engine_name="studio.edit_plan", **arguments
         )
+        _require_reload_parity(tx, tensor=tensor, operation=op)
         if tx.before_parameter_digest != step["before_parameter_digest"]:
             raise EditGraphError(f"{step['id']}: this isn't the base model the graph was made for")
         if tx.after_parameter_digest != step["after_parameter_digest"]:
