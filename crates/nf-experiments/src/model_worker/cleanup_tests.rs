@@ -308,11 +308,14 @@ fn isolated_worker_case() {
     let root = Root(std::env::temp_dir().join(format!("worker-cleanup-{}", std::process::id())));
     fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Cargo's library is hard-linked; qualification correctly rejects it.
+    let extension = root.0.join("_native.so");
+    fs::copy(project.join("target/debug/lib_native.so"), &extension).unwrap();
     let runtime = QualifiedTorch::qualify(
         true,
         Path::new("/usr/bin/python3.12"),
         &project.join(".venv/lib/python3.12/site-packages"),
-        &project.join("target/debug/lib_native.so"),
+        &extension,
         &root.0,
     )
     .unwrap();

@@ -54,11 +54,14 @@ impl Fixture {
     }
     fn runtime(&self) -> QualifiedTorch {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Cargo's library is hard-linked; qualification correctly rejects it.
+        let extension = self.root.join("_native.so");
+        std::fs::copy(project.join("target/debug/lib_native.so"), &extension).unwrap();
         QualifiedTorch::qualify(
             true,
             Path::new("/usr/bin/python3.12"),
             &project.join(".venv/lib/python3.12/site-packages"),
-            &project.join("target/debug/lib_native.so"),
+            &extension,
             &self.root,
         )
         .unwrap()
