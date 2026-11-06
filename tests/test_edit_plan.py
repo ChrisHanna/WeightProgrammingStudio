@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 import torch
 
 from neural_foundry import patch_ux, prd_adapters, pythia, studio
+from neural_foundry.gym_proposal import (
+    GymProposalError,
+    GymWeightProposalSpec,
+    ProposedOperation,
+    ResolvedGymWeightProposal,
+    ResolvedOperation,
+    SemanticSite,
+)
 from neural_foundry.edit_plan import (
     EditConstraints,
     EditConstraintViolation,
@@ -16,9 +32,11 @@ from neural_foundry.edit_plan import (
     apply_signed_edit_graph,
     search_edits,
     sign_edit_graph,
+    verify_exported_candidate,
 )
 
 GYM = pythia.ALGORITHMIC_THREE_SKILL_GYM
+REAL_CHECKPOINT = Path(os.environ.get("NF_PYTHIA_14M_DIR", "/tmp/pythia-14m")) / "model.safetensors"
 
 
 @pytest.fixture
@@ -196,6 +214,154 @@ def test_replay_rejects_wrong_base_tampering_and_untrusted_keys(model) -> None: 
     planted["steps"][0]["arguments"]["engine_name"] = "x"
     with pytest.raises(EditGraphError, match="unknown"):
         apply_edit_graph(model, planted)
+
+
+def test_spectral_edit_that_moves_nothing_changes_nothing(model) -> None:  # type: ignore[no-untyped-def]
+    site, w = _site(model), _w(model)
+    result = EditPlan(model).spectral_clip(site, 2 * float(torch.linalg.svdvals(w)[0])).preview()
+    assert result.changed_parameters == 0
+    assert torch.equal(result.edited_tensors[site], w)
+    with pytest.raises(ValueError, match="positive"):
+        EditPlan(model).spectral_clip(site, -1.0)
+
+
+def test_adding_a_constraint_rechecks_a_previewed_plan(model) -> None:  # type: ignore[no-untyped-def]
+    plan = EditPlan(model).scale(_site(model), 2.0)
+    plan.preview()
+    plan.add_constraint(max_frobenius_delta=1e-9)
+    with pytest.raises(EditConstraintViolation, match="Frobenius"):
+        plan.execute()
+
+
+def test_replay_rejects_a_base_differing_only_in_an_unedited_tensor(model) -> None:  # type: ignore[no-untyped-def]
+    graph = EditPlan(model).scale(_site(model), 0.5).to_graph()
+    other = pythia.build_mini_pythia_model()
+    untouched = other.mlp_down_proj_site(0)
+    other.tensors = {**other.tensors, untouched: other.tensors[untouched] * 1.01}
+    with pytest.raises(EditGraphError, match="base model"):
+        apply_edit_graph(other, graph)
+
+
+def test_search_records_a_rust_refusal_as_a_rejection(model) -> None:  # type: ignore[no-untyped-def]
+    site = _site(model)
+    results = search_edits(model, development=[], retention_prompts=("Hello world",), proposals={"over_cap": lambda p: p.scale(site, 1000.0)})
+    assert {r.label: r for r in results}["over_cap"].rejection_reason
+
+
+def test_narrow_or_altered_export_fails_verification(model, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    plan = EditPlan(model).scale(_site(model), 0.5)
+    digest = plan.execute().state_digest
+    plan.export(tmp_path / "f64")
+    assert verify_exported_candidate(tmp_path / "f64", digest) == digest
+    with pytest.raises(EditGraphError, match="don't match"):
+        verify_exported_candidate(tmp_path / "f64", "sha256:" + "0" * 64)
+    plan.export(tmp_path / "f32", dtype="f32")
+    with pytest.raises(EditGraphError, match="F32"):
+        verify_exported_candidate(tmp_path / "f32", digest)
+
+
+def _unavailable(reason: str) -> None:
+    """Skipped isn't passed: qualification runs must fail when a requirement is missing."""
+    if os.environ.get("NF_QUALIFICATION") == "1":
+        pytest.fail(f"Qualification can't run: {reason}")
+    pytest.skip(reason)
+
+
+def _require_checkpoint() -> None:
+    if not REAL_CHECKPOINT.is_file():
+        _unavailable(f"Needs Pythia-14M at {REAL_CHECKPOINT}, which is absent")
+
+
+def _resolved(base, source: EditPlan) -> ResolvedGymWeightProposal:  # type: ignore[no-untyped-def]
+    """A frozen proposal carrying the operands of `source`, whose steps must all be on layer sites."""
+    graph = source.to_graph()
+    planned, resolved = [], []
+    for step in graph["steps"]:
+        layer = int(step["tensor"].split(".layers.")[1].split(".")[0])
+        arguments = dict(step["arguments"])
+        operation = arguments.pop("operation_type")
+        planned.append(ProposedOperation(SemanticSite("mlp_down", layer), operation))
+        resolved.append(ResolvedOperation(step["tensor"], tuple(base.tensors[step["tensor"]].shape), operation, arguments, step["operands"]))
+    spec = GymWeightProposalSpec("proposal.test", tuple(planned), {}, "scripted", "sha256:" + "a" * 64)
+    return ResolvedGymWeightProposal(
+        spec, str(base.config["model_type"]), graph["base_state_digest"], tuple(resolved), graph["candidate_state_digest"]
+    )
+
+
+def test_resolved_proposal_compiles_to_the_same_replayable_graph(model) -> None:  # type: ignore[no-untyped-def]
+    site = _site(model)
+    proposal = _resolved(model, EditPlan(model).scale(site, 0.5, region=Region(rows=(0, 2))))
+    graph = EditPlan.from_resolved_proposal(model, proposal).to_graph()
+    assert graph == EditPlan.from_resolved_proposal(pythia.build_mini_pythia_model(), proposal).to_graph()
+    assert graph["proposal"]["proposal_id"] == "proposal.test"
+    keys = patch_ux.generate_ed25519_keypair()
+    replayed = apply_signed_edit_graph(pythia.build_mini_pythia_model(), sign_edit_graph(graph, signing_key=keys["private_key"]), public_key=keys["public_key"])
+    assert replayed.state_digest == proposal.expected_candidate_digest
+
+
+def test_resolved_proposal_refuses_anything_that_does_not_match(model) -> None:  # type: ignore[no-untyped-def]
+    site = _site(model)
+    good = _resolved(model, EditPlan(model).scale(site, 0.5))
+    operation = good.operations[0]
+
+    def refused(match: str, **changes) -> None:  # type: ignore[no-untyped-def]
+        with pytest.raises(GymProposalError, match=match):
+            EditPlan.from_resolved_proposal(model, replace(good, **changes))
+
+    refused("is for", architecture="qwen2")
+    refused("isn't the base", base_checkpoint_digest="sha256:" + "0" * 64)
+    refused("not the expected", expected_candidate_digest="sha256:" + "0" * 64)
+    refused("isn't the tensor", operations=(replace(operation, tensor=model.mlp_down_proj_site(0)),))
+    refused("has shape", operations=(replace(operation, shape=(1, 1)),))
+    refused("unknown arguments", operations=(replace(operation, arguments={**operation.arguments, "engine_name": "x"}),))
+    refused("unknown arguments", operations=(replace(operation, arguments={**operation.arguments, "operation_type": "mask"}),))
+    refused("Unknown proposal constraint", spec=replace(good.spec, constraints={"nope": 1}))
+    tight = replace(good.spec, constraints={"max_frobenius_delta": 1e-9})
+    with pytest.raises(EditConstraintViolation):
+        EditPlan.from_resolved_proposal(model, replace(good, spec=tight))
+
+
+def test_steps_added_after_compiling_drop_the_proposal_record(model) -> None:  # type: ignore[no-untyped-def]
+    site = _site(model)
+    plan = EditPlan.from_resolved_proposal(model, _resolved(model, EditPlan(model).scale(site, 0.5)))
+    assert "proposal" not in plan.scale(site, 0.5).to_graph()
+
+
+def test_resolved_proposal_replays_in_a_fresh_process_on_real_pythia(tmp_path) -> None:
+    _require_checkpoint()
+    base = pythia.PythiaModel.from_pretrained_dir(REAL_CHECKPOINT.parent)
+    site = base.mlp_down_proj_site(5)
+    limit = 0.9 * float(torch.linalg.svdvals(base.tensors[site])[0])
+    proposal = _resolved(base, EditPlan(base).spectral_clip(site, limit))
+    graph = EditPlan.from_resolved_proposal(base, proposal).to_graph()
+    keys = patch_ux.generate_ed25519_keypair()
+    envelope, key = tmp_path / "envelope.json", tmp_path / "public.txt"
+    envelope.write_text(json.dumps(sign_edit_graph(graph, signing_key=keys["private_key"])), encoding="utf-8")
+    key.write_text(keys["public_key"], encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "neural_foundry.edit_plan", "--checkpoint", str(REAL_CHECKPOINT.parent), "--envelope", str(envelope), "--public-key-file", str(key)],
+        capture_output=True, text=True, cwd=tmp_path, check=True,
+    )
+    assert json.loads(result.stdout.strip().splitlines()[-1])["candidate_state_digest"] == proposal.expected_candidate_digest
+
+
+def test_spectral_clip_vertical_on_real_pythia(tmp_path) -> None:
+    _require_checkpoint()
+    if importlib.util.find_spec("transformers") is None:
+        _unavailable("Independent verification needs transformers, which isn't installed")
+    spec =importlib.util.spec_from_file_location("edit_vertical", Path(__file__).parents[1] / "scripts" / "edit_vertical.py")
+    assert spec and spec.loader
+    vertical = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vertical)
+    evidence = vertical.run_vertical(REAL_CHECKPOINT.parent, tmp_path, "spectral_clip", 5)
+    signed = evidence["preview"]["state_digest"]
+    assert evidence["preview"]["base_untouched"] and evidence["execute"]["same_as_preview"]
+    assert evidence["replay"]["matches_candidate"] and evidence["replay"]["plan_digest_matches"]
+    assert evidence["export"]["reloaded_state_digest"] == signed == evidence["export"]["replayed_export_digest"]
+    assert evidence["reload"]["matches_candidate"] and evidence["independent"]["matches_candidate"]
+    assert evidence["independent"]["top1_agreement_edited"] == 1.0
+    assert evidence["independent"]["max_abs_logit_diff_edited"] < 1e-4
+    assert evidence["independent"]["edit_visible_in_hf_max_logit_change"] > 0.1
 
 
 def test_existing_methods_and_branches_share_the_graph(model) -> None:  # type: ignore[no-untyped-def]
