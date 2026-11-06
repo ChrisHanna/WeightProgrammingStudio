@@ -100,7 +100,7 @@ def _graph_plan(model: Toy) -> EditPlan:
         Region(cols=(0, 4)),
         Region(rows=(0, 2**64)),
         Region(cols=(2**64 - 1, 2**64 + 1)),
-        pytest.param(Region(rows=(0, 1.5)), marks=xfail("D16 edit_plan.py: Region accepts a float bound and truncates it")),  # type: ignore[arg-type]
+        Region(rows=(0, 1.5)),  # type: ignore[arg-type]
     ],
     ids=["empty", "inverted", "negative", "past_end", "cols_past_end", "u64_end", "u64_wrap", "float"],
 )
@@ -191,9 +191,8 @@ def test_unknown_tensor_is_refused(model: Toy) -> None:
     ],
     ids=["adopt_scalar_matrix", "adopt_row", "interpolate_row"],
 )
-@xfail("D5 edit_plan.py: adopt_weight and interpolate broadcast the operand, so a 1x1 matrix overwrites the whole tensor")
 def test_derived_edits_do_not_broadcast_a_wrong_shape_over_the_tensor(model: Toy, build: Callable[[EditPlan], Any]) -> None:
-    with pytest.raises(REFUSED):
+    with pytest.raises(REFUSED, match="shape"):
         build(EditPlan(model)).preview()
 
 
@@ -206,14 +205,48 @@ def _tied_model() -> Toy:
     return toy
 
 
-@xfail("D6 edit_plan.py: an edit changes one of two tied tensors and the tie is silently lost")
 def test_edit_of_a_tied_weight_does_not_silently_split_the_tie() -> None:
     toy = _tied_model()
     try:
         out = EditPlan(toy).scale(SITE, 2.0).preview().model
-    except REFUSED:
+    except REFUSED as refusal:
+        assert "tied" in str(refusal)
         return
     assert torch.equal(out.tensors[SITE], out.tensors[TWIN])
+
+
+def test_the_same_edit_to_both_tied_weights_keeps_the_tie_through_replay() -> None:
+    toy = _tied_model()
+    plan = EditPlan(toy).scale(SITE, 2.0).scale(TWIN, 2.0)
+    out = plan.preview().model
+    assert out.tensors[SITE] is out.tensors[TWIN]
+    assert torch.equal(out.tensors[SITE], toy.tensors[SITE] * 2.0)
+    replayed = apply_edit_graph(_tied_model(), plan.to_graph()).model
+    assert replayed.tensors[SITE] is replayed.tensors[TWIN]
+
+
+def test_different_edits_to_tied_weights_are_refused() -> None:
+    with pytest.raises(EditConstraintViolation, match="tied"):
+        EditPlan(_tied_model()).scale(SITE, 2.0).scale(TWIN, 3.0).preview()
+
+
+def test_a_declared_tie_is_seen_after_loading_gave_each_name_its_own_storage() -> None:
+    toy = _tied_model()
+    toy.tensors[TWIN] = toy.tensors[SITE].clone()
+    with pytest.raises(EditConstraintViolation, match="tied"):
+        EditPlan(toy).scale(SITE, 2.0).preview()
+
+
+def test_replay_on_a_tied_base_refuses_to_split_the_tie() -> None:
+    graph = EditPlan(Toy()).scale(SITE, 2.0).to_graph()
+    tied = Toy()
+    tied.tensors[TWIN] = tied.tensors[SITE]
+    graph["base_state_digest"] = edit_plan.tensor_state_digest(tied.tensors)
+    edited = dict(tied.tensors)
+    edited[SITE] = edited[SITE] * 2.0
+    graph["candidate_state_digest"] = edit_plan.tensor_state_digest(edited)
+    with pytest.raises(EditGraphError, match="tied"):
+        apply_edit_graph(tied, graph)
 
 
 def test_graph_cannot_be_redirected_to_a_tensor_with_identical_bytes() -> None:
@@ -244,7 +277,7 @@ NAN, INF = float("nan"), float("inf")
         lambda p: p.low_rank(SITE, _matrix(1.0, (4, 1)), _matrix(1.0, (1, 3)), strength=INF),
         lambda p: p.replace_slice(SITE, _matrix(NAN)),
         lambda p: p.mask(SITE, _matrix(NAN)),
-        pytest.param(lambda p: p.mask(SITE, _matrix(INF)), marks=xfail("D15 ir.py: an infinite mask escapes as OverflowError instead of a refusal")),
+        lambda p: p.mask(SITE, _matrix(INF)),
         lambda p: p.linear_map(SITE, _matrix(NAN, (4, 4))),
         lambda p: p.project(SITE, torch.eye(4, 2, dtype=torch.float64), strength=NAN),
         lambda p: p.spectral_shift(SITE, INF),
@@ -262,9 +295,9 @@ def test_non_finite_operands_and_results_are_refused(model: Toy, build: Callable
 @pytest.mark.parametrize(
     "build",
     [
-        pytest.param(lambda p: p.spectral_clip(SITE, NAN), marks=xfail("D7 edit_plan.py: NaN clip limit is accepted")),
+        lambda p: p.spectral_clip(SITE, NAN),
         lambda p: p.spectral_clip(SITE, -1.0),
-        pytest.param(lambda p: p.remove_noise_floor(SITE, NAN), marks=xfail("D7 edit_plan.py: NaN threshold zeroes the whole tensor")),
+        lambda p: p.remove_noise_floor(SITE, NAN),
         lambda p: p.soft_threshold(SITE, NAN),
         lambda p: p.clamp(SITE, NAN),
         lambda p: p.spectral_shift(SITE, NAN),
@@ -286,9 +319,8 @@ def test_huge_finite_add_is_exact_or_refused(model: Toy) -> None:
 
 
 @pytest.mark.parametrize("field", ["max_frobenius_delta", "max_spectral_delta", "max_parameter_magnitude", "max_changed_parameters"])
-@xfail("D3 edit_plan.py: value > NaN is False, so a NaN limit disables the constraint")
 def test_nan_constraint_is_not_treated_as_no_limit(model: Toy, field: str) -> None:
-    with pytest.raises((EditConstraintViolation, ValueError)):
+    with pytest.raises((EditConstraintViolation, ValueError), match="non-negative"):
         EditPlan(model, EditConstraints(**{field: NAN})).scale(SITE, 2.0).preview()
 
 
@@ -475,20 +507,107 @@ def test_base_model_with_extra_tensors_is_refused(model: Toy) -> None:
         apply_edit_graph(other, graph)
 
 
-@xfail("D1 edit_plan.py: base_model_id is never compared with anything")
 def test_graph_declaring_a_different_base_model_id_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     graph["base_model_id"] = "some/other-model"
-    with pytest.raises(EditGraphError):
+    with pytest.raises(EditGraphError, match="base_model_id"):
         apply_edit_graph(model, graph)
 
 
-@xfail("D14 edit_plan.py: depends_on is written but never checked")
 def test_graph_with_a_forward_dependency_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     graph["steps"][0]["depends_on"] = ["step_2"]
-    with pytest.raises(EditGraphError):
+    with pytest.raises(EditGraphError, match="depends_on"):
         apply_edit_graph(model, graph)
+
+
+def _set_step(index: int, **fields: Any) -> Callable[[dict[str, Any]], None]:
+    return lambda g: g["steps"][index].update(fields)
+
+
+GRAPH_STRUCTURE_ATTACKS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
+    "duplicate_id": (_set_step(1, id="step_0"), "Duplicate step id"),
+    "missing_dependency": (_set_step(1, depends_on=["step_9"]), "missing steps"),
+    "two_step_cycle": (_set_step(0, depends_on=["step_1"]), "cycle"),
+    "self_dependency": (_set_step(1, depends_on=["step_1"]), "cycle"),
+    "forward_ordering": (lambda g: (g["steps"][1].update(depends_on=["step_2"]), g["steps"][2].update(depends_on=[])), "later steps"),
+    "dropped_dependency": (_set_step(1, depends_on=[]), "match its position"),
+    "depends_on_not_a_list": (_set_step(1, depends_on="step_0"), "list of step ids"),
+    "id_not_a_string": (_set_step(1, id=1), "string id"),
+}
+
+
+@pytest.mark.parametrize("name", GRAPH_STRUCTURE_ATTACKS)
+def test_graph_structure_is_checked_on_replay(model: Toy, name: str) -> None:
+    graph = _graph_plan(model).to_graph()
+    tamper, message = GRAPH_STRUCTURE_ATTACKS[name]
+    tamper(graph)
+    with pytest.raises(EditGraphError, match=message):
+        apply_edit_graph(model, graph)
+
+
+@pytest.fixture
+def no_execution(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Records any Rust transaction or tensor decode, and lets it fail the replay loudly."""
+    calls: list[str] = []
+
+    def record(name: str) -> Callable[..., Any]:
+        def called(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+            raise AssertionError(f"{name} ran")
+
+        return called
+
+    monkeypatch.setattr(edit_plan.WeightIRTransactionBuilder, "execute_matrix_edit", staticmethod(record("rust")))
+    monkeypatch.setattr(edit_plan, "_decode_matrix", record("decode"))
+    return calls
+
+
+def _repeat_steps(graph: dict[str, Any], count: int) -> None:
+    graph["steps"] = [{**graph["steps"][0], "id": f"step_{i}", "depends_on": [f"step_{i - 1}"] if i else []} for i in range(count)]
+
+
+PREFLIGHT_ATTACKS: dict[str, tuple[Callable[[dict[str, Any]], Any], str]] = {
+    **{f"late_{k}": v for k, v in {
+        "duplicate_id": (_set_step(2, id="step_0"), "Duplicate step id"),
+        "missing_dependency": (_set_step(2, depends_on=["step_9"]), "missing steps"),
+        "self_dependency": (_set_step(2, depends_on=["step_2"]), "cycle"),
+        "dropped_dependency": (_set_step(2, depends_on=[]), "match its position"),
+        "unknown_tensor": (_set_step(2, tensor="nope"), "no tensor"),
+    }.items()},
+    "excessive_steps": (lambda g: _repeat_steps(g, edit_plan.EDIT_GRAPH_MAX_STEPS + 1), "steps, over the limit"),
+    "excessive_dependencies": (_set_step(2, depends_on=["step_1"] * (edit_plan.EDIT_GRAPH_MAX_DEPENDENCIES + 1)), "dependencies, over the limit"),
+    "excessive_operands": (lambda g: g["steps"][1]["operands"].update({f"x{i}": {"data_b64": ""} for i in range(edit_plan.EDIT_GRAPH_MAX_OPERANDS + 1)}), "decoded tensors, over the limit"),
+    "oversized_declared_shape": (lambda g: g["steps"][1]["operands"]["delta_matrix"].update(shape=[2**20, 2**20]), "temporary bytes"),
+}
+
+
+@pytest.mark.parametrize("name", PREFLIGHT_ATTACKS)
+def test_preflight_refuses_before_any_rust_execution_or_decoding(model: Toy, request: pytest.FixtureRequest, name: str) -> None:
+    graph = _graph_plan(model).to_graph()
+    tamper, message = PREFLIGHT_ATTACKS[name]
+    tamper(graph)
+    no_execution = request.getfixturevalue("no_execution")
+    with pytest.raises(EditGraphError, match=message):
+        apply_edit_graph(model, graph)
+    assert no_execution == []
+
+
+def test_preflight_counts_base_tensors_in_temporary_memory(model: Toy, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    graph = EditPlan(model).scale(SITE, 2.0).to_graph()
+    no_execution = request.getfixturevalue("no_execution")
+    monkeypatch.setattr(edit_plan, "EDIT_GRAPH_MAX_TEMPORARY_BYTES", 2 * 8 * 12 - 1)
+    with pytest.raises(EditGraphError, match="temporary bytes"):
+        apply_edit_graph(model, graph)
+    assert no_execution == []
+
+
+def test_the_recording_fixture_does_see_a_replay_that_gets_through(model: Toy, request: pytest.FixtureRequest) -> None:
+    graph = _graph_plan(model).to_graph()
+    calls = request.getfixturevalue("no_execution")
+    with pytest.raises(AssertionError, match="ran"):
+        apply_edit_graph(model, graph)
+    assert calls
 
 
 def test_graph_with_a_relabelled_operation_is_refused(model: Toy) -> None:
@@ -498,13 +617,89 @@ def test_graph_with_a_relabelled_operation_is_refused(model: Toy) -> None:
         apply_edit_graph(model, graph)
 
 
-@xfail("D8 native canonical parser: signing refuses over 1 MiB, so a 400x400 add_delta graph can't be signed despite the 256 MiB operand limit")
+def _real_sized() -> tuple[Toy, EditPlan]:
+    toy = Toy()
+    toy.tensors = {SITE: torch.ones(400, 400, dtype=torch.float64)}
+    return toy, EditPlan(toy).add(SITE, torch.full((400, 400), 0.5, dtype=torch.float64))
+
+
 def test_signed_graph_for_a_real_sized_matrix_can_be_replayed(keys: dict[str, Any]) -> None:
     toy = Toy()
     toy.tensors = {SITE: torch.ones(400, 400, dtype=torch.float64)}
     graph = EditPlan(toy).add(SITE, torch.full((400, 400), 0.5, dtype=torch.float64)).to_graph()
     envelope = sign_edit_graph(graph, signing_key=keys["private_key"])
     assert apply_signed_edit_graph(toy, envelope, public_key=keys["public_key"]).changed_parameters == 160_000
+
+
+def test_a_small_graph_is_still_signed_as_a_plain_v1_envelope(model: Toy, keys: dict[str, Any]) -> None:
+    graph = _graph_plan(model).to_graph()
+    envelope = sign_edit_graph(graph, signing_key=keys["private_key"])
+    assert envelope["kind"] == "nf_signed_patch_envelope" and envelope["patch"]["kind"] == "nf_edit_graph_v1"
+    assert envelope["patch_digest"] == content_digest(canonicalize(graph))
+
+
+def _flip_operand(bundle: dict[str, Any]) -> None:
+    digest = next(iter(bundle["operands"]))
+    raw = bytearray(base64.b64decode(bundle["operands"][digest]))
+    raw[0] ^= 1
+    bundle["operands"][digest] = base64.b64encode(bytes(raw)).decode()
+
+
+BUNDLE_TAMPERS: dict[str, tuple[Callable[[dict[str, Any]], Any], str]] = {
+    "operand_bytes": (_flip_operand, "signed digest"),
+    "operand_removed": (lambda b: b["operands"].clear(), "missing"),
+    "operand_planted": (lambda b: b["operands"].update({"sha256:" + "0" * 64: "AAAA"}), "doesn't reference"),
+    "operand_not_base64": (lambda b: b["operands"].update(dict.fromkeys(b["operands"], "!!!")), "base64"),
+    "operands_not_object": (lambda b: b.update(operands=[]), "operands"),
+    "bundle_extra_field": (lambda b: b.update(trusted=True), "Malformed"),
+    "signed_step_changed": (lambda b: b["envelope"]["patch"]["steps"][0]["arguments"].update(factor=2.0), "Tampered"),
+    "signed_reference_swapped": (lambda b: b["envelope"]["patch"]["steps"][0]["operands"]["delta_matrix"].update(data_digest="sha256:" + "0" * 64), "Tampered"),
+    "signature_flipped": (lambda b: b["envelope"].update(signature=b["envelope"]["signature"][:-1] + ("0" if b["envelope"]["signature"][-1] != "0" else "1")), "signature verification failed"),
+}
+
+
+@pytest.mark.parametrize("name", BUNDLE_TAMPERS)
+def test_tampered_operand_bundle_is_refused(keys: dict[str, Any], name: str) -> None:
+    toy, plan = _real_sized()
+    bundle = sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])
+    tamper, message = BUNDLE_TAMPERS[name]
+    tamper(bundle)
+    with pytest.raises(ValueError, match=message):
+        apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"])
+
+
+def test_operand_bundle_survives_json_and_needs_the_trusted_key(keys: dict[str, Any], other_keys: dict[str, Any]) -> None:
+    toy, plan = _real_sized()
+    bundle = json.loads(json.dumps(sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])))
+    assert apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"]).state_digest == plan.execute().state_digest
+    with pytest.raises(ValueError, match="signature verification failed"):
+        apply_signed_edit_graph(toy, bundle, public_key=other_keys["public_key"])
+
+
+def test_operand_bundle_limit_is_enforced(keys: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    toy, plan = _real_sized()
+    bundle = sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])
+    monkeypatch.setattr(edit_plan, "EDIT_GRAPH_MAX_OPERAND_BYTES", 8)
+    with pytest.raises(EditGraphError, match="size limit"):
+        apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"])
+
+
+def test_signed_v2_graph_cannot_be_used_without_its_operands_or_outside_a_bundle(keys: dict[str, Any]) -> None:
+    toy, plan = _real_sized()
+    envelope = sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])["envelope"]
+    with pytest.raises(EditGraphError, match="bundle"):
+        apply_signed_edit_graph(toy, envelope, public_key=keys["public_key"])
+    with pytest.raises(EditGraphError, match="nf_edit_graph_v1"):
+        apply_edit_graph(toy, envelope["patch"])
+    with pytest.raises(ValueError, match="schema"):
+        patch_ux.verify_open_patch_v1(envelope, public_key=keys["public_key"])
+
+
+def test_a_bundle_cannot_wrap_a_plain_v1_envelope(model: Toy, keys: dict[str, Any]) -> None:
+    envelope = sign_edit_graph(_graph_plan(model).to_graph(), signing_key=keys["private_key"])
+    bundle = {"schema_version": 1, "kind": edit_plan.EDIT_GRAPH_BUNDLE_KIND, "envelope": envelope, "operands": {}}
+    with pytest.raises(EditGraphError, match="nf_edit_graph_v2"):
+        apply_signed_edit_graph(model, bundle, public_key=keys["public_key"])
 
 
 # ---------------------------------------------------------------- signatures
@@ -731,19 +926,7 @@ def test_python_refuses_signed_but_invalid_patch(keys: dict[str, Any], name: str
         patch_ux.verify_open_patch_v1(_signed_invalid(name, keys), public_key=keys["public_key"])
 
 
-NF_SCHEMA_GAPS = {
-    "format_version_future": "D9 studio.rs: format_version isn't checked",
-    "format_version_null": "D9 studio.rs: format_version isn't checked",
-    "op_type_empty": "D9 studio.rs: an empty operation type is accepted",
-    "op_target_empty": "D9 studio.rs: an operation target naming no tensor is accepted",
-    "metric_null": "D9 studio.rs: a null metric is accepted",
-    "rounding_null_field": "D9 studio.rs: rounding_contract fields only have to exist, so null passes",
-    "rounding_empty_field": "D9 studio.rs: rounding_contract fields only have to exist, so an empty string passes",
-    "rounding_number": "D9 studio.rs: rounding_contract fields only have to exist, so a number passes",
-}
-
-
-@pytest.mark.parametrize("name", _marked(SIGNED_BUT_INVALID, NF_SCHEMA_GAPS))
+@pytest.mark.parametrize("name", SIGNED_BUT_INVALID)
 def test_nf_verify_refuses_signed_but_invalid_patch(keys: dict[str, Any], name: str, tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_bytes(json.dumps(_signed_invalid(name, keys)).encode())
@@ -857,14 +1040,7 @@ def test_python_refuses_wrapper_attack(keys: dict[str, Any], name: str) -> None:
         patch_ux.verify_open_patch_v1(doc, public_key=keys["public_key"])
 
 
-NF_WRAPPER_GAPS = {
-    "unsigned_top_digest": "D10 studio.rs: the unsigned top-level patch_digest isn't compared with the signed one",
-    "envelope_future_schema": "D10 studio.rs: the envelope's schema_version isn't checked",
-    "envelope_unknown_field": "D10 studio.rs: unknown envelope fields are accepted",
-}
-
-
-@pytest.mark.parametrize("name", _marked(WRAPPER_ATTACKS, NF_WRAPPER_GAPS))
+@pytest.mark.parametrize("name", WRAPPER_ATTACKS)
 def test_nf_verify_refuses_wrapper_attack(keys: dict[str, Any], name: str, tmp_path: Path) -> None:
     doc = _open_patch(_body(), keys)
     WRAPPER_ATTACKS[name](doc, keys)
@@ -880,20 +1056,20 @@ def test_nf_verify_requires_a_trusted_key(keys: dict[str, Any], other_keys: dict
     assert _nf_verify(path, other_keys["public_key"]) is False
 
 
-@xfail("D11 studio.rs: patch rollback reports rollback_verified:true after reading one JSON file and restoring nothing")
 def test_nf_patch_rollback_does_not_claim_verification_it_did_not_do(tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_text(json.dumps({"base_checkpoint_digest": "sha256:" + "1" * 64}))
     result = _run_nf("patch", "rollback", str(path))
     assert result.returncode != 0 or '"rollback_verified":true' not in result.stdout.replace(" ", "")
+    assert "cannot restore weights" in result.stdout + result.stderr
 
 
-@xfail("D12 studio.rs: patch audit reports audit_passed:true for any unsigned document")
 def test_nf_patch_audit_does_not_pass_an_unsigned_patch(tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_text(json.dumps(_body()))
     result = _run_nf("patch", "audit", str(path))
     assert result.returncode != 0 or '"audit_passed":true' not in result.stdout.replace(" ", "")
+    assert '"status":"unsigned"' in result.stdout.replace(" ", "")
 
 
 # ---------------------------------------------------------------- artifact manifests

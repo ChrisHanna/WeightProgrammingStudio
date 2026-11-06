@@ -45,6 +45,15 @@ class EditConstraints:
     preserve_prompts: tuple[str, ...] = ()
     min_retention: float = 1.0
 
+    def __post_init__(self) -> None:
+        # Written so a NaN fails too: every comparison with one is False, which would disable the limit.
+        for label in ("max_changed_parameters", "max_parameter_magnitude", "max_frobenius_delta", "max_spectral_delta"):
+            limit = getattr(self, label)
+            if limit is not None and not limit >= 0:
+                raise ValueError(f"{label} must be a non-negative number, not {limit!r}")
+        if not self.min_retention >= 0:
+            raise ValueError(f"min_retention must be a non-negative number, not {self.min_retention!r}")
+
 
 @dataclass(frozen=True)
 class Region:
@@ -56,6 +65,8 @@ class Region:
     def resolve(self, shape: Sequence[int]) -> tuple[tuple[int, int], tuple[int, int]]:
         rows = self.rows or (0, int(shape[0]))
         cols = self.cols or (0, int(shape[1]))
+        if any(isinstance(bound, bool) or not hasattr(bound, "__index__") for bound in (*rows, *cols)):
+            raise ValueError(f"Region bounds must be integers, not {rows}, {cols}")
         for (lo, hi), width in ((rows, shape[0]), (cols, shape[1])):
             if not 0 <= lo < hi <= width:
                 raise ValueError(f"Region {rows}, {cols} is outside tensor shape {tuple(shape)}")
@@ -90,6 +101,12 @@ class PlanCandidate:
 
 
 EDIT_GRAPH_MAX_OPERAND_BYTES = 256 * 1024 * 1024
+EDIT_GRAPH_MAX_STEPS = 1024
+EDIT_GRAPH_MAX_DEPENDENCIES = 4096
+EDIT_GRAPH_MAX_OPERANDS = 4096
+EDIT_GRAPH_MAX_TEMPORARY_BYTES = 16 * 1024 * 1024 * 1024
+EDIT_GRAPH_BUNDLE_KIND = "nf_edit_graph_bundle_v1"
+_REFERENCED_GRAPH_KIND = "nf_edit_graph_v2"
 _MATRIX_ARGUMENTS = ("delta_matrix", "left_factor", "right_factor", "orthonormal_basis", "value_matrix", "mask_matrix", "map_matrix")
 _SCALAR_ARGUMENTS = ("operation_type", "factor", "projection_side", "axis", "permutation", "region_start", "region_shape")
 
@@ -128,6 +145,43 @@ def _decode_matrix(doc: Mapping[str, Any]) -> torch.Tensor:
     return torch.tensor(struct.unpack(f"<{shape[0] * shape[1]}d", raw), dtype=torch.float64).reshape(shape)
 
 
+def _tied_pairs(model: Any, base: Mapping[str, torch.Tensor], edited: Sequence[str]) -> list[tuple[str, str]]:
+    """Each edited tensor paired with any tensor tied to it: sharing storage, or identical under a declared tie."""
+    config = getattr(model, "config", None)
+    declared = isinstance(config, Mapping) and bool(config.get("tie_word_embeddings"))
+    pairs = []
+    for name in sorted(edited):
+        weight = base[name]
+        for other, candidate in base.items():
+            if other == name or candidate.shape != weight.shape or candidate.dtype != weight.dtype:
+                continue
+            if candidate.data_ptr() == weight.data_ptr() or (declared and torch.equal(candidate, weight)):
+                pairs.append((name, other))
+    return pairs
+
+
+def _require_ties_kept(
+    pairs: Sequence[tuple[str, str]], base: Mapping[str, torch.Tensor], working: Mapping[str, torch.Tensor], error: type[ValueError]
+) -> None:
+    for name, other in pairs:
+        if not torch.equal(working[name], working.get(other, base[other].to(torch.float64))):
+            raise error(f"Tensors {name!r} and {other!r} are tied, and this edit would split them; apply the same edit to both")
+
+
+def _retie(model: Any, pairs: Sequence[tuple[str, str]]) -> Any:
+    """Cloning gives every tensor its own storage, so point tied names back at one tensor."""
+    for name, other in pairs:
+        model.tensors[other] = model.tensors[name]
+    return model
+
+
+def _matching(operand: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Arithmetic with a wrong-shaped operand would broadcast it over the whole tensor."""
+    if tuple(operand.shape) != tuple(weight.shape):
+        raise ValueError(f"Operand has shape {tuple(operand.shape)}, but the tensor has shape {tuple(weight.shape)}")
+    return operand
+
+
 def _spectrum(matrix: torch.Tensor, limit: int = 16) -> tuple[float, ...]:
     return tuple(round(float(v), 6) for v in torch.linalg.svdvals(matrix)[:limit])
 
@@ -157,6 +211,8 @@ class EditPlan:
             constraints = EditConstraints(**{k: tuple(v) if isinstance(v, list) else v for k, v in proposal.spec.constraints.items()})
         except TypeError as exc:
             raise GymProposalError(f"Unknown proposal constraint: {exc}") from exc
+        except ValueError as exc:
+            raise GymProposalError(f"Invalid proposal constraint: {exc}") from exc
         plan = cls(base_model, constraints)
         for planned, resolved in zip(proposal.spec.operations, proposal.operations, strict=True):
             plan._add_resolved(planned, resolved)
@@ -285,7 +341,7 @@ class EditPlan:
         return self._add(tensor, op, build, True)
 
     def spectral_clip(self, tensor: str, max_singular_value: float) -> EditPlan:
-        if max_singular_value <= 0:
+        if not max_singular_value > 0:
             raise ValueError("max_singular_value must be positive")
         return self._spectral(tensor, "spectral_clip", lambda s: torch.clamp(s, max=max_singular_value))
 
@@ -301,6 +357,8 @@ class EditPlan:
         return self._spectral(tensor, "rank_truncate", keep)
 
     def remove_noise_floor(self, tensor: str, relative_threshold: float) -> EditPlan:
+        if not 0.0 <= relative_threshold <= 1.0:
+            raise ValueError("relative_threshold must be in [0, 1]")
         return self._spectral(tensor, "remove_noise_floor", lambda s: torch.where(s >= relative_threshold * s[0], s, torch.zeros_like(s)))
 
     def spectral_shift(self, tensor: str, shift: float) -> EditPlan:
@@ -309,7 +367,7 @@ class EditPlan:
     def interpolate(self, tensor: str, other: torch.Tensor, weight: float) -> EditPlan:
         if not 0.0 <= weight <= 1.0:
             raise ValueError("weight must be in [0, 1]")
-        return self._derived(tensor, "interpolate", lambda w: (1.0 - weight) * w + weight * other.to(torch.float64))
+        return self._derived(tensor, "interpolate", lambda w: (1.0 - weight) * w + weight * _matching(other.to(torch.float64), w))
 
     # ---- Activation-guided edits.
     def _activation(self, prompts: Sequence[str], layer: int) -> torch.Tensor:
@@ -355,7 +413,7 @@ class EditPlan:
     def adopt_weight(self, tensor: str, edited_weight: torch.Tensor, *, method: str = "external_method") -> EditPlan:
         """Bring in a weight from ROME, MEMIT, AlphaEdit, a merge or anything else, as a verified step."""
         target = edited_weight.detach().to(torch.float64)
-        return self._derived(tensor, method, lambda w: target)
+        return self._derived(tensor, method, lambda w: _matching(target, w))
 
     def branch(self) -> EditPlan:
         """An independent copy of this plan. Steps added to either don't affect the other."""
@@ -383,6 +441,8 @@ class EditPlan:
                     arguments,
                 )
             )
+        ties = _tied_pairs(self.base_model, base, list(working))
+        _require_ties_kept(ties, base, working, EditConstraintViolation)
         changed = 0
         frobenius = 0.0
         spectral_delta = 0.0
@@ -403,7 +463,7 @@ class EditPlan:
         ):
             if limit is not None and value > limit:
                 raise EditConstraintViolation(f"{label} {value:.6g} exceeds the limit of {limit:.6g}")
-        candidate_model = _apply_state_tensors_to_clone(self.base_model, {**base, **working})
+        candidate_model = _retie(_apply_state_tensors_to_clone(self.base_model, {**base, **working}), ties)
         retention = None
         if c.preserve_prompts:
             kept = sum(
@@ -531,6 +591,73 @@ def search_edits(
     return tuple(sorted(ranked, key=lambda r: (not r.on_pareto_frontier, -r.development_accuracy, -r.retention)))
 
 
+def _decoded_operand_bytes(steps: Sequence[Mapping[str, Any]]) -> int:
+    """What the declared operand shapes would decode to. Malformed shapes count as nothing here; decoding refuses them."""
+    total = 0
+    for step in steps:
+        operands = step.get("operands")
+        for operand in operands.values() if isinstance(operands, Mapping) else ():
+            shape = operand.get("shape") if isinstance(operand, Mapping) else None
+            if isinstance(shape, list) and all(type(d) is int for d in shape):
+                size = 8
+                for dimension in shape:
+                    size *= abs(dimension)
+                total += size
+    return total
+
+
+def _require_graph_bounds(steps: Sequence[Mapping[str, Any]]) -> None:
+    """Whole-graph limits that need nothing but the document. Runs before any tensor is decoded."""
+    dependencies = sum(len(s["depends_on"]) for s in steps if isinstance(s.get("depends_on"), list))
+    if dependencies > EDIT_GRAPH_MAX_DEPENDENCIES:
+        raise EditGraphError(f"Graph has {dependencies} dependencies, over the limit of {EDIT_GRAPH_MAX_DEPENDENCIES}")
+    operands = sum(len(s["operands"]) for s in steps if isinstance(s.get("operands"), Mapping))
+    if operands > EDIT_GRAPH_MAX_OPERANDS:
+        raise EditGraphError(f"Graph has {operands} decoded tensors, over the limit of {EDIT_GRAPH_MAX_OPERANDS}")
+    _require_temporary_memory(_decoded_operand_bytes(steps))
+
+
+def _require_temporary_memory(estimate: int) -> None:
+    if estimate > EDIT_GRAPH_MAX_TEMPORARY_BYTES:
+        raise EditGraphError(f"Replay needs an estimated {estimate} temporary bytes, over the limit of {EDIT_GRAPH_MAX_TEMPORARY_BYTES}")
+
+
+def _require_graph_structure(steps: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse step ids and depends_on that don't form a graph runnable in list order, naming what's wrong."""
+    positions: dict[str, int] = {}
+    for index, step in enumerate(steps):
+        step_id = step.get("id")
+        if not isinstance(step_id, str):
+            raise EditGraphError(f"Step {index} has no string id")
+        if step_id in positions:
+            raise EditGraphError(f"Duplicate step id {step_id!r}")
+        positions[step_id] = index
+    needs: dict[str, set[str]] = {}
+    for step in steps:
+        depends_on = step.get("depends_on")
+        if not isinstance(depends_on, list) or not all(isinstance(d, str) for d in depends_on):
+            raise EditGraphError(f"{step['id']}: depends_on must be a list of step ids")
+        missing = [d for d in depends_on if d not in positions]
+        if missing:
+            raise EditGraphError(f"{step['id']}: depends_on names missing steps {missing}")
+        needs[step["id"]] = set(depends_on)
+    remaining = dict(needs)
+    while remaining:
+        ready = [name for name, deps in remaining.items() if not deps & remaining.keys()]
+        if not ready:
+            raise EditGraphError(f"depends_on forms a cycle among {sorted(remaining)}")
+        for name in ready:
+            del remaining[name]
+    for name, deps in needs.items():
+        later = sorted(d for d in deps if positions[d] > positions[name])
+        if later:
+            raise EditGraphError(f"{name}: depends_on names later steps {later}")
+    # Steps run in list order, so the only dependencies that order can honour are the ones `to_graph` writes.
+    for index, step in enumerate(steps):
+        if step["id"] != f"step_{index}" or step["depends_on"] != ([f"step_{index - 1}"] if index else []):
+            raise EditGraphError(f"Step {index} has an id or depends_on that doesn't match its position")
+
+
 def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate:
     """Replay a graph through Rust on `base_model`. Raises unless every digest is reproduced."""
     if graph.get("kind") != "nf_edit_graph_v1" or graph.get("schema_version") != 1:
@@ -538,13 +665,26 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     steps = graph.get("steps")
     if not isinstance(steps, list) or not steps:
         raise EditGraphError("Graph has no steps")
+    if len(steps) > EDIT_GRAPH_MAX_STEPS:
+        raise EditGraphError(f"Graph has {len(steps)} steps, over the limit of {EDIT_GRAPH_MAX_STEPS}")
     total = 0
     for step in steps:
         for operand in step.get("operands", {}).values():
             total += len(operand["data_b64"])
     if total > EDIT_GRAPH_MAX_OPERAND_BYTES:
         raise EditGraphError("Graph operands exceed the size limit")
+    _require_graph_bounds(steps)
+    _require_graph_structure(steps)
+    declared_id, actual_id = graph.get("base_model_id"), str(getattr(base_model, "model_name", ""))
+    if declared_id != actual_id:
+        raise EditGraphError(f"Graph declares base_model_id {declared_id!r}, but this base model is {actual_id!r}")
     base = _extract_model_state_tensors(base_model)
+    named = {str(s["tensor"]) for s in steps if "tensor" in s}
+    absent = sorted(named - set(base))
+    if absent:
+        raise EditGraphError(f"Base model has no tensor {absent[0]!r}")
+    # Decoded operands, plus an f64 working copy and an edited copy of each tensor the graph touches.
+    _require_temporary_memory(_decoded_operand_bytes(steps) + sum(2 * 8 * base[name].numel() for name in named))
     # The per-step digests only cover edited tensors, so a base differing elsewhere needs this check.
     if tensor_state_digest(base) != graph.get("base_state_digest"):
         raise EditGraphError("This isn't the base model the graph was made for")
@@ -573,6 +713,8 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     digest = str(content_digest(canonicalize({"schema_version": 1, "kind": "nf_edit_plan", "steps": [r.plan_digest for r in receipts]})))
     if digest != graph.get("plan_digest"):
         raise EditGraphError("Replay produced a different plan digest")
+    ties = _tied_pairs(base_model, base, list(working))
+    _require_ties_kept(ties, base, working, EditGraphError)
     changed = frobenius = spectral = 0.0
     for name, edited in working.items():
         delta = edited - base[name].to(torch.float64)
@@ -583,22 +725,87 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     if state != graph.get("candidate_state_digest"):
         raise EditGraphError("Replay produced a different whole-model digest")
     return PlanCandidate(
-        _apply_state_tensors_to_clone(base_model, {**base, **working}), working, tuple(receipts), digest, int(changed), frobenius**0.5, spectral, None, state
+        _retie(_apply_state_tensors_to_clone(base_model, {**base, **working}), ties), working, tuple(receipts), digest, int(changed), frobenius**0.5, spectral, None, state
     )
 
 
+def _with_referenced_operands(graph: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """Move operand bytes out of a v1 graph. The v2 graph names each by the SHA-256 of its raw little-endian f64 bytes."""
+    blobs: dict[str, str] = {}
+    steps = []
+    for step in graph["steps"]:
+        operands = {}
+        for name, operand in step["operands"].items():
+            digest = f"sha256:{hashlib.sha256(base64.b64decode(operand['data_b64'], validate=True)).hexdigest()}"
+            blobs[digest] = operand["data_b64"]
+            operands[name] = {"shape": operand["shape"], "dtype": operand["dtype"], "data_digest": digest}
+        steps.append({**step, "operands": operands})
+    return {**graph, "schema_version": 2, "kind": _REFERENCED_GRAPH_KIND, "steps": steps}, blobs
+
+
+def _with_inline_operands(graph: Any, blobs: Any) -> dict[str, Any]:
+    """Undo `_with_referenced_operands` for a signed v2 graph; every operand has to match its signed digest."""
+    if not isinstance(graph, Mapping) or graph.get("kind") != _REFERENCED_GRAPH_KIND or graph.get("schema_version") != 2:
+        raise EditGraphError(f"An operand bundle has to hold a signed {_REFERENCED_GRAPH_KIND} document")
+    if not isinstance(blobs, Mapping) or not all(isinstance(v, str) for v in blobs.values()):
+        raise EditGraphError("Bundle operands must map digests to base64 strings")
+    if sum(len(v) for v in blobs.values()) > EDIT_GRAPH_MAX_OPERAND_BYTES:
+        raise EditGraphError("Graph operands exceed the size limit")
+    used: set[str] = set()
+    steps = []
+    for step in graph["steps"]:
+        operands = {}
+        for name, reference in step["operands"].items():
+            digest = reference["data_digest"]
+            if set(reference) != {"shape", "dtype", "data_digest"} or digest not in blobs:
+                raise EditGraphError(f"Operand {name!r} has a malformed reference or is missing from the bundle")
+            try:
+                raw = base64.b64decode(blobs[digest], validate=True)
+            except ValueError as exc:
+                raise EditGraphError(f"Operand {name!r} isn't valid base64") from exc
+            if f"sha256:{hashlib.sha256(raw).hexdigest()}" != digest:
+                raise EditGraphError(f"Operand {name!r} doesn't match its signed digest")
+            used.add(digest)
+            operands[name] = {"shape": reference["shape"], "dtype": reference["dtype"], "data_b64": blobs[digest]}
+        steps.append({**step, "operands": operands})
+    if used != set(blobs):
+        raise EditGraphError("Bundle holds operands the signed graph doesn't reference")
+    return {**graph, "schema_version": 1, "kind": "nf_edit_graph_v1", "steps": steps}
+
+
 def sign_edit_graph(graph: Mapping[str, Any], *, signing_key: str, signer_id: str = "nf.edit_graph.v1") -> dict[str, Any]:
+    """Sign a graph, as a plain envelope when it fits the canonical parser's bound, else as an operand bundle.
+
+    The bound stays where it is. A bundle signs a v2 graph that names its operands by digest, and carries the
+    operand bytes beside that envelope, so the signature covers them without the parser having to read them.
+    """
     from .patch_ux import sign_patch_envelope
 
-    return sign_patch_envelope(graph, signing_key=signing_key, signer_id=signer_id)
+    try:
+        canonicalize(dict(graph))
+    except NativeError:
+        if graph.get("kind") != "nf_edit_graph_v1":
+            raise
+    else:
+        return sign_patch_envelope(graph, signing_key=signing_key, signer_id=signer_id)
+    referenced, blobs = _with_referenced_operands(graph)
+    envelope = sign_patch_envelope(referenced, signing_key=signing_key, signer_id=signer_id)
+    return {"schema_version": 1, "kind": EDIT_GRAPH_BUNDLE_KIND, "envelope": envelope, "operands": blobs}
 
 
 def apply_signed_edit_graph(base_model: Any, envelope: Mapping[str, Any], *, public_key: str) -> PlanCandidate:
     """Check the signature against a trusted key first, then replay and check every digest."""
     from .patch_ux import verify_patch_signature
 
-    verify_patch_signature(envelope, public_key=public_key)
-    return apply_edit_graph(base_model, envelope["patch"])
+    if envelope.get("kind") != EDIT_GRAPH_BUNDLE_KIND:
+        verify_patch_signature(envelope, public_key=public_key)
+        if isinstance(envelope["patch"], Mapping) and envelope["patch"].get("kind") == _REFERENCED_GRAPH_KIND:
+            raise EditGraphError(f"This signed graph references its operands, so it has to be replayed from its {EDIT_GRAPH_BUNDLE_KIND}")
+        return apply_edit_graph(base_model, envelope["patch"])
+    if set(envelope) != {"schema_version", "kind", "envelope", "operands"} or envelope["schema_version"] != 1 or not isinstance(envelope["envelope"], Mapping):
+        raise EditGraphError(f"Malformed {EDIT_GRAPH_BUNDLE_KIND} document")
+    verify_patch_signature(envelope["envelope"], public_key=public_key)
+    return apply_edit_graph(base_model, _with_inline_operands(envelope["envelope"]["patch"], envelope["operands"]))
 
 
 def verify_exported_candidate(checkpoint_dir: str | Path, expected_state_digest: str) -> str:
@@ -623,19 +830,29 @@ def verify_exported_candidate(checkpoint_dir: str | Path, expected_state_digest:
     return actual
 
 
+def _declared_base_model_id(document: Any) -> str:
+    if isinstance(document, Mapping) and document.get("kind") == EDIT_GRAPH_BUNDLE_KIND:
+        document = document.get("envelope")
+    patch = document.get("patch") if isinstance(document, Mapping) else None
+    return str(patch.get("base_model_id", "")) if isinstance(patch, Mapping) else ""
+
+
 def _replay_main(argv: Sequence[str] | None = None) -> int:
     """Replay a signed graph from only a base checkpoint, the envelope and a public key."""
     parser = argparse.ArgumentParser(prog="python -m neural_foundry.edit_plan", description=_replay_main.__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--envelope", required=True)
     parser.add_argument("--public-key-file", required=True)
+    parser.add_argument("--base-model-id", help="The model ID you expect this checkpoint to be; the graph must declare the same one")
     parser.add_argument("--export-dir", help="Also export the replayed candidate as f64 safetensors and verify it")
     args = parser.parse_args(argv)
 
     from .pythia import PythiaModel
 
-    model = PythiaModel.from_pretrained_dir(args.checkpoint)
     envelope = json.loads(Path(args.envelope).read_text(encoding="utf-8"))
+    # A directory doesn't know its model ID, so without --base-model-id the graph's own label is taken as given.
+    # What binds the replay to these weights in that case is base_state_digest.
+    model = PythiaModel.from_pretrained_dir(args.checkpoint, model_name=args.base_model_id or _declared_base_model_id(envelope))
     candidate = apply_signed_edit_graph(model, envelope, public_key=Path(args.public_key_file).read_text(encoding="utf-8").strip())
     report = {
         "plan_digest": candidate.plan_digest,

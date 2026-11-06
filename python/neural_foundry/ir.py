@@ -509,6 +509,8 @@ class WeightIRTransactionBuilder:
             if operation_type == "mask":
                 # Masks are U8 tensors holding only zeros and ones.
                 rows = [[float(x) for x in row] for row in (supplied.tolist() if hasattr(supplied, "tolist") else supplied)]
+                if not all(x in (0.0, 1.0) for row in rows for x in row):
+                    raise ValueError("mask values must be 0 or 1")
                 raw = bytes(int(x) for row in rows for x in row)
                 header = json.dumps(
                     {"m": {"dtype": "U8", "shape": [len(rows), len(rows[0])], "data_offsets": [0, len(raw)]}},

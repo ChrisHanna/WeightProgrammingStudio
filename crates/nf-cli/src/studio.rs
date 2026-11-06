@@ -321,6 +321,21 @@ fn verify_signed_envelope(envelope: &Value, trusted_public_key: &str) -> Result<
             "expected nf_signed_patch_envelope document",
         ));
     }
+    // Mirrors `patch_ux.verify_patch_signature`: an envelope field nobody signed can't be allowed to mean anything.
+    if envelope.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/patch/verify-signature",
+            "unsupported signed patch envelope schema_version",
+        ));
+    }
+    if envelope.as_object().is_some_and(|o| o.keys().any(|k| !ENVELOPE_KEYS.contains(&k.as_str()))) {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/patch/verify-signature",
+            "signed patch envelope has unknown fields",
+        ));
+    }
     let patch_val = envelope.get("patch").ok_or_else(|| {
         err(
             ErrorCode::InvalidValue,
@@ -373,6 +388,11 @@ fn verify_signed_envelope(envelope: &Value, trusted_public_key: &str) -> Result<
 }
 
 const OPEN_PATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+const OPEN_PATCH_FORMAT_VERSION: &str = "1.0.0";
+const ENVELOPE_KEYS: [&str; 9] = [
+    "schema_version", "kind", "signature_scheme", "patch_digest", "signer_id", "public_key", "key_fingerprint",
+    "signature", "patch",
+];
 const OPEN_PATCH_KEYS: [&str; 11] = [
     "schema_version", "kind", "format_version", "base_model", "candidate_checkpoint_digest",
     "total_parameters", "operations", "sbom", "rounding_contract", "evaluation_provenance", "security_scan",
@@ -395,6 +415,9 @@ fn validate_open_patch_schema(payload: &Value) -> Result<()> {
     if payload["kind"].as_str() != Some("nf_open_weight_patch_v1") || payload["schema_version"].as_u64() != Some(1) {
         return Err(fail("unsupported kind or schema_version"));
     }
+    if payload["format_version"].as_str() != Some(OPEN_PATCH_FORMAT_VERSION) {
+        return Err(fail("unsupported format_version"));
+    }
     let base = &payload["base_model"]["parameter_digest"];
     let sbom = &payload["sbom"];
     if !is_sha256_digest(Some(base))
@@ -415,11 +438,13 @@ fn validate_open_patch_schema(payload: &Value) -> Result<()> {
     let operations = payload["operations"].as_array().filter(|o| !o.is_empty()).ok_or_else(|| fail("operations must be a non-empty list"))?;
     for op in operations {
         let body = &op["operation"];
-        if !body["target"].is_object() || !body["type"].is_string() {
+        let named = |value: &Value| value.as_str().is_some_and(|text| !text.is_empty());
+        if !named(&body["type"]) || !named(&body["target"]["tensor"]) {
             return Err(fail("each operation needs a type and target"));
         }
         for metric in ["frobenius_norm", "l2_norm", "linf_norm"] {
-            if !body[metric].is_null() && !body[metric].as_f64().is_some_and(|v| v.is_finite() && v >= 0.0) {
+            // Absent is allowed; present has to be a number, so a null doesn't count as absent.
+            if body.get(metric).is_some_and(|v| !v.as_f64().is_some_and(|x| x.is_finite() && x >= 0.0)) {
                 return Err(fail("operation metrics must be finite and non-negative"));
             }
         }
@@ -509,6 +534,13 @@ fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
                 "open patch body differs from its signed payload",
             ));
         }
+        if top.get("patch_digest").is_some_and(|digest| *digest != sig_res["patch_digest"]) {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/verify",
+                "open patch's patch_digest differs from its signed digest",
+            ));
+        }
     }
     validate_open_patch_schema(payload)?;
     let section = |name: &str| {
@@ -534,10 +566,8 @@ fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
     }
 
     let rc = section("rounding_contract")?;
-    if rc.get("source_dtype").is_none()
-        || rc.get("accumulation_dtype").is_none()
-        || rc.get("rounding_mode").is_none()
-    {
+    let rounding_field = |name: &str| rc.get(name).and_then(Value::as_str).is_some_and(|text| !text.is_empty());
+    if !["source_dtype", "accumulation_dtype", "rounding_mode"].iter().all(|name| rounding_field(name)) {
         return Err(err(
             ErrorCode::IntegrityMismatch,
             "/verify/rounding_contract",
@@ -639,7 +669,8 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
     wrap_ok(json!({
         "schema_version": 1,
         "kind": "nf_patch_audit_report",
-        "audit_passed": (!is_signed || sig_check["verified"].as_bool().unwrap_or(false)) && preserve_shapes,
+        // Unsigned means unauthenticated, so an audit can't pass it, whatever the document says about itself.
+        "audit_passed": is_signed && sig_check["verified"].as_bool().unwrap_or(false) && preserve_shapes,
         "signed": is_signed,
         "signature_verification": sig_check,
         "gradient_free": gradient_free,
@@ -648,44 +679,13 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
     }))
 }
 
-fn handle_patch_rollback(rest: &[String]) -> Result<String> {
-    let raw = single_file_arg(rest, "patch rollback")?;
-    let val: Value = serde_json::from_slice(&raw)
-        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/rollback", e.to_string()))?;
-    let payload = if val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope") {
-        &val["patch"]
-    } else {
-        &val
-    };
-    let base_ckpt = payload
-        .get("base_model")
-        .and_then(|b| b.get("checkpoint"))
-        .or_else(|| payload.get("base_checkpoint_digest"))
-        .or_else(|| payload.get("source_checkpoint"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            err(
-                ErrorCode::InvalidValue,
-                "/patch/rollback",
-                "patch or receipt must contain base_model.checkpoint or base_checkpoint_digest for rollback",
-            )
-        })?;
-    let _parsed: ContentDigest = base_ckpt.parse()?;
-    let base_param = payload
-        .get("base_model")
-        .and_then(|b| b.get("parameter_digest"))
-        .or_else(|| payload.get("base_parameter_digest"))
-        .or_else(|| payload.get("source_parameter_digest"))
-        .and_then(Value::as_str)
-        .unwrap_or(base_ckpt);
-    wrap_ok(json!({
-        "schema_version": 1,
-        "kind": "nf_patch_rollback_receipt",
-        "active_reference": "rolled_back_to_source",
-        "restored_checkpoint_digest": base_ckpt,
-        "restored_parameter_digest": base_param,
-        "rollback_verified": true,
-    }))
+fn handle_patch_rollback(_rest: &[String]) -> Result<String> {
+    // A patch document holds digests, not weights, so the native CLI has nothing to restore or check.
+    Err(err(
+        ErrorCode::UnsupportedCapability,
+        "/patch/rollback",
+        "`nf patch rollback` cannot restore weights from a patch file; use `neural_foundry.patch_ux.create_rollback_handle` and `rollback_model_patch` in Python",
+    ))
 }
 
 fn handle_catalog(rest: &[String]) -> Result<String> {
