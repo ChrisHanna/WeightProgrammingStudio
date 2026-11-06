@@ -463,11 +463,33 @@ def _check_evidence(evidence: Path) -> tuple[dict, dict]:  # type: ignore[type-a
     assert {"kl_nats_per_token", "candidate_perplexity", "base_perplexity"} <= set(text)
     assert report["target"]["metrics"]["n"] == 12
     emitted = json.loads((evidence / "gym_proposals.json").read_text(encoding="utf-8"))
-    assert len(emitted) == 3 and sum(c["selected"] for c in emitted) == 1
-    assert next(c for c in emitted if c["selected"])["proposal"] == gp.proposal_to_document(proposal)
+    promotion = json.loads((evidence / "promotion.json").read_text(encoding="utf-8"))
+    assert len(emitted) == 3 and sum(c["selected"] for c in emitted) == 0
+    assert next(c for c in emitted if c["branch_id"] == promotion["candidate_branch_id"])["proposal"] == gp.proposal_to_document(proposal)
     assert report["retention_matrix"] and all("noop" in row and "candidate" in row for row in report["retention_matrix"].values())
     assert max(report["transformers_parity"]["max_abs_logit_difference"].values()) < 1e-4
     return record, report
+
+
+def test_recorded_candidate_is_qualified_but_rejected_with_exact_reasons() -> None:
+    promotion = json.loads((EVIDENCE / "promotion.json").read_text(encoding="utf-8"))
+    selection = json.loads((EVIDENCE / "selection.json").read_text(encoding="utf-8"))
+    assert selection["selected_branch_id"] is None
+    assert promotion["candidate_branch_id"].startswith("branch_3")
+    assert promotion["promotion_status"] == "rejected"
+    assert "gate: free_text_agreement" in promotion["rejection_reasons"]
+    assert any(r.startswith("selection: not selected") for r in promotion["rejection_reasons"])
+    assert "not evidence of edit quality" in promotion["qualification_scope"]
+
+
+def test_an_unselected_candidate_is_rejected_even_if_the_gate_would_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    script = _load_script()
+    monkeypatch.setattr(script, "decide_promotion", lambda report: {"promote_eligible": True, "status": "passed", "failed_checks": [], "reason": None})
+    selection = {"selected_branch_id": None, "branches": [{"branch_id": "b", "disqualified_because": ["retention 0.0 below 0.98"]}]}
+    record = script.promotion_record({}, selection, "b")
+    assert record["promotion_status"] == "rejected"
+    assert record["rejection_reasons"] == ["selection: not selected, selected branch is None", "selection: retention 0.0 below 0.98"]
+    assert script.promotion_record({}, {"selected_branch_id": "b", "branches": [{"branch_id": "b", "disqualified_because": []}]}, "b")["promotion_status"] == "passed"
 
 
 def test_recorded_qualification_run_verifies() -> None:

@@ -3,6 +3,10 @@
 Each stage runs in its own process and sees only the files it is given. Replay and evaluation run with
 the proposer's modules blocked from import. A missing checkpoint or runtime raises, so this script has
 no way to skip. Effect size isn't a pass condition here: the report records whatever was measured.
+
+Qualification and promotion are separate. Qualifying a candidate proves it compiles, replays and can be
+measured, and says nothing about whether the edit is any good. `--candidate` names any emitted branch,
+selected or not, and promotion.json records whether that branch may be promoted, and why not.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ MODEL_ID = "EleutherAI/pythia-14m"
 PYTHIA_14M_REVISION = "cf967c0a9a04383db6f7b1108d86b2962634b4ac"
 PYTHIA_14M_SAFETENSORS_SHA256 = "sha256:116a02532db461f91386a5b20f942ff2c8d4de7341e21b55caafc3d7b25f49a1"
 GYM = ALGORITHMIC_THREE_SKILL_GYM
+QUALIFICATION_SCOPE = "Proves compilation, replay and measurement of this candidate. It is not evidence of edit quality."
 BLOCKED_DURING_VERIFICATION = ("neural_foundry.gpt_neox_adapter", "neural_foundry.gym_scientist", "neural_foundry.gyms")
 _BLOCKING_PRELUDE = f"""
 import runpy, sys
@@ -81,9 +86,33 @@ def stage_synthesize(args: argparse.Namespace) -> None:
         args.out / "gym_proposals.json",
         [{"branch_id": c.branch_id, "selected": c.selected, "proposal": gp.proposal_to_document(c.proposal)} for c in report.gym_proposals],
     )
-    if report.selected_proposal is None:
-        raise QualificationError(f"The Gym selected no branch, so there is nothing to qualify. {report.promotion_verification['reason']}")
-    _write(args.out / "proposal.json", gp.proposal_to_document(report.selected_proposal))
+    _write(
+        args.out / "selection.json",
+        {
+            "selected_branch_id": report.selected_branch_id,
+            "retention_guard_digest": report.selection_retention_guard_digest,
+            "branches": [
+                {
+                    "branch_id": b.branch_id,
+                    "development_accuracy": b.gym_dev_accuracy,
+                    "validation_accuracy": b.gym_prefix_val_accuracy,
+                    "synthesis_retention_accuracy": b.retention_accuracy,
+                    "retention_guard_accuracy": b.retention_guard_accuracy,
+                    "retention_guard_source": b.retention_guard_source,
+                    "reload_parity_verified": b.reload_parity_verified,
+                    "disqualified_because": list(b.disqualified_because),
+                }
+                for b in report.branches
+            ],
+        },
+    )
+    name = args.candidate or report.selected_branch_id
+    if name is None:
+        raise QualificationError(f"The Gym selected no branch; name one with --candidate to qualify it. {report.promotion_verification['reason']}")
+    named = next((c for c in report.gym_proposals if c.branch_id == name), None)
+    if named is None:
+        raise QualificationError(f"The Gym emitted no candidate {name!r}: {[c.branch_id for c in report.gym_proposals]}")
+    _write(args.out / "proposal.json", gp.proposal_to_document(named.proposal))
     # The Gym's development cases, in the evaluator's text form. These aren't the sealed holdout rules.
     cases = [[f"{prefix} {expression}", target.replace("\u0120", " ")] for prefix in GYM.gym_dev_prefixes for expression, target in GYM.base_rules]
     _write(args.out / "target_cases.json", cases)
@@ -125,6 +154,27 @@ def stage_evaluate(args: argparse.Namespace) -> None:
     _write(args.out, report)
 
 
+def promotion_record(report: dict[str, Any], selection: dict[str, Any], candidate: str) -> dict[str, Any]:
+    """The gate's decision, plus the Gym's. A candidate needs both, so an unselected one is rejected even if it measures well."""
+    gate = decide_promotion(report)
+    branch = next(b for b in selection["branches"] if b["branch_id"] == candidate)
+    selected = selection["selected_branch_id"] == candidate
+    reasons = [f"gate: {check}" for check in gate["failed_checks"]]
+    if gate["status"] == "not_evaluated":
+        reasons.append(f"gate: {gate['reason']}")
+    if not selected:
+        reasons.append(f"selection: not selected, selected branch is {selection['selected_branch_id']}")
+    reasons += [f"selection: {reason}" for reason in branch["disqualified_because"]]
+    return {
+        "candidate_branch_id": candidate,
+        "qualification_scope": QUALIFICATION_SCOPE,
+        "promotion_status": "passed" if gate["promote_eligible"] and selected else "rejected",
+        "rejection_reasons": reasons,
+        "gym_selected_branch_id": selection["selected_branch_id"],
+        "gate": gate,
+    }
+
+
 def _stage(args: argparse.Namespace, name: str, extra: list[str], *, seed: int) -> None:
     subprocess.run([sys.executable, __file__, "--stage", name, "--checkpoint", str(args.checkpoint), *extra], check=True, env={**os.environ, "PYTHONHASHSEED": str(seed), "OMP_NUM_THREADS": "2"})
 
@@ -150,11 +200,12 @@ def orchestrate(args: argparse.Namespace) -> Path:
     for folder in (synth, scratch, evidence):
         folder.mkdir(parents=True)
 
-    _stage(args, "synthesize", ["--out", str(synth)], seed=1)
+    _stage(args, "synthesize", ["--out", str(synth), *(["--candidate", args.candidate] if args.candidate else [])], seed=1)
     proposal, cases = evidence / "proposal.json", evidence / "target_cases.json"
     shutil.copy(synth / "proposal.json", proposal)
     shutil.copy(synth / "target_cases.json", cases)
     shutil.copy(synth / "gym_proposals.json", evidence / "gym_proposals.json")
+    shutil.copy(synth / "selection.json", evidence / "selection.json")
 
     # Condition 3: two fresh processes with different hash seeds must write identical bytes.
     first, second = scratch / "compiled_a.json", scratch / "compiled_b.json"
@@ -206,12 +257,14 @@ def orchestrate(args: argparse.Namespace) -> Path:
         runner=f"runpy.run_path({__file__!r}, run_name='__main__')\n",
     )
 
-    # The decision reads the measured report and nothing else. A rejection is a result, not a failed run.
-    _write(evidence / "promotion.json", decide_promotion(_read(report)))
+    # A rejection is a result, not a failed run.
+    selection = _read(evidence / "selection.json")
+    named = args.candidate or selection["selected_branch_id"]
+    _write(evidence / "promotion.json", promotion_record(_read(report), selection, named))
 
     # Condition 7.
     version = tomllib.loads((args.repo / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    names = ("proposal.json", "gym_proposals.json", "target_cases.json", "compiled_proposal.json", "edit_graph.json", "edit_graph.signed.json", "signing.pub", "replay.json", "report.json", "promotion.json")
+    names = ("proposal.json", "gym_proposals.json", "target_cases.json", "compiled_proposal.json", "edit_graph.json", "edit_graph.signed.json", "signing.pub", "replay.json", "report.json", "selection.json", "promotion.json")
     record = rr.build_run_record(
         commit=commit,
         checkpoint=rr.capture_checkpoint(args.checkpoint, model_id=MODEL_ID, revision=PYTHIA_14M_REVISION),
@@ -239,6 +292,7 @@ def main() -> int:
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--proposal", type=Path)
+    parser.add_argument("--candidate", help="The emitted branch to qualify. Defaults to the Gym's selection, and is required if there is none")
     parser.add_argument("--envelope", type=Path)
     parser.add_argument("--public-key-file", type=Path)
     parser.add_argument("--export", type=Path)

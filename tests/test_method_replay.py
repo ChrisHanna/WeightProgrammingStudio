@@ -15,6 +15,7 @@ import torch
 
 from neural_foundry import export_formats, flagship, gpu, m5_surgery, method_plans, prd_adapters, pythia, repair
 from neural_foundry.edit_plan import EditGraphError, EditPlan, sign_edit_graph, tensor_state_digest
+from neural_foundry.gpt_neox_adapter import compile_to_edit_graph
 from neural_foundry.export_formats import _apply_state_tensors_to_clone, _extract_model_state_tensors, export_huggingface_safetensors
 from neural_foundry.patch_ux import compose_overlapping_patches_orthogonal, generate_ed25519_keypair
 from neural_foundry.studio import WeightProgrammingStudio
@@ -354,6 +355,19 @@ def test_real_pythia_mergekit_replays(tmp_path: Path, algorithm: Any) -> None:
 # ---- Gym study, the two reasoning-loop arms, patch composition.
 
 
+def _replay_emitted(tmp_path: Path, model: Any, study: Any, kind: str, *, prefix: str = "branch") -> int:
+    """Replay frozen candidates from their operands in a fresh process, selected or not. Returns how many."""
+    replayed = 0
+    for candidate in study.gym_proposals:
+        if candidate.branch_id.startswith(prefix):
+            room = tmp_path / candidate.branch_id
+            room.mkdir()
+            report = _replay_in_fresh_process(room, model, compile_to_edit_graph(model, candidate.proposal), **_on_disk(kind))
+            assert report["candidate_state_digest"] == candidate.proposal.expected_candidate_digest
+            replayed += 1
+    return replayed
+
+
 def _load(kind: str) -> Any:
     return _real_model() if kind == "real" else pythia.build_mini_pythia_model()
 
@@ -366,8 +380,9 @@ def _on_disk(kind: str) -> dict[str, bool]:
 def test_gym_study_replays(tmp_path: Path, kind: str) -> None:
     model = _load(kind)
     study = pythia.run_pythia_gym_task_learning_study(model, gym=GYM, target_strength=80.0)
+    # Selection doesn't decide what can replay: every emitted candidate must, from its operands.
+    assert _replay_emitted(tmp_path, model, study, kind) == 3
     if kind == "real":
-        # No branch qualifies on the real checkpoint, so there is nothing selected to replay.
         assert study.selected_branch_id is None and study.edit_steps == () and study.edited_weight is None
         assert [c.selected for c in study.gym_proposals] == [False, False, False]
         return
@@ -383,6 +398,9 @@ def test_reasoning_loop_arm_replays(tmp_path: Path, kind: str, feedback: bool) -
     if kind == "real" and feedback:
         # This arm submits the Gym's selection, and no branch qualifies on the real checkpoint.
         assert report.submitted_edit_steps == () and report.submitted_weights_by_layer is None and report.held_out_accuracy_after is None
+        # The arm's rejected candidate must still replay.
+        study = pythia.run_pythia_gym_task_learning_study(model, gym=GYM, target_strength=80.0)
+        assert _replay_emitted(tmp_path, model, study, kind, prefix="branch_3") == 1
         return
     weights = {model.mlp_down_proj_site(layer): w for layer, w in report.submitted_weights_by_layer.items()}
     _assert_replays(tmp_path, model, report.submitted_edit_steps, weights, **_on_disk(kind))
