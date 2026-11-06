@@ -90,6 +90,8 @@ class PlanCandidate:
 
 
 EDIT_GRAPH_MAX_OPERAND_BYTES = 256 * 1024 * 1024
+EDIT_GRAPH_BUNDLE_KIND = "nf_edit_graph_bundle_v1"
+_REFERENCED_GRAPH_KIND = "nf_edit_graph_v2"
 _MATRIX_ARGUMENTS = ("delta_matrix", "left_factor", "right_factor", "orthonormal_basis", "value_matrix", "mask_matrix", "map_matrix")
 _SCALAR_ARGUMENTS = ("operation_type", "factor", "projection_side", "axis", "permutation", "region_start", "region_shape")
 
@@ -624,18 +626,83 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     )
 
 
+def _with_referenced_operands(graph: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """Move operand bytes out of a v1 graph. The v2 graph names each by the SHA-256 of its raw little-endian f64 bytes."""
+    blobs: dict[str, str] = {}
+    steps = []
+    for step in graph["steps"]:
+        operands = {}
+        for name, operand in step["operands"].items():
+            digest = f"sha256:{hashlib.sha256(base64.b64decode(operand['data_b64'], validate=True)).hexdigest()}"
+            blobs[digest] = operand["data_b64"]
+            operands[name] = {"shape": operand["shape"], "dtype": operand["dtype"], "data_digest": digest}
+        steps.append({**step, "operands": operands})
+    return {**graph, "schema_version": 2, "kind": _REFERENCED_GRAPH_KIND, "steps": steps}, blobs
+
+
+def _with_inline_operands(graph: Any, blobs: Any) -> dict[str, Any]:
+    """Undo `_with_referenced_operands` for a signed v2 graph; every operand has to match its signed digest."""
+    if not isinstance(graph, Mapping) or graph.get("kind") != _REFERENCED_GRAPH_KIND or graph.get("schema_version") != 2:
+        raise EditGraphError(f"An operand bundle has to hold a signed {_REFERENCED_GRAPH_KIND} document")
+    if not isinstance(blobs, Mapping) or not all(isinstance(v, str) for v in blobs.values()):
+        raise EditGraphError("Bundle operands must map digests to base64 strings")
+    if sum(len(v) for v in blobs.values()) > EDIT_GRAPH_MAX_OPERAND_BYTES:
+        raise EditGraphError("Graph operands exceed the size limit")
+    used: set[str] = set()
+    steps = []
+    for step in graph["steps"]:
+        operands = {}
+        for name, reference in step["operands"].items():
+            digest = reference["data_digest"]
+            if set(reference) != {"shape", "dtype", "data_digest"} or digest not in blobs:
+                raise EditGraphError(f"Operand {name!r} has a malformed reference or is missing from the bundle")
+            try:
+                raw = base64.b64decode(blobs[digest], validate=True)
+            except ValueError as exc:
+                raise EditGraphError(f"Operand {name!r} isn't valid base64") from exc
+            if f"sha256:{hashlib.sha256(raw).hexdigest()}" != digest:
+                raise EditGraphError(f"Operand {name!r} doesn't match its signed digest")
+            used.add(digest)
+            operands[name] = {"shape": reference["shape"], "dtype": reference["dtype"], "data_b64": blobs[digest]}
+        steps.append({**step, "operands": operands})
+    if used != set(blobs):
+        raise EditGraphError("Bundle holds operands the signed graph doesn't reference")
+    return {**graph, "schema_version": 1, "kind": "nf_edit_graph_v1", "steps": steps}
+
+
 def sign_edit_graph(graph: Mapping[str, Any], *, signing_key: str, signer_id: str = "nf.edit_graph.v1") -> dict[str, Any]:
+    """Sign a graph, as a plain envelope when it fits the canonical parser's bound, else as an operand bundle.
+
+    The bound stays where it is. A bundle signs a v2 graph that names its operands by digest, and carries the
+    operand bytes beside that envelope, so the signature covers them without the parser having to read them.
+    """
     from .patch_ux import sign_patch_envelope
 
-    return sign_patch_envelope(graph, signing_key=signing_key, signer_id=signer_id)
+    try:
+        canonicalize(dict(graph))
+    except NativeError:
+        if graph.get("kind") != "nf_edit_graph_v1":
+            raise
+    else:
+        return sign_patch_envelope(graph, signing_key=signing_key, signer_id=signer_id)
+    referenced, blobs = _with_referenced_operands(graph)
+    envelope = sign_patch_envelope(referenced, signing_key=signing_key, signer_id=signer_id)
+    return {"schema_version": 1, "kind": EDIT_GRAPH_BUNDLE_KIND, "envelope": envelope, "operands": blobs}
 
 
 def apply_signed_edit_graph(base_model: Any, envelope: Mapping[str, Any], *, public_key: str) -> PlanCandidate:
     """Check the signature against a trusted key first, then replay and check every digest."""
     from .patch_ux import verify_patch_signature
 
-    verify_patch_signature(envelope, public_key=public_key)
-    return apply_edit_graph(base_model, envelope["patch"])
+    if envelope.get("kind") != EDIT_GRAPH_BUNDLE_KIND:
+        verify_patch_signature(envelope, public_key=public_key)
+        if isinstance(envelope["patch"], Mapping) and envelope["patch"].get("kind") == _REFERENCED_GRAPH_KIND:
+            raise EditGraphError(f"This signed graph references its operands, so it has to be replayed from its {EDIT_GRAPH_BUNDLE_KIND}")
+        return apply_edit_graph(base_model, envelope["patch"])
+    if set(envelope) != {"schema_version", "kind", "envelope", "operands"} or envelope["schema_version"] != 1 or not isinstance(envelope["envelope"], Mapping):
+        raise EditGraphError(f"Malformed {EDIT_GRAPH_BUNDLE_KIND} document")
+    verify_patch_signature(envelope["envelope"], public_key=public_key)
+    return apply_edit_graph(base_model, _with_inline_operands(envelope["envelope"]["patch"], envelope["operands"]))
 
 
 def verify_exported_candidate(checkpoint_dir: str | Path, expected_state_digest: str) -> str:
@@ -661,6 +728,8 @@ def verify_exported_candidate(checkpoint_dir: str | Path, expected_state_digest:
 
 
 def _declared_base_model_id(document: Any) -> str:
+    if isinstance(document, Mapping) and document.get("kind") == EDIT_GRAPH_BUNDLE_KIND:
+        document = document.get("envelope")
     patch = document.get("patch") if isinstance(document, Mapping) else None
     return str(patch.get("base_model_id", "")) if isinstance(patch, Mapping) else ""
 

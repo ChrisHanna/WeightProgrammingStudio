@@ -531,13 +531,89 @@ def test_graph_with_a_relabelled_operation_is_refused(model: Toy) -> None:
         apply_edit_graph(model, graph)
 
 
-@xfail("D8 native canonical parser: signing refuses over 1 MiB, so a 400x400 add_delta graph can't be signed despite the 256 MiB operand limit")
+def _real_sized() -> tuple[Toy, EditPlan]:
+    toy = Toy()
+    toy.tensors = {SITE: torch.ones(400, 400, dtype=torch.float64)}
+    return toy, EditPlan(toy).add(SITE, torch.full((400, 400), 0.5, dtype=torch.float64))
+
+
 def test_signed_graph_for_a_real_sized_matrix_can_be_replayed(keys: dict[str, Any]) -> None:
     toy = Toy()
     toy.tensors = {SITE: torch.ones(400, 400, dtype=torch.float64)}
     graph = EditPlan(toy).add(SITE, torch.full((400, 400), 0.5, dtype=torch.float64)).to_graph()
     envelope = sign_edit_graph(graph, signing_key=keys["private_key"])
     assert apply_signed_edit_graph(toy, envelope, public_key=keys["public_key"]).changed_parameters == 160_000
+
+
+def test_a_small_graph_is_still_signed_as_a_plain_v1_envelope(model: Toy, keys: dict[str, Any]) -> None:
+    graph = _graph_plan(model).to_graph()
+    envelope = sign_edit_graph(graph, signing_key=keys["private_key"])
+    assert envelope["kind"] == "nf_signed_patch_envelope" and envelope["patch"]["kind"] == "nf_edit_graph_v1"
+    assert envelope["patch_digest"] == content_digest(canonicalize(graph))
+
+
+def _flip_operand(bundle: dict[str, Any]) -> None:
+    digest = next(iter(bundle["operands"]))
+    raw = bytearray(base64.b64decode(bundle["operands"][digest]))
+    raw[0] ^= 1
+    bundle["operands"][digest] = base64.b64encode(bytes(raw)).decode()
+
+
+BUNDLE_TAMPERS: dict[str, tuple[Callable[[dict[str, Any]], Any], str]] = {
+    "operand_bytes": (_flip_operand, "signed digest"),
+    "operand_removed": (lambda b: b["operands"].clear(), "missing"),
+    "operand_planted": (lambda b: b["operands"].update({"sha256:" + "0" * 64: "AAAA"}), "doesn't reference"),
+    "operand_not_base64": (lambda b: b["operands"].update(dict.fromkeys(b["operands"], "!!!")), "base64"),
+    "operands_not_object": (lambda b: b.update(operands=[]), "operands"),
+    "bundle_extra_field": (lambda b: b.update(trusted=True), "Malformed"),
+    "signed_step_changed": (lambda b: b["envelope"]["patch"]["steps"][0]["arguments"].update(factor=2.0), "Tampered"),
+    "signed_reference_swapped": (lambda b: b["envelope"]["patch"]["steps"][0]["operands"]["delta_matrix"].update(data_digest="sha256:" + "0" * 64), "Tampered"),
+    "signature_flipped": (lambda b: b["envelope"].update(signature=b["envelope"]["signature"][:-1] + ("0" if b["envelope"]["signature"][-1] != "0" else "1")), "Signature rejected"),
+}
+
+
+@pytest.mark.parametrize("name", BUNDLE_TAMPERS)
+def test_tampered_operand_bundle_is_refused(keys: dict[str, Any], name: str) -> None:
+    toy, plan = _real_sized()
+    bundle = sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])
+    tamper, message = BUNDLE_TAMPERS[name]
+    tamper(bundle)
+    with pytest.raises(ValueError, match=message):
+        apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"])
+
+
+def test_operand_bundle_survives_json_and_needs_the_trusted_key(keys: dict[str, Any], other_keys: dict[str, Any]) -> None:
+    toy, plan = _real_sized()
+    bundle = json.loads(json.dumps(sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])))
+    assert apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"]).state_digest == plan.execute().state_digest
+    with pytest.raises(ValueError, match="Signature rejected"):
+        apply_signed_edit_graph(toy, bundle, public_key=other_keys["public_key"])
+
+
+def test_operand_bundle_limit_is_enforced(keys: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    toy, plan = _real_sized()
+    bundle = sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])
+    monkeypatch.setattr(edit_plan, "EDIT_GRAPH_MAX_OPERAND_BYTES", 8)
+    with pytest.raises(EditGraphError, match="size limit"):
+        apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"])
+
+
+def test_signed_v2_graph_cannot_be_used_without_its_operands_or_outside_a_bundle(keys: dict[str, Any]) -> None:
+    toy, plan = _real_sized()
+    envelope = sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])["envelope"]
+    with pytest.raises(EditGraphError, match="bundle"):
+        apply_signed_edit_graph(toy, envelope, public_key=keys["public_key"])
+    with pytest.raises(EditGraphError, match="nf_edit_graph_v1"):
+        apply_edit_graph(toy, envelope["patch"])
+    with pytest.raises(ValueError, match="schema"):
+        patch_ux.verify_open_patch_v1(envelope, public_key=keys["public_key"])
+
+
+def test_a_bundle_cannot_wrap_a_plain_v1_envelope(model: Toy, keys: dict[str, Any]) -> None:
+    envelope = sign_edit_graph(_graph_plan(model).to_graph(), signing_key=keys["private_key"])
+    bundle = {"schema_version": 1, "kind": edit_plan.EDIT_GRAPH_BUNDLE_KIND, "envelope": envelope, "operands": {}}
+    with pytest.raises(EditGraphError, match="nf_edit_graph_v2"):
+        apply_signed_edit_graph(model, bundle, public_key=keys["public_key"])
 
 
 # ---------------------------------------------------------------- signatures
