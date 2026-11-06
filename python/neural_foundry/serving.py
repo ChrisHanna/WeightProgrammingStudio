@@ -42,6 +42,7 @@ class GenerationResult:
     model_digest: str
     sampler: dict[str, Any]
     duration_seconds: float
+    token_ids: tuple[int, ...] | None = None
 
 
 class ServingAdapter(Protocol):
@@ -59,6 +60,11 @@ def _check_digest(path: Path, expected: str | None) -> str:
 
 
 class LlamaCppAdapter:
+    """Run a GGUF file through a llama.cpp binary.
+
+    Not yet qualified on a real binary, and `export_gguf_v3` output isn't expected to load.
+    """
+
     runtime = "llama.cpp"
 
     def __init__(
@@ -110,7 +116,18 @@ def _weights_digest(directory: Path, expected: str | None) -> str:
 class TransformersAdapter:
     runtime = "transformers"
 
-    def __init__(self, checkpoint_dir: str | Path, *, expected_digest: str | None = None) -> None:
+    def __init__(
+        self,
+        checkpoint_dir: str | Path,
+        *,
+        expected_digest: str | None = None,
+        dtype: str = "float32",
+    ) -> None:
+        """Load a checkpoint in an explicit arithmetic dtype.
+
+        The dtype is explicit because transformers otherwise follows `config.json`: Pythia declares
+        float16, and running in f16 changed greedy output compared with `PythiaModel`.
+        """
         self.directory = Path(checkpoint_dir)
         self.model_digest = _weights_digest(self.directory, expected_digest)
         try:
@@ -119,7 +136,9 @@ class TransformersAdapter:
         except ImportError as exc:
             raise ServingRuntimeUnavailableError("transformers is not installed") from exc
         self.tokenizer = self._transformers.AutoTokenizer.from_pretrained(self.directory, local_files_only=True)
-        self.model = self._transformers.AutoModelForCausalLM.from_pretrained(self.directory, local_files_only=True)
+        self.model = self._transformers.AutoModelForCausalLM.from_pretrained(
+            self.directory, local_files_only=True, dtype=getattr(self._torch, dtype)
+        )
 
     def generate(self, prompt: str, sampler: Mapping[str, Any] | None = None) -> GenerationResult:
         s = normalize_sampler(sampler)
@@ -131,10 +150,15 @@ class TransformersAdapter:
         output = self.model.generate(**inputs, max_new_tokens=int(s["max_tokens"]), do_sample=do_sample, **options)
         new_tokens = output[0][inputs["input_ids"].shape[1] :]
         text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-        return GenerationResult(text, self.runtime, self.model_digest, s, time.monotonic() - start)
+        return GenerationResult(
+            text, self.runtime, self.model_digest, s, time.monotonic() - start,
+            token_ids=tuple(int(t) for t in new_tokens),
+        )
 
 
 class VllmAdapter:
+    """Run a checkpoint through vLLM. Not yet qualified: it has never run on a real vLLM install."""
+
     runtime = "vllm"
 
     def __init__(self, checkpoint_dir: str | Path, *, expected_digest: str | None = None) -> None:

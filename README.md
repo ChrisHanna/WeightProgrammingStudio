@@ -243,7 +243,7 @@ with export_formats.ShardedMmapCheckpoint("/path/to/sharded_ckpt", max_checkpoin
 ```
 
 ### 2. Rebuild & Export Round-Trip: HuggingFace Safetensors & `GGUF v3` (`F32`, `F16`, `Q8_0`)
-Every edited model can be exported to standard **HuggingFace Safetensors** (`config.json` + `model.safetensors`) and **GGUF v3** (for `llama.cpp` / `Ollama`), reloaded into a fresh model instance, and verified to preserve 100% of its behavioral gain:
+Every edited model can be exported to standard **HuggingFace Safetensors** (`config.json` + `model.safetensors`) and a **GGUF v3** container, reloaded into a fresh model instance, and verified to preserve 100% of its behavioral gain. The GGUF file reloads through this package only; it isn't a `llama.cpp` or `Ollama` model file (see `export_gguf_v3`):
 
 ```python
 from pathlib import Path
