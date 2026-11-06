@@ -7,6 +7,7 @@ Set NF_PYTHIA_DIRS (os.pathsep-separated) to choose checkpoints, and NF_LLAMA_CL
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from neural_foundry import export_formats, pythia, serving  # noqa: E402
+from neural_foundry.m5_surgery import M5SurgeryError, qualify_vllm_serving_adapter  # noqa: E402
 
 PROMPTS = ("The capital of France is", "Once upon a time", "1 2 3 4")
 MAX_TOKENS = 12
@@ -109,3 +111,32 @@ def test_vllm_generates_from_real_checkpoint() -> None:
         _absent("no Pythia checkpoint found; set NF_PYTHIA_DIRS")
     result = serving.VllmAdapter(paths[0]).generate(PROMPTS[0], {"max_tokens": MAX_TOKENS})
     assert result.text
+
+
+@pytest.mark.qualification
+def test_vllm_serves_exported_base_and_edit_with_transformers_parity() -> None:
+    """Needs NF_VLLM_PYTHON and a GPU; fails in place of a skip when NF_QUALIFICATION=1."""
+    interpreter = os.environ.get("NF_VLLM_PYTHON")
+    if not interpreter:
+        _absent("set NF_VLLM_PYTHON to an interpreter with vLLM installed")
+    directory = next((p for p in _checkpoints() if p.name == "pythia-14m"), None)
+    if directory is None:
+        _absent("checkpoint pythia-14m not found; set NF_PYTHIA_DIRS")
+    result = qualify_vllm_serving_adapter(checkpoint_dir=directory, vllm_python=interpreter)
+    assert result.runtime_parity_verified and result.loopback_bound
+    print(json.dumps(result.measurements, indent=2))
+    tolerances = result.measurements["logprob_tolerance_nats"]
+    for label in ("base", "edited"):
+        assert result.measurements["parity"][label]["max_abs_logprob_diff_vs_transformers_f64"] <= tolerances[label]
+    assert result.measurements["min_base_vs_edited_first_token_logprob_distance"] > tolerances["edited"]
+    assert result.measurements["served_weight_digests"]["base"] != result.measurements["served_weight_digests"]["edited"]
+
+
+def test_vllm_qualification_fails_without_a_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    interpreter = os.environ.get("NF_VLLM_PYTHON")
+    if not interpreter:
+        _absent("set NF_VLLM_PYTHON to an interpreter with vLLM installed")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    with pytest.raises(M5SurgeryError) as failure:
+        qualify_vllm_serving_adapter(vllm_python=interpreter)
+    assert failure.value.code == "GPU_UNAVAILABLE"

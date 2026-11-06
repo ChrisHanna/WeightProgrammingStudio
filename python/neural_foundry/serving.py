@@ -157,7 +157,11 @@ class TransformersAdapter:
 
 
 class VllmAdapter:
-    """Run a checkpoint through vLLM. Not yet qualified: it has never run on a real vLLM install."""
+    """Run a checkpoint through vLLM in-process. Not qualified.
+
+    `vllm_qualification` covers `vllm serve` with FLEX_ATTENTION. This class uses vLLM's default
+    attention backend, and TRITON_ATTN missed parity on Pythia-14M by up to 0.41 nats.
+    """
 
     runtime = "vllm"
 

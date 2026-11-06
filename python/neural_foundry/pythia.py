@@ -19,7 +19,7 @@ import hashlib
 import json
 import struct
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -247,6 +247,8 @@ class PythiaWeightEditReport:
     retention_after: tuple[PythiaPrediction, ...]
     eval_comparison: dict[str, Any]
     promotion_verification: dict[str, Any]
+    # The edited target-site matrix in float64; the study itself leaves model.tensors unchanged.
+    edited_weight: torch.Tensor | None = field(default=None, repr=False, compare=False)
 
 
 class PythiaModel:
@@ -1173,6 +1175,7 @@ def run_pythia_weight_programming_study(
         retention_after=ret_after,
         eval_comparison=comparison,
         promotion_verification=promotion,
+        edited_weight=w_edited,
     )
 
 
