@@ -421,8 +421,14 @@ class PythiaModel:
         *,
         capture_layer: int = -1,
         layer_down_proj_override: dict[int, torch.Tensor] | None = None,
+        residual_sink: list[torch.Tensor] | None = None,
+        site_inputs: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Executes the exact GPT-NeoX causal forward pass and returns `(logits, final_token_mlp_key)`."""
+        """Executes the exact GPT-NeoX causal forward pass and returns `(logits, final_token_mlp_key)`.
+
+        `residual_sink`, when given, receives the residual stream that enters the final layer norm.
+        `site_inputs`, when given, receives the last token's input to each layer's dense matrices, by tensor name.
+        """
         h = int(self.config["hidden_size"])
         heads = int(self.config["num_attention_heads"])
         num_layers = int(self.config["num_hidden_layers"])
@@ -494,6 +500,10 @@ class PythiaModel:
                     self.tensors[f"{prefix}.mlp.dense_h_to_4h.bias"],
                 )
             )
+            if site_inputs is not None:
+                site_inputs[f"{prefix}.mlp.dense_4h_to_h.weight"] = mlp_h[-1]
+                site_inputs[f"{prefix}.mlp.dense_h_to_4h.weight"] = ln2[-1]
+                site_inputs[f"{prefix}.attention.dense.weight"] = ctx[-1]
             if layer_idx == target_layer:
                 captured_key = mlp_h[-1].clone()
             w_down = (
@@ -508,6 +518,8 @@ class PythiaModel:
             )
             x = x + attn_out + mlp_out
 
+        if residual_sink is not None:
+            residual_sink.append(x)
         x_norm = F.layer_norm(
             x,
             (h,),
