@@ -25,6 +25,7 @@ from .export_formats import (
     _extract_model_state_tensors,
     export_huggingface_safetensors,
 )
+from .gym_proposal import GymProposalError, ProposedOperation, ResolvedGymWeightProposal, ResolvedOperation
 from .ir import WeightIRTransactionBuilder, unpack_matrix_bytes
 from .records import NativeError, canonicalize, content_digest
 
@@ -137,6 +138,62 @@ class EditPlan:
     constraints: EditConstraints = field(default_factory=EditConstraints)
     _steps: list[tuple[str, str, Callable[[torch.Tensor], dict[str, Any]], bool]] = field(default_factory=list)
     _last: PlanCandidate | None = None
+    _proposal: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_resolved_proposal(cls, base_model: Any, proposal: ResolvedGymWeightProposal) -> EditPlan:
+        """Compile a frozen Gym proposal for exactly this base model, or raise.
+
+        `base_checkpoint_digest` and `expected_candidate_digest` are `tensor_state_digest` values: they
+        cover the weights as f64, so they don't depend on the checkpoint's storage dtype or file layout.
+        The returned plan has been previewed and reproduced the expected candidate.
+        """
+        model_type = str(base_model.config.get("model_type", ""))
+        if proposal.architecture != model_type:
+            raise GymProposalError(f"Proposal is for {proposal.architecture!r}, but the base model is {model_type!r}")
+        if tensor_state_digest(_extract_model_state_tensors(base_model)) != proposal.base_checkpoint_digest:
+            raise GymProposalError("This isn't the base checkpoint the proposal was resolved for")
+        try:
+            constraints = EditConstraints(**{k: tuple(v) if isinstance(v, list) else v for k, v in proposal.spec.constraints.items()})
+        except TypeError as exc:
+            raise GymProposalError(f"Unknown proposal constraint: {exc}") from exc
+        plan = cls(base_model, constraints)
+        for planned, resolved in zip(proposal.spec.operations, proposal.operations, strict=True):
+            plan._add_resolved(planned, resolved)
+        candidate = plan.preview()
+        if candidate.state_digest != proposal.expected_candidate_digest:
+            raise GymProposalError(f"Proposal produced {candidate.state_digest}, not the expected {proposal.expected_candidate_digest}")
+        plan._proposal = {
+            "proposal_id": proposal.spec.proposal_id,
+            "evidence_source": proposal.spec.evidence_source,
+            "synthesis_split_digest": proposal.spec.synthesis_split_digest,
+            "schema_version": proposal.schema_version,
+        }
+        return plan
+
+    def _add_resolved(self, planned: ProposedOperation, resolved: ResolvedOperation) -> None:
+        tensors = self.base_model.tensors
+        if planned.site.role != "mlp_down" or planned.site.layer >= int(self.base_model.config["num_hidden_layers"]):
+            raise GymProposalError(f"The base model has no site {planned.site!r}")
+        if resolved.tensor != self.base_model.mlp_down_proj_site(planned.site.layer):
+            raise GymProposalError(f"{resolved.tensor!r} isn't the tensor for {planned.site!r}")
+        if tuple(tensors[resolved.tensor].shape) != tuple(resolved.shape):
+            raise GymProposalError(f"{resolved.tensor!r} has shape {tuple(tensors[resolved.tensor].shape)}, not {tuple(resolved.shape)}")
+        unknown = (set(resolved.arguments) - (set(_SCALAR_ARGUMENTS) - {"operation_type"})) | (set(resolved.operands) - set(_MATRIX_ARGUMENTS))
+        if unknown:
+            raise GymProposalError(f"Resolved operation has unknown arguments: {sorted(unknown)}")
+        if sum(len(str(doc.get("data_b64", ""))) for doc in resolved.operands.values()) > EDIT_GRAPH_MAX_OPERAND_BYTES:
+            raise GymProposalError("Resolved operands exceed the size limit")
+        try:
+            operands = {k: _decode_matrix(v) for k, v in resolved.operands.items()}
+        except (EditGraphError, KeyError, TypeError, ValueError) as exc:
+            raise GymProposalError(f"Invalid operand: {exc}") from exc
+        arguments = dict(resolved.arguments)
+
+        def build(w: torch.Tensor) -> dict[str, Any]:
+            return {**self._target(None, w.shape), **arguments, **operands, "operation_type": resolved.operation}
+
+        self._add(resolved.tensor, resolved.operation, build)
 
     def add_constraint(self, **limits: Any) -> EditPlan:
         self.constraints = replace(self.constraints, **limits)
@@ -154,6 +211,7 @@ class EditPlan:
             raise EditConstraintViolation(f"Tensor {tensor!r} is not allowed by this plan's constraints")
         self._steps.append((tensor, op, build, spectral))
         self._last = None
+        self._proposal = None
         return self
 
     @staticmethod
@@ -392,6 +450,7 @@ class EditPlan:
             "candidate_state_digest": candidate.state_digest,
             "steps": steps,
             "plan_digest": candidate.plan_digest,
+            **({"proposal": dict(self._proposal)} if self._proposal else {}),
         }
 
     def rollback(self) -> Any:
