@@ -42,8 +42,10 @@ def test_real_eleutherai_pythia_14m_weight_programming_if_cached() -> None:
     assert all(p.matched_target is True for p in report.dev_after)
     assert all(p.matched_target is True for p in report.generalization_after)
     assert all(p.matched_target is True for p in report.retention_after)
-    assert report.promotion_verification["promote_eligible"] is True
-    assert report.promotion_verification["status"] == "passed"
+    # The study's own prompts pass, but the independent evaluator measures a harmful edit.
+    assert report.promotion_verification["gym_self_check"]["status"] == "passed"
+    assert report.promotion_verification["promote_eligible"] is False
+    assert report.promotion_verification["status"] == "rejected"
 
 
 def test_pythia_gym_task_learning_branches_and_holdout_verification() -> None:
@@ -71,6 +73,9 @@ def test_pythia_gym_task_learning_branches_and_holdout_verification() -> None:
     assert b3.gym_dev_accuracy > b1.gym_dev_accuracy
     assert all(p.matched_target is True for p in real_rep.holdout_after)
     assert all(p.matched_target is True for p in real_rep.retention_after)
-    assert real_rep.promotion_verification["promote_eligible"] is True
-    assert real_rep.promotion_verification["status"] == "passed"
+    # The Gym's five prompts pass, but the independent evaluator measures a harmful edit.
+    assert real_rep.promotion_verification["gym_self_check"]["status"] == "passed"
+    assert real_rep.promotion_verification["promote_eligible"] is False
+    assert real_rep.promotion_verification["status"] == "rejected"
+    assert "free_text_agreement" in real_rep.promotion_verification["failed_checks"]
 

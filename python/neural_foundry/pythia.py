@@ -28,7 +28,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from . import evals, ir
+from . import evals, independent_eval, ir, promotion_gate
 from .gym_proposal import GymWeightProposalSpec, ProposedOperation, ResolvedGymWeightProposal, SemanticSite
 from .method_plans import VerifiedMethodSteps, low_rank_step, verify_method_steps
 from .provenance import evidence_grade_for_model
@@ -1050,6 +1050,27 @@ def build_mini_qwen2_causal_lm() -> Qwen2CausalLM:
     )
 
 
+def _independent_promotion(
+    model: Any,
+    *,
+    candidate_id: str,
+    edited: Mapping[str, torch.Tensor],
+    target_cases: Sequence[tuple[str, str]],
+    self_check: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Decide promotion from the independent evaluator. The study's own check is kept beside it, unused."""
+    cases = [(prompt, target.replace("Ġ", " ")) for prompt, target in target_cases]
+    try:
+        candidate = independent_eval.freeze_candidate(model.tensors, edited, candidate_id=candidate_id, target_cases=cases)
+        decision = promotion_gate.decide_promotion(independent_eval.evaluate_candidate(model, candidate))
+    except (independent_eval.IndependentEvalError, KeyError) as exc:
+        # For example a fixture whose tokenizer can't express the corpus. Unmeasured is not promoted.
+        decision = promotion_gate.not_evaluated(f"The independent evaluator could not run: {exc}")
+    decision["gym_self_check"] = dict(self_check)
+    decision["dashboard"] = dict(self_check.get("dashboard", {}))
+    return decision
+
+
 def run_pythia_weight_programming_study(
     model: PythiaModel,
     *,
@@ -1265,11 +1286,17 @@ def run_pythia_weight_programming_study(
         caller_role="verifier",
     )
     comparison = evals.compare_runs(base_eval_run, cand_eval_run)
-    promotion = evals.verify_promotion(
-        candidate_run=cand_eval_run,
-        baseline_run=base_eval_run,
-        policy="production",
-        caller_role="verifier",
+    promotion = _independent_promotion(
+        model,
+        candidate_id=f"{model.model_name}:direct_low_rank",
+        edited={site_name: w_edited},
+        target_cases=dev_Associations,
+        self_check=evals.verify_promotion(
+            candidate_run=cand_eval_run,
+            baseline_run=base_eval_run,
+            policy="production",
+            caller_role="verifier",
+        ),
     )
 
     return PythiaWeightEditReport(
@@ -1983,14 +2010,20 @@ def run_pythia_gym_task_learning_study(
             lora_holdout_acc - hold_base_acc,
         ),
     )
-    promotion = evals.verify_promotion(
-        candidate_run=cand_eval_run,
-        baseline_run=base_eval_run,
-        policy="production",
-        caller_role="verifier",
+    final_site = model.mlp_down_proj_site(final_layer)
+    promotion = _independent_promotion(
+        model,
+        candidate_id=f"{gym.gym_id}:{trial_b3.branch_id}",
+        edited={final_site: w_b3_rust},
+        target_cases=gym_dev_items,
+        self_check=evals.verify_promotion(
+            candidate_run=cand_eval_run,
+            baseline_run=base_eval_run,
+            policy="production",
+            caller_role="verifier",
+        ),
     )
 
-    final_site = model.mlp_down_proj_site(final_layer)
     return PythiaGymTaskReport(
         edited_weight=w_b3_rust,
         edit_steps=verify_method_steps(

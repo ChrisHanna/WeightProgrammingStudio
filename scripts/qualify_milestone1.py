@@ -25,6 +25,7 @@ from neural_foundry import independent_eval as ie
 from neural_foundry import run_record as rr
 from neural_foundry.edit_plan import sign_edit_graph, tensor_state_digest
 from neural_foundry.patch_ux import generate_ed25519_keypair, verify_patch_signature
+from neural_foundry.promotion_gate import decide_promotion
 from neural_foundry.pythia import ALGORITHMIC_THREE_SKILL_GYM, PythiaModel, run_pythia_gym_task_learning_study
 from neural_foundry.records import canonicalize, content_digest
 
@@ -205,9 +206,12 @@ def orchestrate(args: argparse.Namespace) -> Path:
         runner=f"runpy.run_path({__file__!r}, run_name='__main__')\n",
     )
 
+    # The decision reads the measured report and nothing else. A rejection is a result, not a failed run.
+    _write(evidence / "promotion.json", decide_promotion(_read(report)))
+
     # Condition 7.
     version = tomllib.loads((args.repo / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    names = ("proposal.json", "gym_proposals.json", "target_cases.json", "compiled_proposal.json", "edit_graph.json", "edit_graph.signed.json", "signing.pub", "replay.json", "report.json")
+    names = ("proposal.json", "gym_proposals.json", "target_cases.json", "compiled_proposal.json", "edit_graph.json", "edit_graph.signed.json", "signing.pub", "replay.json", "report.json", "promotion.json")
     record = rr.build_run_record(
         commit=commit,
         checkpoint=rr.capture_checkpoint(args.checkpoint, model_id=MODEL_ID, revision=PYTHIA_14M_REVISION),
