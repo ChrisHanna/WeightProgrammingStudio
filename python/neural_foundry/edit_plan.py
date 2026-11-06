@@ -335,7 +335,7 @@ class EditPlan:
         return self._add(tensor, op, build, True)
 
     def spectral_clip(self, tensor: str, max_singular_value: float) -> EditPlan:
-        if max_singular_value <= 0:
+        if not max_singular_value > 0:
             raise ValueError("max_singular_value must be positive")
         return self._spectral(tensor, "spectral_clip", lambda s: torch.clamp(s, max=max_singular_value))
 
@@ -351,6 +351,8 @@ class EditPlan:
         return self._spectral(tensor, "rank_truncate", keep)
 
     def remove_noise_floor(self, tensor: str, relative_threshold: float) -> EditPlan:
+        if not 0.0 <= relative_threshold <= 1.0:
+            raise ValueError("relative_threshold must be in [0, 1]")
         return self._spectral(tensor, "remove_noise_floor", lambda s: torch.where(s >= relative_threshold * s[0], s, torch.zeros_like(s)))
 
     def spectral_shift(self, tensor: str, shift: float) -> EditPlan:

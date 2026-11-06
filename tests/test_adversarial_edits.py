@@ -295,9 +295,9 @@ def test_non_finite_operands_and_results_are_refused(model: Toy, build: Callable
 @pytest.mark.parametrize(
     "build",
     [
-        pytest.param(lambda p: p.spectral_clip(SITE, NAN), marks=xfail("D7 edit_plan.py: NaN clip limit is accepted")),
+        lambda p: p.spectral_clip(SITE, NAN),
         lambda p: p.spectral_clip(SITE, -1.0),
-        pytest.param(lambda p: p.remove_noise_floor(SITE, NAN), marks=xfail("D7 edit_plan.py: NaN threshold zeroes the whole tensor")),
+        lambda p: p.remove_noise_floor(SITE, NAN),
         lambda p: p.soft_threshold(SITE, NAN),
         lambda p: p.clamp(SITE, NAN),
         lambda p: p.spectral_shift(SITE, NAN),
