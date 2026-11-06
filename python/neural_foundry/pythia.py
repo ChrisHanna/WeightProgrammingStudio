@@ -29,6 +29,7 @@ import torch
 import torch.nn.functional as F
 
 from . import evals, ir
+from .gym_proposal import GymWeightProposalSpec, ProposedOperation, ResolvedGymWeightProposal, SemanticSite
 from .provenance import evidence_grade_for_model
 from .records import canonicalize, content_digest
 
@@ -1311,6 +1312,15 @@ class GymBranchTrial:
 
 
 @dataclass(frozen=True)
+class GymProposalCandidate:
+    """One branch's frozen proposal. Rejected branches stay here, so what was chosen against stays visible."""
+
+    branch_id: str
+    selected: bool
+    proposal: ResolvedGymWeightProposal
+
+
+@dataclass(frozen=True)
 class PythiaGymTaskReport:
     model_name: str
     gym_id: str
@@ -1337,6 +1347,36 @@ class PythiaGymTaskReport:
     net_gain_over_random: float = 0.0
     exposure_ledger: ExposureLedgerReceipt | None = None
     pre_registration: evals.PreRegisteredStudyPlan | None = None
+    # Frozen before any holdout evaluation. Empty for architectures with no resolver.
+    gym_proposals: tuple[GymProposalCandidate, ...] = ()
+
+    @property
+    def selected_proposal(self) -> ResolvedGymWeightProposal | None:
+        return next((c.proposal for c in self.gym_proposals if c.selected), None)
+
+
+def _emit_gym_proposals(
+    model: Any, gym_id: str, split_digests: Sequence[str], branches: Sequence[tuple[GymBranchTrial, torch.Tensor, torch.Tensor]]
+) -> tuple[GymProposalCandidate, ...]:
+    """Freeze every branch as a resolved proposal, using only development and validation data."""
+    if model.config.get("model_type") != "gpt_neox":
+        return ()
+    from .gpt_neox_adapter import resolve_proposal
+
+    split = "sha256:" + hashlib.sha256("\n".join(split_digests).encode("utf-8")).hexdigest()
+    emitted = []
+    for trial, left, right in branches:
+        site = SemanticSite("mlp_down", trial.target_layer)
+        spec = GymWeightProposalSpec(
+            f"{gym_id}:{trial.branch_id}",
+            (ProposedOperation(site, "low_rank_update", {"factor": 1.0}),),
+            {"max_changed_parameters": int(left.shape[0]) * int(right.shape[1])},
+            "development_split",
+            split,
+        )
+        proposal = resolve_proposal(spec, model, [{"left_factor": left, "right_factor": right}])
+        emitted.append(GymProposalCandidate(trial.branch_id, trial.selected_by_gym_scientist, proposal))
+    return tuple(emitted)
 
 
 def _compile_and_apply_rust_low_rank_update(
@@ -1660,6 +1700,17 @@ def run_pythia_gym_task_learning_study(
         )
     )
 
+    gym_proposals = _emit_gym_proposals(
+        model,
+        gym.gym_id,
+        (dev_split_digest, val_split_digest),
+        (
+            (trial_b1, u1[:, :2] * s1[:2].unsqueeze(0), vh1[:2, :]),
+            (trial_b2, u2[:, :b2_rank] * s2[:b2_rank].unsqueeze(0), vh2[:b2_rank, :]),
+            (trial_b3, left_u3, right_v3),
+        ),
+    )
+
     # --- Mandatory Control 1: Null / No-Op Edit Control (Audit Point 6) ---
     noop_tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
         w_orig_final,
@@ -1947,6 +1998,7 @@ def run_pythia_gym_task_learning_study(
         net_gain_over_random=net_gain_rand,
         exposure_ledger=exposure_ledger,
         pre_registration=pre_reg,
+        gym_proposals=gym_proposals,
     )
 
 

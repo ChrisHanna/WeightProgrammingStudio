@@ -18,7 +18,36 @@ A capability is done when its pass conditions hold on a real checkpoint. Passing
 
 ## Milestone 1: Generic Gym Proposal / GPT-NeoX Qualification
 
-Status: **schema only.** Compilation starts after the `spectral_clip` vertical reports, so it reuses that path.
+Status: **pipeline qualified on Pythia-14M; the qualified edit itself is harmful.** Every condition below has a test or recorded run. The conditions cover replay and measurement, not edit quality.
+
+Recorded run: `docs/evidence/milestone1/`, made by `scripts/qualify_milestone1.py` at commit `8cb4070` on `EleutherAI/pythia-14m` revision `cf967c0`, starting from the proposal the Gym emitted.
+
+| # | Status | Evidence |
+| --- | --- | --- |
+| 1 | Pass | `tests/test_gym_proposal.py`; deep-frozen values and per-operation schemas in `tests/test_milestone1.py` |
+| 2 | Pass, `mlp_down` role only | Resolver tests in `tests/test_milestone1.py`, and the recorded run |
+| 3 | Pass | Compilation tests, and byte-identical output from two processes with different hash seeds in the recorded run |
+| 4 | Pass | `replay.json`: replay and the f64 export both reproduce the signed digest |
+| 5 | Pass, see limit | Replay ran in a directory holding only the envelope and key, with the adapter and Gym modules blocked from import |
+| 6 | Pass | `report.json`, cross-checked against `transformers` (largest logit difference under 1e-4) |
+| 7 | Pass, see limit | `run_record.signed.json`, verified by `test_recorded_qualification_run_verifies` |
+| 8 | Pass | Missing checkpoint, native runtime and `transformers` each fail; a wrong checkpoint or changed code also fails |
+| 9 | Pass | `test_missing_checkpoint_fails_qualification_and_skips_normal_ci` |
+
+Measured result, which is not a success claim:
+
+- Target accuracy on the Gym's own 12 development prompts went from 0/12 to 12/12. Those prompts were used in synthesis.
+- Top-1 agreement with the base model on free text is 0.8%, and 0.0 on all six retention tasks.
+- KL divergence is 12.8 nats per token. Perplexity rises from 138 to about 96 million.
+- The Gym's own report gives 100% retention on five prompts. The independent evaluator contradicts it, so that figure isn't evidence of retention.
+
+Known limits:
+
+- The Gym's selection is hard-coded to branch 3 and ignores the scores.
+- The study still evaluates its holdout rules after freezing, so the qualification run exposes them. They aren't used for any choice, and the same rules are public in the repository.
+- Importing the package loads its other modules, so condition 5 shows the named modules weren't used, not that the rest of the package is absent.
+- The signing key is ephemeral: it proves integrity since the run, not who ran it.
+- The recorded run executes a `/tmp` copy of the code. The script refuses a copy whose Python package differs from the recorded repository, but the prebuilt native extension is identified only by its digest.
 
 ### Pass conditions
 

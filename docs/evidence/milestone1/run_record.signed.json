@@ -1,0 +1,192 @@
+{
+  "key_fingerprint": "sha256:b93b822672488c663039efc872e51dde0e83c4ed027f77bd6eaaae2e73b846ad",
+  "kind": "nf_signed_patch_envelope",
+  "patch": {
+    "artifact_manifest": [
+      {
+        "bytes": 42401,
+        "digest": "sha256:825f012dfd51fda002a8e2b57b7632ee77e6becaaad8835dff1f98b03ba15c59",
+        "path": "proposal.json"
+      },
+      {
+        "bytes": 80385,
+        "digest": "sha256:35e5e848f460397041339ef5a8714600d16a69030d50e1e06b1b30c7f6120874",
+        "path": "gym_proposals.json"
+      },
+      {
+        "bytes": 671,
+        "digest": "sha256:9413c125ea149f8101acd832073108dbf62ccbf79b0dbbdc320124e62a96033b",
+        "path": "target_cases.json"
+      },
+      {
+        "bytes": 42069,
+        "digest": "sha256:bb05076175c5c7e54a8acb63ab880daa120ab2823666324f1624ff29aa14a12c",
+        "path": "compiled_proposal.json"
+      },
+      {
+        "bytes": 42713,
+        "digest": "sha256:4853fab46e907e6cf5d4ac85835d5fe4276fb8a8aa29efd220b9c372dc98f535",
+        "path": "edit_graph.json"
+      },
+      {
+        "bytes": 43412,
+        "digest": "sha256:f30e182fb388309384a1d098dc7d875484da5626622a82d4d4ca8a6f66a98b5e",
+        "path": "edit_graph.signed.json"
+      },
+      {
+        "bytes": 77,
+        "digest": "sha256:feb3a03a21352170067c18b9a4238524ceb0827a0ed37ef56b69debc3ee9ce1b",
+        "path": "signing.pub"
+      },
+      {
+        "bytes": 732,
+        "digest": "sha256:fe94dfae58102dba3691fddd9c0282af5692388c3f4c40cffe46c78b121ad27a",
+        "path": "replay.json"
+      },
+      {
+        "bytes": 88602,
+        "digest": "sha256:2c53eae88a2d7eccb28fae1dbad05927c973a5bf722ff3d3daa403b5537eca1a",
+        "path": "report.json"
+      }
+    ],
+    "checkpoint": {
+      "digest": "sha256:86cdcb99c4ad237a0771f636126ccac516ee28c7584005b986bb5cdfa3c2c68f",
+      "files": [
+        {
+          "bytes": 698,
+          "digest": "sha256:f97f966a66c444890ed461fff2a51eefb15d74303df05b948124719f199b0b17",
+          "path": "config.json"
+        },
+        {
+          "bytes": 28143920,
+          "digest": "sha256:116a02532db461f91386a5b20f942ff2c8d4de7341e21b55caafc3d7b25f49a1",
+          "path": "model.safetensors"
+        },
+        {
+          "bytes": 441,
+          "digest": "sha256:10b8c8852c1e1f70b54d9aff61728408c28971c0e97a6c5a7b2debbd1d3e9c0c",
+          "path": "special_tokens_map.json"
+        },
+        {
+          "bytes": 2114042,
+          "digest": "sha256:870f4e2baa6b683221fa52004d5d6f40ab8c9d31961617304b78c910c2c3caf2",
+          "path": "tokenizer.json"
+        },
+        {
+          "bytes": 4834,
+          "digest": "sha256:eee017c5bd133137f45907bd0a6e781e2ccd1a533734b7ed2a2f2f4446659809",
+          "path": "tokenizer_config.json"
+        }
+      ],
+      "model_id": "EleutherAI/pythia-14m",
+      "revision": "cf967c0a9a04383db6f7b1108d86b2962634b4ac"
+    },
+    "command": [
+      "python",
+      "scripts/qualify_milestone1.py",
+      "--checkpoint",
+      "/tmp/pythia-14m",
+      "--out",
+      "/tmp/nf-m1-run",
+      "--repo",
+      "/mnt/c/Users/NotAPC/Desktop/weightspaceprogramming/.claude/worktrees/milestone1"
+    ],
+    "commit": {
+      "dirty": false,
+      "sha": "8cb4070522216bee931cc2ab5db22cde40022a27"
+    },
+    "dependency_lock": {
+      "environment_digest": "sha256:0d5f0a29cb06540460e940708a5b27412cdbcfab60d626e8704e41c27817bf84",
+      "installed_packages": [
+        "Jinja2==3.1.6",
+        "MarkupSafe==3.0.3",
+        "PyYAML==6.0.3",
+        "Pygments==2.21.0",
+        "annotated-doc==0.0.5",
+        "anyio==4.16.0",
+        "build==1.6.1",
+        "click==8.5.0",
+        "filelock==4.2.4",
+        "filelock==4.2.9",
+        "fsspec==2026.9.0",
+        "h11==0.16.0",
+        "hf-xet==1.8.0",
+        "httpcore2==2.16.0",
+        "httpx2==2.16.0",
+        "huggingface_hub==2.4.0",
+        "idna==3.20",
+        "iniconfig==2.3.1",
+        "librt==0.16.0",
+        "markdown-it-py==4.2.0",
+        "maturin==1.16.0",
+        "mdurl==0.1.2",
+        "mpmath==1.3.0",
+        "mypy==1.20.2",
+        "mypy_extensions==1.2.0",
+        "networkx==3.7",
+        "neural-foundry==0.1.0",
+        "numpy==2.5.4",
+        "packaging==26.3",
+        "pathspec==1.1.1",
+        "pluggy==1.7.0",
+        "pyproject_hooks==1.3.3",
+        "pytest==8.4.2",
+        "regex==2026.9.29",
+        "rich==15.0.0",
+        "ruff==0.17.3",
+        "safetensors==0.8.0",
+        "setuptools==78.1.0",
+        "shellingham==1.5.4",
+        "sympy==1.14.0",
+        "tokenizers==0.23.3",
+        "torch==2.9.1+cpu",
+        "tqdm==4.70.1",
+        "transformers==5.22.1",
+        "truststore==0.10.5",
+        "typer==0.27.3",
+        "typing_extensions==4.16.0"
+      ],
+      "lock_files": [
+        {
+          "bytes": 524,
+          "digest": "sha256:c38e674a1d8e6117f3e8466770fd32f6862482f2d9ad1b88d737fe2b270e90b8",
+          "path": "requirements-dev.lock"
+        },
+        {
+          "bytes": 20857,
+          "digest": "sha256:30d63bdbdfba83b728c25f1870201a7a28e577db31e31aa6ccc330cc5e18e905",
+          "path": "Cargo.lock"
+        }
+      ]
+    },
+    "device": "cpu",
+    "edit_graph_digest": "sha256:a2e3ef0e66f6ee17cbb2785ba2fb15fe49e99408f220dae8800403824edb8e91",
+    "kind": "nf_run_record_v1",
+    "precision": "f64 compute from the checkpoint's stored precision",
+    "runtime": {
+      "native_extension_digest": "sha256:86b62bc09fc19b31da99a4a6dbd689f0ab2d6b02a2aecd45580cab90c7e370a4",
+      "package_version": "0.1.0",
+      "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+      "python": "3.12.3",
+      "torch": "2.9.1+cpu"
+    },
+    "sampler": "deterministic_full_distribution_no_sampling",
+    "schema_version": 1,
+    "seeds": {
+      "bootstrap": 20261106,
+      "random_controls": [
+        101,
+        102,
+        103,
+        104,
+        105
+      ]
+    }
+  },
+  "patch_digest": "sha256:93fb92dbcc29aded39d30301e4afafe60f3deb1a49aca55939e9e9e169fef65e",
+  "public_key": "ed25519_pub:0b1a8f04fb352357b64839ae9d4718acb9a795650453c1a41875b4f6d573747c",
+  "schema_version": 1,
+  "signature": "ed25519_sig:4d4d24bae3875a1f5e45d10099506d8840fab1d27962f67ad6506346339e1049b9c2bacc287d457599288f13b2328ed120d792c09c87ff0b0216bb0637c0960a",
+  "signature_scheme": "ed25519_v1",
+  "signer_id": "nf.run_record.v1"
+}

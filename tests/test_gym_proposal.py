@@ -1,4 +1,4 @@
-"""Milestone 1 contract. Conditions not built yet are strict xfails, so they can't pass unnoticed."""
+"""Milestone 1 contract: the proposal schemas and the compiler's determinism."""
 
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ def _spec(**changes):  # type: ignore[no-untyped-def]
 
 
 def _operation(operation: str = "low_rank_update") -> gp.ResolvedOperation:
-    return gp.ResolvedOperation("gpt_neox.layers.5.mlp.w", (2, 2), operation, {}, {})
+    factors = {name: {"shape": shape, "dtype": "f64", "data_b64": "A" * 22 + "=="} for name, shape in (("left_factor", [2, 1]), ("right_factor", [1, 2]))}
+    return gp.ResolvedOperation("gpt_neox.layers.5.mlp.w", (2, 2), operation, {}, factors if operation == "low_rank_update" else {})
 
 
 def _resolved(**changes):  # type: ignore[no-untyped-def]
@@ -95,6 +96,5 @@ def test_invalid_parts_are_rejected(build) -> None:  # type: ignore[no-untyped-d
         build()
 
 
-@pytest.mark.xfail(strict=True, reason="Milestone 1 conditions 2 and 3: resolver and compiler not implemented", raises=AttributeError)
 def test_compilation_is_deterministic() -> None:
-    assert gp.compile_proposal(_resolved()) == gp.compile_proposal(_resolved())  # type: ignore[attr-defined]
+    assert gp.compile_proposal(_resolved()) == gp.compile_proposal(_resolved())
