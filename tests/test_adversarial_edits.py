@@ -521,6 +521,31 @@ def test_graph_with_a_forward_dependency_is_refused(model: Toy) -> None:
         apply_edit_graph(model, graph)
 
 
+def _set_step(index: int, **fields: Any) -> Callable[[dict[str, Any]], None]:
+    return lambda g: g["steps"][index].update(fields)
+
+
+GRAPH_STRUCTURE_ATTACKS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
+    "duplicate_id": (_set_step(1, id="step_0"), "Duplicate step id"),
+    "missing_dependency": (_set_step(1, depends_on=["step_9"]), "missing steps"),
+    "two_step_cycle": (_set_step(0, depends_on=["step_1"]), "cycle"),
+    "self_dependency": (_set_step(1, depends_on=["step_1"]), "cycle"),
+    "forward_ordering": (lambda g: (g["steps"][1].update(depends_on=["step_2"]), g["steps"][2].update(depends_on=[])), "later steps"),
+    "dropped_dependency": (_set_step(1, depends_on=[]), "match its position"),
+    "depends_on_not_a_list": (_set_step(1, depends_on="step_0"), "list of step ids"),
+    "id_not_a_string": (_set_step(1, id=1), "string id"),
+}
+
+
+@pytest.mark.parametrize("name", GRAPH_STRUCTURE_ATTACKS)
+def test_graph_structure_is_checked_on_replay(model: Toy, name: str) -> None:
+    graph = _graph_plan(model).to_graph()
+    tamper, message = GRAPH_STRUCTURE_ATTACKS[name]
+    tamper(graph)
+    with pytest.raises(EditGraphError, match=message):
+        apply_edit_graph(model, graph)
+
+
 def test_graph_with_a_relabelled_operation_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     graph["steps"][0]["operation"] = "mask"

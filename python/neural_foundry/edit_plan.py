@@ -587,6 +587,38 @@ def search_edits(
     return tuple(sorted(ranked, key=lambda r: (not r.on_pareto_frontier, -r.development_accuracy, -r.retention)))
 
 
+def _require_graph_structure(steps: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse step ids and depends_on that don't form a graph runnable in list order, naming what's wrong."""
+    positions: dict[str, int] = {}
+    for index, step in enumerate(steps):
+        step_id = step.get("id")
+        if not isinstance(step_id, str):
+            raise EditGraphError(f"Step {index} has no string id")
+        if step_id in positions:
+            raise EditGraphError(f"Duplicate step id {step_id!r}")
+        positions[step_id] = index
+    needs: dict[str, set[str]] = {}
+    for step in steps:
+        depends_on = step.get("depends_on")
+        if not isinstance(depends_on, list) or not all(isinstance(d, str) for d in depends_on):
+            raise EditGraphError(f"{step['id']}: depends_on must be a list of step ids")
+        missing = [d for d in depends_on if d not in positions]
+        if missing:
+            raise EditGraphError(f"{step['id']}: depends_on names missing steps {missing}")
+        needs[step["id"]] = set(depends_on)
+    remaining = dict(needs)
+    while remaining:
+        ready = [name for name, deps in remaining.items() if not deps & remaining.keys()]
+        if not ready:
+            raise EditGraphError(f"depends_on forms a cycle among {sorted(remaining)}")
+        for name in ready:
+            del remaining[name]
+    for name, deps in needs.items():
+        later = sorted(d for d in deps if positions[d] > positions[name])
+        if later:
+            raise EditGraphError(f"{name}: depends_on names later steps {later}")
+
+
 def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate:
     """Replay a graph through Rust on `base_model`. Raises unless every digest is reproduced."""
     if graph.get("kind") != "nf_edit_graph_v1" or graph.get("schema_version") != 1:
@@ -609,6 +641,7 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
         raise EditGraphError("This isn't the base model the graph was made for")
     working: dict[str, torch.Tensor] = {}
     receipts: list[StepReceipt] = []
+    _require_graph_structure(steps)
     for index, step in enumerate(steps):
         # Steps run in list order, so the only dependencies that order can honour are the ones `to_graph` writes.
         if step.get("id") != f"step_{index}" or step.get("depends_on") != ([f"step_{index - 1}"] if index else []):
