@@ -366,6 +366,11 @@ def _on_disk(kind: str) -> dict[str, bool]:
 def test_gym_study_replays(tmp_path: Path, kind: str) -> None:
     model = _load(kind)
     study = pythia.run_pythia_gym_task_learning_study(model, gym=GYM, target_strength=80.0)
+    if kind == "real":
+        # No branch qualifies on the real checkpoint, so there is nothing selected to replay.
+        assert study.selected_branch_id is None and study.edit_steps == () and study.edited_weight is None
+        assert [c.selected for c in study.gym_proposals] == [False, False, False]
+        return
     site = model.mlp_down_proj_site(int(model.config["num_hidden_layers"]) - 1)
     _assert_replays(tmp_path, model, study.edit_steps, {site: study.edited_weight}, **_on_disk(kind))
 
@@ -375,6 +380,10 @@ def test_gym_study_replays(tmp_path: Path, kind: str) -> None:
 def test_reasoning_loop_arm_replays(tmp_path: Path, kind: str, feedback: bool) -> None:
     model = _load(kind)
     report = prd_adapters.FrontierAgentProgrammer("claude-4-5-sonnet").run_reasoning_loop_repair_experiment(model, enable_feedback_tools=feedback)
+    if kind == "real" and feedback:
+        # This arm submits the Gym's selection, and no branch qualifies on the real checkpoint.
+        assert report.submitted_edit_steps == () and report.submitted_weights_by_layer is None and report.held_out_accuracy_after is None
+        return
     weights = {model.mlp_down_proj_site(layer): w for layer, w in report.submitted_weights_by_layer.items()}
     _assert_replays(tmp_path, model, report.submitted_edit_steps, weights, **_on_disk(kind))
 

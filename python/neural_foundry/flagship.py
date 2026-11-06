@@ -628,8 +628,8 @@ class FlagshipPublishedBundleReport:
     repetition_loop_rate_after: float
     holdout_accuracy_before: float
     holdout_accuracy_after: float
-    noop_control_holdout_accuracy: float
-    random_control_holdout_accuracy: float
+    noop_control_holdout_accuracy: float | None
+    random_control_holdout_accuracy: float | None
     retention_accuracy_after: float
     signed_patch_digest: str
     signature_verified: bool
@@ -691,6 +691,11 @@ def replay_flagship_edit_graphs(clean_model: Any, bundle_dir: str | Path, *, pub
     bundle = Path(bundle_dir)
     defective = apply_signed_edit_graph(clean_model, json.loads((bundle / FLAGSHIP_DEFECT_GRAPH).read_bytes()), public_key=public_key)
     return apply_signed_edit_graph(defective.model, json.loads((bundle / FLAGSHIP_REPAIR_GRAPH).read_bytes()), public_key=public_key)
+
+
+def _rounded(value: float | None) -> float | None:
+    """A control the Gym never ran on the holdout stays None, rather than reading as a measured zero."""
+    return None if value is None else round(value, 4)
 
 
 def run_flagship_loop_repair_study_and_publish_bundle(
@@ -976,8 +981,8 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         "repetition_loop_rate_after": round(loop_rate_after, 4),
         "holdout_accuracy_before": round(hold_before_acc, 4),
         "holdout_accuracy_after": round(hold_after_acc, 4),
-        "noop_control_holdout_accuracy": round(gym_rep.noop_control_holdout_accuracy, 4),
-        "random_control_holdout_accuracy": round(gym_rep.random_control_holdout_accuracy, 4),
+        "noop_control_holdout_accuracy": _rounded(gym_rep.noop_control_holdout_accuracy),
+        "random_control_holdout_accuracy": _rounded(gym_rep.random_control_holdout_accuracy),
         "retention_accuracy_after": round(ret_after_acc, 4),
     }
     verification_path.write_bytes(canonicalize(verification_payload))
@@ -1002,8 +1007,8 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         "repetition_loop_rate_after": round(loop_rate_after, 4),
         "holdout_accuracy_before": round(hold_before_acc, 4),
         "holdout_accuracy_after": round(hold_after_acc, 4),
-        "noop_control_holdout_accuracy": round(gym_rep.noop_control_holdout_accuracy, 4),
-        "random_control_holdout_accuracy": round(gym_rep.random_control_holdout_accuracy, 4),
+        "noop_control_holdout_accuracy": _rounded(gym_rep.noop_control_holdout_accuracy),
+        "random_control_holdout_accuracy": _rounded(gym_rep.random_control_holdout_accuracy),
         "retention_accuracy_after": round(ret_after_acc, 4),
         "signature_verified": bool(sig_ver["verified"]),
         "hf_roundtrip_verified": hf_receipt.gain_preserved_after_rebuild,
@@ -1042,8 +1047,8 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         repetition_loop_rate_after=round(loop_rate_after, 4),
         holdout_accuracy_before=round(hold_before_acc, 4),
         holdout_accuracy_after=round(hold_after_acc, 4),
-        noop_control_holdout_accuracy=round(gym_rep.noop_control_holdout_accuracy, 4),
-        random_control_holdout_accuracy=round(gym_rep.random_control_holdout_accuracy, 4),
+        noop_control_holdout_accuracy=_rounded(gym_rep.noop_control_holdout_accuracy),
+        random_control_holdout_accuracy=_rounded(gym_rep.random_control_holdout_accuracy),
         retention_accuracy_after=round(ret_after_acc, 4),
         signed_patch_digest=str(signed_envelope["patch_digest"]),
         signature_verified=bool(sig_ver["verified"]),

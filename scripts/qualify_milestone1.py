@@ -77,13 +77,13 @@ def stage_synthesize(args: argparse.Namespace) -> None:
     """The Gym proposes and selects. Its report is discarded here: only the frozen proposals go on."""
     model = PythiaModel.from_pretrained_dir(args.checkpoint, model_name=MODEL_ID)
     report = run_pythia_gym_task_learning_study(model, gym=GYM)
-    if report.selected_proposal is None:
-        raise QualificationError("The Gym emitted no selected proposal")
-    _write(args.out / "proposal.json", gp.proposal_to_document(report.selected_proposal))
     _write(
         args.out / "gym_proposals.json",
         [{"branch_id": c.branch_id, "selected": c.selected, "proposal": gp.proposal_to_document(c.proposal)} for c in report.gym_proposals],
     )
+    if report.selected_proposal is None:
+        raise QualificationError(f"The Gym selected no branch, so there is nothing to qualify. {report.promotion_verification['reason']}")
+    _write(args.out / "proposal.json", gp.proposal_to_document(report.selected_proposal))
     # The Gym's development cases, in the evaluator's text form. These aren't the sealed holdout rules.
     cases = [[f"{prefix} {expression}", target.replace("\u0120", " ")] for prefix in GYM.gym_dev_prefixes for expression, target in GYM.base_rules]
     _write(args.out / "target_cases.json", cases)

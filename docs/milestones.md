@@ -43,7 +43,7 @@ Measured result, which is not a success claim:
 
 Known limits:
 
-- The Gym's selection is hard-coded to branch 3 and ignores the scores.
+- The recorded run predates real selection, when the Gym always chose branch 3. `select_gym_branch` now selects no branch on Pythia-14M, so `scripts/qualify_milestone1.py` stops with that reason and can't currently reproduce this run.
 - The study still evaluates its holdout rules after freezing, so the qualification run exposes them. They aren't used for any choice, and the same rules are public in the repository.
 - Importing the package loads its other modules, so condition 5 shows the named modules weren't used, not that the rest of the package is absent.
 - The signing key is ephemeral: it proves integrity since the run, not who ran it.

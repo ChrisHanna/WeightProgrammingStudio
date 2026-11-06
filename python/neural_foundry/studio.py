@@ -938,8 +938,11 @@ class WeightProgrammingStudio:
         )
         # A deterministic signal from one run, not statistical evidence. The loop metric also can't
         # tell a correct answer from any other non-attractor token.
+        # The controls are None when the Gym selected no branch. An unmeasured control can't be beaten.
         promote = bool(
-            candidate_score >= 0.9
+            noop_score is not None
+            and sham_score is not None
+            and candidate_score >= 0.9
             and candidate_score > noop_score
             and candidate_score > sham_score
             and retention >= 0.98
@@ -959,8 +962,8 @@ class WeightProgrammingStudio:
                 "sampler": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 1, "seed": 17},
                 "seed": 17,
                 "controls": {
-                    "noop_accuracy": round(noop_score, 6),
-                    "random_accuracy": round(sham_score, 6),
+                    "noop_accuracy": None if noop_score is None else round(noop_score, 6),
+                    "random_accuracy": None if sham_score is None else round(sham_score, 6),
                     "candidate_accuracy": round(candidate_score, 6),
                     "retention_accuracy": round(retention, 6),
                 },

@@ -64,18 +64,18 @@ def test_pythia_gym_task_learning_branches_and_holdout_verification() -> None:
     real_model = PythiaModel.from_pretrained_dir(pythia_dir, model_name="EleutherAI/pythia-14m")
     real_rep = run_pythia_gym_task_learning_study(real_model)
 
-    # Branch 3 beats Branch 1 and Branch 2 in the Gym and achieves 100% on unseen holdout prompts
+    # Branch 3 beats Branch 1 and Branch 2 on the prompts synthesis saw, but fails on unseen public prompts.
     b1, b2, b3 = real_rep.branches
     assert b3.gym_dev_accuracy == 1.0
     assert b3.gym_prefix_val_accuracy == 1.0
     assert b3.retention_accuracy == 1.0
     assert b3.gym_prefix_val_accuracy > b2.gym_prefix_val_accuracy
     assert b3.gym_dev_accuracy > b1.gym_dev_accuracy
-    assert all(p.matched_target is True for p in real_rep.holdout_after)
-    assert all(p.matched_target is True for p in real_rep.retention_after)
-    # The Gym's five prompts pass, but the independent evaluator measures a harmful edit.
-    assert real_rep.promotion_verification["gym_self_check"]["status"] == "passed"
+    assert b3.selection_retention_source == "unseen_public_prompts"
+    assert b3.selection_retention_accuracy < 0.98
+    assert real_rep.selected_branch_id is None
+    assert real_rep.selected_proposal is None
+    assert real_rep.holdout_after == ()
     assert real_rep.promotion_verification["promote_eligible"] is False
-    assert real_rep.promotion_verification["status"] == "rejected"
-    assert "free_text_agreement" in real_rep.promotion_verification["failed_checks"]
+    assert real_rep.promotion_verification["status"] == "not_evaluated"
 
