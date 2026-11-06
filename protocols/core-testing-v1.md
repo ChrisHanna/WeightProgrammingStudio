@@ -21,6 +21,29 @@ This is reproducible mutation smoke, not a coverage-guided fuzz campaign or a su
 
 The initial bounded process run completed all 4096 cases: canonical JSON 322 successes, IR 4, search spaces 6 and checkpoints 11. No panic or identity mismatch occurred; success counts are not code-coverage measurements.
 
+## Running the `nf-experiments` tests
+
+These tests run the real guardian, model worker and Docker sandbox, so they need a qualified Linux host. Their refusals below are intended behaviour; do not relax them to get a pass.
+
+Requirements:
+
+- **Empty capability bounding set.** The fixture guardian (`fixture_supervisor/boundary.py`) refuses any process with a nonzero `CapBnd`, which includes an ordinary login shell. On such a host about 100 tests fail with `qualification failed; unsupported host/runtime/static ELF` or `supervised cleanup unknown; full reservation retained`. Run the test binary as a non-root user with the set emptied, as shown below.
+- **`.venv/` at the workspace root**, with Torch in `.venv/lib/python3.12/site-packages`, and `/usr/bin/python3.12`. On WSL, keep the venv on the Linux filesystem: cold Torch imports through `/mnt/c` can exceed the 30-second qualification limit (`runtime probe failed: wall_limit`).
+- **`target/debug/lib_native.so`**, from `cargo build -p nf-python`. `cargo test -p nf-experiments` does not build it. Tests use the workspace `target/`, so don't set `CARGO_TARGET_DIR`.
+- **Docker** with cgroup v2, seccomp and the pinned Python image from `.github/workflows/m1.yml`.
+- **An otherwise idle machine.** Wall-clock budgets are real limits. Under heavy load, tests fail with `sandbox authority expired`, `request cannot finish within family deadline`, or child exit status 124. Keep `--test-threads` low and rerun such a failure alone before calling it a defect.
+
+```sh
+cargo build -p nf-python
+cargo test -p nf-experiments --no-run
+cd crates/nf-experiments
+unshare -U --map-current-user --keep-caps \
+  setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+  ../../target/debug/deps/<test-binary> --test-threads=2
+```
+
+The user namespace is only a way to empty the bounding set without root. Where unprivileged user namespaces are blocked, use a container or `sudo setpriv` that returns to a non-root user. A plain `cargo test --workspace` does not set this up.
+
 ## Real PyTorch reference
 
 The optional `differential` extra pins `torch==2.9.1+cpu`. Install through the explicit CPU index (not the default CUDA-capable distribution) with the project interpreter. uv setup used here:
