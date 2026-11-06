@@ -8,6 +8,11 @@ Implements:
 - T091 (`library_reuse`, CG-13), T092 (`strategy_retrieval`), T093 (`cross_model_protocol`),
   T094 (`proposer_dataset`), T095 (`proposer_training`), T096 (`learned_proposer`),
   T097 (`transfer_benchmark`), T098 (`research_source_records`), T099 (`m4_feature_acceptance`).
+
+Evidence: the baselines train single linear matrices on supplied tensors. The adapters do not
+import NeMo-Gym, Verifiers or Gymnasium. Evaluators score numbers the caller supplies. Results carry
+an ``evidence`` field. run_transfer_benchmark and run_proposer_training_study are not implemented
+and raise NotImplementedError once their contract checks pass.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from typing import Any, Literal
 import torch
 
 from .m4_modalities import (
+    EvidenceBasis,
     EvidenceOrigin,
     M4ContractError,
     SupportGrade,
@@ -53,12 +59,15 @@ class BaselineExecutionReceipt:
     trainable_parameters: int
     total_compute_flops: int
     merged_into_base_weights: bool
-    reload_parity_verified: bool
+    # None: these baselines never write the result to disk and reload it.
+    reload_parity_verified: None
     failed_direct_attempts_retained: int
     production_history: Literal["trained", "hybrid"]
     eval_loss_before: float
     eval_loss_after: float
     extra_metadata: dict[str, Any]
+    # Losses are measured on a linear fixture; total_compute_flops is a formula, not a count.
+    evidence: EvidenceBasis = "measured_on_fixture"
 
 
 def run_lora_baseline(
@@ -107,8 +116,6 @@ def run_lora_baseline(
     with torch.no_grad():
         merged = (w0 + lora_b @ lora_a).contiguous()
         loss_after = float(torch.mean(((x @ merged.T) - y) ** 2).item())
-        reloaded = torch.tensor(merged.tolist(), dtype=torch.float64)
-        reload_ok = bool(torch.allclose(merged, reloaded, atol=1e-12))
 
     trainable = rank * (out_dim + in_dim)
     flops = steps * int(x.shape[0]) * out_dim * in_dim * 2
@@ -120,7 +127,7 @@ def run_lora_baseline(
         trainable_parameters=trainable,
         total_compute_flops=flops,
         merged_into_base_weights=True,
-        reload_parity_verified=reload_ok,
+        reload_parity_verified=None,
         failed_direct_attempts_retained=failed_direct_attempts_retained,
         production_history="trained",
         eval_loss_before=loss_before,
@@ -173,7 +180,7 @@ def run_sft_baseline(
         trainable_parameters=int(final_w.numel()),
         total_compute_flops=steps * int(x.shape[0]) * int(final_w.numel()) * 2,
         merged_into_base_weights=True,
-        reload_parity_verified=True,
+        reload_parity_verified=None,
         failed_direct_attempts_retained=0,
         production_history="trained",
         eval_loss_before=loss_before,
@@ -227,7 +234,7 @@ def run_distillation_baseline(
         trainable_parameters=sft_rec.trainable_parameters,
         total_compute_flops=sft_rec.total_compute_flops + teacher_generation_flops,
         merged_into_base_weights=True,
-        reload_parity_verified=True,
+        reload_parity_verified=None,
         failed_direct_attempts_retained=0,
         production_history="trained",
         eval_loss_before=sft_rec.eval_loss_before,
@@ -294,7 +301,7 @@ def run_rl_baseline(
         trainable_parameters=int(mu.numel()),
         total_compute_flops=episodes * int(x.shape[0]) * int(mu.numel()) * 2,
         merged_into_base_weights=True,
-        reload_parity_verified=True,
+        reload_parity_verified=None,
         failed_direct_attempts_retained=failed_episodes,
         production_history="trained",
         eval_loss_before=loss_before,
@@ -318,9 +325,11 @@ class MemoryMethodReceipt:
     memory_id: str
     capacity_slots: int
     used_slots: int
-    reset_between_eval_items: bool
+    # None: no memory is exercised, so resetting is not observed.
+    reset_between_eval_items: None
     static_export_self_contained: bool
     production_history: Literal["hybrid"]
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def verify_external_memory_method(
@@ -332,7 +341,7 @@ def verify_external_memory_method(
     claim_direct_only_weight_edit: bool = False,
     static_export_requires_hidden_daemon: bool = False,
 ) -> MemoryMethodReceipt:
-    """Validates explicit memory/adapter state rules and forbids hidden-label writes or direct-only relabeling (T082)."""
+    """Checks caller declarations about a memory method; does not run or inspect one (T082)."""
     if contains_hidden_holdout_labels:
         raise M4ContractError(
             "MEMORY_LABEL_LEAKAGE",
@@ -354,7 +363,7 @@ def verify_external_memory_method(
         memory_id=memory_id,
         capacity_slots=capacity_slots,
         used_slots=len(entries),
-        reset_between_eval_items=True,
+        reset_between_eval_items=None,
         static_export_self_contained=True,
         production_history="hybrid",
     )
@@ -366,9 +375,11 @@ class ContinualEpisodeMetrics:
     retention_score: float
     forward_transfer: float
     backward_transfer: float
-    recovery_steps: int
+    # None: recovery is not observed.
+    recovery_steps: None
     state_growth_bytes: int
     isolated_episodes: bool
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_continual_protocol(
@@ -379,7 +390,7 @@ def evaluate_continual_protocol(
     state_growth_bytes: int,
     cross_episode_holdout_contaminated: bool = False,
 ) -> ContinualEpisodeMetrics:
-    """Evaluates continual adaptation across frozen episodes and blocks cross-episode contamination (T083)."""
+    """Summarises caller-supplied score matrices; runs no episodes (T083)."""
     if cross_episode_holdout_contaminated:
         raise M4ContractError(
             "CONTINUAL_EPISODE_CONTAMINATION",
@@ -396,7 +407,7 @@ def evaluate_continual_protocol(
         retention_score=retention,
         forward_transfer=fwt,
         backward_transfer=bwt,
-        recovery_steps=2,
+        recovery_steps=None,
         state_growth_bytes=state_growth_bytes,
         isolated_episodes=True,
     )
@@ -415,8 +426,13 @@ class ExternalGymRunReceipt:
     mean_reward: float
     task_accuracy: float | None
     reward_components: dict[str, float]
-    sandbox_cleaned_up: bool
-    replay_deterministic: bool
+    # These adapters run in-process and do not import the named package; pinned_version is only a
+    # label the caller must match.
+    sandbox_used: Literal[False]
+    external_package_executed: Literal[False]
+    # None: no replay was performed.
+    replay_deterministic: bool | None
+    evidence: EvidenceBasis = "builtin_fixture_stub"
 
 
 def run_nemo_adapter(
@@ -426,7 +442,7 @@ def run_nemo_adapter(
     model_fn: Any,
     is_mock_only: bool = False,
 ) -> ExternalGymRunReceipt:
-    """Executes pinned NeMo-Gym task/tool/scoring normalization with local replay and cleanup (T084)."""
+    """Calls model_fn twice per prompt in-process and averages its scores; does not run NeMo-Gym (T084)."""
     if is_mock_only:
         raise M4ContractError("MOCK_QUALIFICATION_DENIED", "mock-only NeMo-Gym runs cannot qualify adapter")
     if pinned_version != "0.4.0":
@@ -443,9 +459,10 @@ def run_nemo_adapter(
         pinned_version=pinned_version,
         episode_count=len(prompts),
         mean_reward=mean_r,
-        task_accuracy=mean_r,
-        reward_components={"tool_schema_valid": 1.0, "answer_match": mean_r},
-        sandbox_cleaned_up=True,
+        task_accuracy=None,
+        reward_components={"model_fn_score": mean_r},
+        sandbox_used=False,
+        external_package_executed=False,
         replay_deterministic=True,
     )
 
@@ -456,7 +473,7 @@ def run_verifiers_adapter(
     rollouts: list[dict[str, float]],
     conflate_reward_as_accuracy: bool = False,
 ) -> ExternalGymRunReceipt:
-    """Executes pinned Verifiers rollout scoring while keeping shaped reward distinct from accuracy (T085)."""
+    """Averages caller-supplied rollout scores, keeping reward apart from accuracy; does not run Verifiers (T085)."""
     if conflate_reward_as_accuracy:
         raise M4ContractError(
             "REWARD_AS_ACCURACY_FORBIDDEN",
@@ -477,8 +494,10 @@ def run_verifiers_adapter(
             "format_reward": sum(fmt_scores) / len(fmt_scores),
             "correctness_binary": sum(correctness) / len(correctness),
         },
-        sandbox_cleaned_up=True,
-        replay_deterministic=True,
+        sandbox_used=False,
+        external_package_executed=False,
+        replay_deterministic=None,
+        evidence="caller_supplied",
     )
 
 
@@ -489,18 +508,24 @@ def run_gymnasium_adapter(
     max_steps: int = 5,
     action_bridge: Any | None = None,
 ) -> ExternalGymRunReceipt:
-    """Runs a seeded multi-step Gymnasium episode with explicit observation/action bridge (T086)."""
+    """Runs a built-in toy dynamics loop through action_bridge, twice; does not run Gymnasium (T086)."""
     if action_bridge is None:
         raise M4ContractError(
             "MISSING_MODEL_ACTION_BRIDGE",
             "Gymnasium adapter requires an explicit model-to-action bridge (T086)",
         )
-    state = float(seed % 5)
-    total_reward = 0.0
-    for step in range(max_steps):
-        action = float(action_bridge(state, step))
-        state = state * 0.5 + action
-        total_reward += 1.0 / (1.0 + abs(state))
+
+    def episode() -> float:
+        state = float(seed % 5)
+        episode_return = 0.0
+        for step in range(max_steps):
+            action = float(action_bridge(state, step))
+            state = state * 0.5 + action
+            episode_return += 1.0 / (1.0 + abs(state))
+        return episode_return
+
+    total_reward = episode()
+    replayed = episode() == total_reward
     return ExternalGymRunReceipt(
         adapter_family="gymnasium",
         pinned_version=pinned_version,
@@ -508,8 +533,9 @@ def run_gymnasium_adapter(
         mean_reward=total_reward,
         task_accuracy=None,
         reward_components={"episode_return": total_reward, "steps": float(max_steps)},
-        sandbox_cleaned_up=True,
-        replay_deterministic=True,
+        sandbox_used=False,
+        external_package_executed=False,
+        replay_deterministic=replayed,
     )
 
 
@@ -521,6 +547,8 @@ class PrivateGymAuditReceipt:
     redacted_log_summary: str
     publication_approved: bool
     training_approved: bool
+    # Nothing is encrypted or inspected here; encrypted_at_rest repeats the caller's declaration.
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def enforce_private_gym_policy(
@@ -560,13 +588,14 @@ class MeasurementResearchReport:
     redundant_pairs: tuple[tuple[str, str], ...]
     shortcut_gyms_flagged: tuple[str, ...]
     human_approval_recorded: bool
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_measurement_research(
     gym_score_vectors: dict[str, list[float]],
     *,
     shortcut_suspected_gyms: tuple[str, ...] = (),
-    human_approval_recorded: bool = True,
+    human_approval_recorded: bool = False,
     claim_progress_from_raw_task_count: bool = False,
 ) -> MeasurementResearchReport:
     """Detects redundant/duplicated gym distributions and shortcut vulnerabilities (T088)."""
@@ -671,6 +700,8 @@ class LibraryReuseAttempt:
     fresh_target_evaluation_passed: bool
     accepted_on_target: bool
     failure_recorded: bool
+    # Digest, prerequisite and evaluation outcomes are the caller's booleans; none is checked here.
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_library_recipe_reuse(
@@ -734,6 +765,7 @@ class StrategyRecommendation:
     estimated_cost_cpu_ms: int
     evidence_grade: SupportGrade
     is_accepted_edit: bool = False
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def retrieve_repair_strategies(
@@ -756,14 +788,16 @@ def retrieve_repair_strategies(
             entry["sup"] += 1
         else:
             entry["con"] += 1
-        entry["cost"] += int(row.get("cost_cpu_ms", 100))
+        if "cost_cpu_ms" not in row:
+            raise M4ContractError("MISSING_STRATEGY_COST", f"history row for '{sid}' has no cost_cpu_ms")
+        entry["cost"] += int(row["cost_cpu_ms"])
 
     recs: list[StrategyRecommendation] = []
     for sid, stats in grouped.items():
         grade: SupportGrade = (
             "contradicted"
             if stats["con"] > stats["sup"]
-            else ("independently_confirmed_under_protocol" if stats["sup"] > 0 and stats["con"] == 0 else "inconclusive")
+            else ("suggestive" if stats["sup"] > 0 and stats["con"] == 0 else "inconclusive")
         )
         recs.append(
             StrategyRecommendation(
@@ -790,6 +824,7 @@ class CrossModelTransferStudyResult:
     source_discovery_cost_ms: int
     target_adaptation_cost_ms: int
     sample_efficiency_improved: bool
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_cross_model_protocol(
@@ -804,7 +839,7 @@ def evaluate_cross_model_protocol(
     source_discovery_cost_ms: int,
     target_adaptation_cost_ms: int,
 ) -> CrossModelTransferStudyResult:
-    """Evaluates cross-model strategy transfer with no-history and random controls and full source+target cost (T093)."""
+    """Compares caller-supplied evaluation counts and checks study design; runs no study (T093)."""
     if source_model_group == target_model_group or shared_checkpoint_ancestry:
         raise M4ContractError(
             "CROSS_MODEL_ANCESTRY_OVERLAP",
@@ -875,7 +910,9 @@ def build_proposer_dataset(
             val_count += 1
 
     return ProposerDatasetArtifact(
-        dataset_digest=_digest({"train": train_count, "val": val_count, "license": license_spdx}),
+        dataset_digest=_digest(
+            {"train": train_count, "val": val_count, "license": license_spdx, "signatures": seen_keys}
+        ),
         train_count=train_count,
         val_count=val_count,
         deduplicated_dropped=dedup_dropped,
@@ -900,21 +937,15 @@ def run_proposer_training_study(
     authorized_proposer_training: bool = True,
     steps: int = 20,
 ) -> TrainedProposerArtifact:
-    """Trains a proposer model in an explicit separate study and freezes its artifact digest (T095)."""
+    """Not implemented: no proposer training backend exists. Enforces the contract, then raises (T095)."""
     if triggered_implicitly_inside_direct_study or not authorized_proposer_training:
         raise M4ContractError(
             "IMPLICIT_PROPOSER_TRAINING_FORBIDDEN",
             "direct target-model studies cannot silently trigger proposer training (T095)",
         )
-    flops = steps * max(dataset.train_count, 1) * 1024
-    return TrainedProposerArtifact(
-        proposer_artifact_digest=_digest(
-            {"study": training_study_id, "dataset": dataset.dataset_digest, "steps": steps}
-        ),
-        training_study_id=training_study_id,
-        dataset_digest=dataset.dataset_digest,
-        steps=steps,
-        compute_flops=flops,
+    raise NotImplementedError(
+        f"proposer training is not implemented (study '{training_study_id}', dataset "
+        f"{dataset.dataset_digest}, {steps} steps); no model would be trained"
     )
 
 
@@ -927,6 +958,8 @@ class LearnedProposerEvaluation:
     random_evals_to_success: int
     target_update_classification: Literal["direct_tensor_edit"]
     proposal_origin: Literal["learned_proposer"]
+    # Rates and counts are copied from the arguments; no proposer is run.
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_learned_proposer_inference(
@@ -938,7 +971,7 @@ def evaluate_learned_proposer_inference(
     random_evals_to_success: int,
     target_used_gradient_updates: bool = False,
 ) -> LearnedProposerEvaluation:
-    """Evaluates learned proposer IR generation against no-history and random baselines while preserving target lineage (T096)."""
+    """Records caller-supplied proposer metrics and checks lineage; runs no proposer (T096)."""
     if target_used_gradient_updates:
         raise M4ContractError(
             "LEARNED_ORIGIN_LINEAGE_ERASURE",
@@ -975,7 +1008,10 @@ def run_transfer_benchmark(
     force_incompatible_raw_copy: bool = False,
     include_lora_comparison: bool = True,
 ) -> TransferBenchmarkReport:
-    """Runs the joined transfer benchmark with aligned/unaligned controls and matched baseline accounting (T097)."""
+    """Not implemented: it used to return fixed MSE values. Enforces the contract, then raises (T097).
+
+    execute_mapped_weight_transfer measures one transfer on supplied tensors.
+    """
     if force_incompatible_raw_copy:
         raise M4ContractError(
             "INCOMPATIBLE_RAW_COPY_FORBIDDEN",
@@ -986,15 +1022,9 @@ def run_transfer_benchmark(
             "SYNTHETIC_PERMUTATION_MISLABELED",
             "permuted synthetic fixtures cannot be labeled as cross_size or cross_family",
         )
-    missing = () if include_lora_comparison else ("matched_lora_baseline_not_run",)
-    return TransferBenchmarkReport(
-        scope_label=scope_label,
-        unchanged_mse=1.25,
-        safe_unaligned_mse=0.95,
-        aligned_direct_mse=0.0,
-        matched_lora_mse=0.04 if include_lora_comparison else None,
-        missing_comparisons=missing,
-        total_cost_flops=4096,
+    raise NotImplementedError(
+        f"transfer benchmark is not implemented for scope '{scope_label}' "
+        f"(include_lora_comparison={include_lora_comparison}); no measurement exists"
     )
 
 
@@ -1007,6 +1037,9 @@ class ResearchSourceRecord:
     origin: EvidenceOrigin
     support: SupportGrade
     training_corpus_provenance: str | None
+    # A local reproduction is only ever declared here. This function cannot observe a study.
+    local_reproduction_declared: bool = False
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def ingest_research_source_record(
@@ -1020,7 +1053,7 @@ def ingest_research_source_record(
     fabricate_missing_corpus_attribution: bool = False,
     claim_reproduced_without_local_study: bool = False,
 ) -> ResearchSourceRecord:
-    """Ingests external research sources/papers as supplied/claimed provenance without inflating reproduction status (T098)."""
+    """Records a source as a supplied fact; a declared local reproduction never raises its grade (T098)."""
     if fabricate_missing_corpus_attribution:
         raise M4ContractError(
             "FABRICATED_DATA_ATTRIBUTION",
@@ -1036,9 +1069,10 @@ def ingest_research_source_record(
         version=version,
         license_spdx=license_spdx,
         claim_summary=claim_summary,
-        origin="measured_result" if locally_reproduced_under_protocol else "supplied_fact",
-        support="independently_confirmed_under_protocol" if locally_reproduced_under_protocol else "suggestive",
+        origin="supplied_fact",
+        support="suggestive",
         training_corpus_provenance=training_corpus_provenance,
+        local_reproduction_declared=locally_reproduced_under_protocol,
     )
 
 
@@ -1049,15 +1083,22 @@ class M4FeatureAcceptanceReport:
     cg11_methods_and_costs_passed: bool
     cg12_evidence_quality_passed: bool
     cg13_library_lifecycle_passed: bool
+    # Empty: these gates exercise fixtures and contract refusals, so they qualify no engine.
     qualified_engines: tuple[str, ...]
     all_gates_passed: bool
+    real_model_evaluated: Literal[False] = False
+    evidence: EvidenceBasis = "measured_on_fixture"
 
 
 def run_m4_feature_acceptance_suite(
     *,
     allow_partial_qualification: bool = False,
 ) -> M4FeatureAcceptanceReport:
-    """Executes end-to-end M4 feature acceptance across construction (CG-09), transfer (CG-10), baselines (CG-11), evidence (CG-12), and library reuse (CG-13) (T099)."""
+    """Software-path checks on small fixtures for CG-09 to CG-13 (T099). A pass is not a qualification.
+
+    CG-09 to CG-11 compute on tiny tensors. CG-12 and CG-13 check only that the labelling and reuse
+    contracts refuse bad inputs.
+    """
     if allow_partial_qualification:
         raise M4ContractError("PARTIAL_QUALIFICATION_DENIED", "M4 acceptance requires all capability gates to pass")
 
@@ -1070,8 +1111,6 @@ def run_m4_feature_acceptance_suite(
         constructed.normal_pass_rate == 1.0
         and constructed.boundary_pass_rate == 1.0
         and constructed.invalid_rejected_properly
-        and constructed.integrated_gym_passed
-        and constructed.reload_parity_passed
     )
 
     # 2. CG-10: Mapped weight transfer with permutation alignment and controls
@@ -1108,35 +1147,55 @@ def run_m4_feature_acceptance_suite(
         rank=1,
         steps=8,
     )
-    cg11_ok = (
-        lora_rec.reload_parity_verified
-        and lora_rec.total_compute_flops > 0
-        and lora_rec.eval_loss_after < lora_rec.eval_loss_before
-    )
+    cg11_ok = lora_rec.eval_loss_after < lora_rec.eval_loss_before
 
-    # 4. CG-12: Evidence quality and source ingestion
+    # 4. CG-12: a declared reproduction must not raise a source's evidence grade
     src_rec = ingest_research_source_record(
-        source_id="paper.circuit_sparsity.2025",
+        source_id="fixture.source",
         version="1.0",
         license_spdx="Apache-2.0",
-        claim_summary="Sparse bridges align features across depth",
+        claim_summary="fixture claim",
         locally_reproduced_under_protocol=True,
-        training_corpus_provenance="synthetic.verified.v1",
     )
-    cg12_ok = src_rec.support == "independently_confirmed_under_protocol"
+    cg12_ok = src_rec.origin == "supplied_fact" and src_rec.support == "suggestive"
+    try:
+        ingest_research_source_record(
+            source_id="fixture.source",
+            version="1.0",
+            license_spdx="Apache-2.0",
+            claim_summary="fixture claim",
+            claim_reproduced_without_local_study=True,
+        )
+        cg12_ok = False
+    except M4ContractError:
+        pass
 
-    # 5. CG-13: Library lifecycle reuse with fresh target verification
+    # 5. CG-13: a failed fresh evaluation is not accepted, and shape alone is refused
     reuse_rec = evaluate_library_recipe_reuse(
-        recipe_id="relu.exact_five_ops",
+        recipe_id="fixture.recipe",
         version=1,
         version_status="verified",
-        target_model_id="model.target.v2",
-        target_task_id="gym.arithmetic.v1",
+        target_model_id="fixture.target",
+        target_task_id="fixture.task",
         prerequisites_satisfied=True,
         source_digest_verified=True,
-        fresh_target_evaluation_passed=True,
+        fresh_target_evaluation_passed=False,
     )
-    cg13_ok = reuse_rec.accepted_on_target and not reuse_rec.failure_recorded
+    cg13_ok = not reuse_rec.accepted_on_target and reuse_rec.failure_recorded
+    try:
+        evaluate_library_recipe_reuse(
+            recipe_id="fixture.recipe",
+            version=1,
+            version_status="verified",
+            target_model_id="fixture.target",
+            target_task_id="fixture.task",
+            prerequisites_satisfied=True,
+            source_digest_verified=True,
+            fresh_target_evaluation_passed=None,
+        )
+        cg13_ok = False
+    except M4ContractError:
+        pass
 
     all_ok = cg09_ok and cg10_ok and cg11_ok and cg12_ok and cg13_ok
     return M4FeatureAcceptanceReport(
@@ -1145,11 +1204,6 @@ def run_m4_feature_acceptance_suite(
         cg11_methods_and_costs_passed=cg11_ok,
         cg12_evidence_quality_passed=cg12_ok,
         cg13_library_lifecycle_passed=cg13_ok,
-        qualified_engines=(
-            "direct_subspace_repair.v1",
-            "symbolic_rule_constructor.v1",
-            "mapped_weight_transfer.v1",
-            "pareto_evolutionary.v1",
-        ),
+        qualified_engines=(),
         all_gates_passed=all_ok,
     )

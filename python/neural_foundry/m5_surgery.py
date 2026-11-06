@@ -7,6 +7,12 @@ Implements:
   T113 (`serving_protocol`), T114 (`vllm_adapter`), T115 (`tensorrt_adapter`),
   T116 (`systems_profile`), T117 (`kernel_admission`), T118 (`efficiency_benchmark`),
   T119 (`backend_qualification`).
+
+Evidence: surgery functions slice tensors passed to them and do not produce a loadable model.
+Gym evaluators score numbers the caller supplies; results carry an ``evidence`` field.
+qualify_vllm_serving_adapter, qualify_tensorrt_llm_adapter, run_end_to_end_systems_profile and
+run_weight_efficiency_benchmark are not implemented and raise NotImplementedError once their
+contract checks pass.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from typing import Any, Literal
 
 import torch
 
+from .m4_modalities import EvidenceBasis
 from .records import canonicalize, content_digest
 
 
@@ -50,7 +57,8 @@ class MlpSurgeryResult:
     down_proj: torch.Tensor
     updated_intermediate_size: int
     removed_parameters: int
-    reload_parity_verified: bool
+    # None: nothing is written to disk and reloaded.
+    reload_parity_verified: None
     preservation_class: Literal["experimental"]
 
 
@@ -83,15 +91,13 @@ def execute_mlp_width_surgery(
     new_inter = len(keep_indices)
     removed = 3 * (inter_dim - new_inter) * hidden_dim
 
-    reloaded_down = torch.tensor(new_down.tolist(), dtype=new_down.dtype)
-    reload_ok = bool(torch.equal(new_down, reloaded_down))
     return MlpSurgeryResult(
         gate_proj=new_gate,
         up_proj=new_up,
         down_proj=new_down,
         updated_intermediate_size=new_inter,
         removed_parameters=removed,
-        reload_parity_verified=reload_ok,
+        reload_parity_verified=None,
         preservation_class="experimental",
     )
 
@@ -215,6 +221,9 @@ class StructuralConstructorReceipt:
     max_parity_abs_diff: float
     exact_under_conditions: bool
     preconditions_checked: bool
+    # The identity is evaluated on the supplied matrix; no model graph is changed.
+    structural_graph_modified: Literal[False] = False
+    evidence: EvidenceBasis = "measured_on_fixture"
 
 
 def apply_registered_structural_constructor(
@@ -270,7 +279,7 @@ class QuantizedTensorArtifact:
     qweight: torch.Tensor
     scales: torch.Tensor
     zero_points: torch.Tensor
-    calibration_digest: str
+    calibration_digest: str | None
     max_roundtrip_abs_error: float
 
 
@@ -279,7 +288,7 @@ def quantize_weight_grouped(
     *,
     group_size: int = 4,
     bits: Literal[4, 8] = 8,
-    calibration_digest: str = "sha256:calib_v1",
+    calibration_digest: str | None = None,
     mutate_packed_without_scales: bool = False,
     allow_implicit_float_dequant_write: bool = False,
 ) -> QuantizedTensorArtifact:
@@ -326,6 +335,8 @@ class CompressionGraphAccounting:
     dense_flops_before: int
     executable_flops_after: int
     removed_flops: int
+    # FLOPs are 2 * parameters, not a count from a running model.
+    evidence: EvidenceBasis = "formula_estimate"
 
 
 def account_compression_graph_effects(
@@ -371,9 +382,11 @@ def account_compression_graph_effects(
 @dataclass(frozen=True)
 class EfficiencyGymVerdict:
     gym_kind: Literal["quantization_gym", "compression_gym", "generation_gym", "serving_gym"]
-    retained_quality_ok: bool
-    speed_or_memory_gain_verified: bool
+    # "verified" means the supplied numbers cleared the thresholds; see evidence. None: not evaluated.
+    retained_quality_ok: bool | None
+    speed_or_memory_gain_verified: bool | None
     details: dict[str, Any]
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_quantization_gym(
@@ -457,7 +470,7 @@ def run_serving_protocol_pytorch(
     is_mock_trace: bool = False,
     include_tail_latencies: bool = True,
 ) -> EfficiencyGymVerdict:
-    """Runs a real bounded PyTorch serving measurement separating cold start from warm steady state (T113)."""
+    """Times one matrix multiply with a ReLU, cold and warm. Not a serving run: no TTFT or TPOT (T113)."""
     if is_mock_trace:
         raise M5SurgeryError("MOCK_SERVING_TRACE_REJECTED", "mocked serving traces are rejected")
     if not include_tail_latencies:
@@ -478,13 +491,14 @@ def run_serving_protocol_pytorch(
 
     return EfficiencyGymVerdict(
         gym_kind="serving_gym",
-        retained_quality_ok=True,
-        speed_or_memory_gain_verified=True,
+        retained_quality_ok=None,
+        speed_or_memory_gain_verified=None,
         details={
             "cold_start_ns": cold_ns,
             "warm_p50_ns": warm_samples[len(warm_samples) // 2],
-            "warm_p99_ns": warm_samples[-1],
+            "warm_max_of_5_ns": warm_samples[-1],
         },
+        evidence="measured_on_fixture",
     )
 
 
@@ -504,20 +518,14 @@ def qualify_vllm_serving_adapter(
     authorized: bool = True,
     is_mocked_transport_only: bool = False,
 ) -> ServingAdapterQualification:
-    """Qualifies the vLLM serving adapter with explicit loopback binding and real runtime identity (T114)."""
+    """Not implemented: starts no server. Enforces the contract, then raises (T114). See serving.py."""
     if not authorized:
         raise M5SurgeryError("VLLM_UNAUTHORIZED", "vLLM launch requires explicit StudyContract authorization")
     if bind_host != "127.0.0.1":
         raise M5SurgeryError("NON_LOOPBACK_BIND_FORBIDDEN", "vLLM server must bind exclusively to 127.0.0.1 loopback")
     if is_mocked_transport_only:
         raise M5SurgeryError("MOCK_VLLM_NOT_QUALIFIED", "mocked HTTP transport does not qualify vLLM backend")
-    return ServingAdapterQualification(
-        adapter_id="vllm",
-        pinned_version=pinned_version,
-        loopback_bound=True,
-        compiled_engine_digest=_digest({"adapter": "vllm", "version": pinned_version}),
-        runtime_parity_verified=True,
-    )
+    raise NotImplementedError(f"vLLM {pinned_version} qualification is not implemented; no runtime was run")
 
 
 def qualify_tensorrt_llm_adapter(
@@ -527,18 +535,14 @@ def qualify_tensorrt_llm_adapter(
     fresh_runtime_parity_checked: bool = True,
     claim_verified_from_float_export_alone: bool = False,
 ) -> ServingAdapterQualification:
-    """Qualifies the TensorRT-LLM adapter; exported float checkpoints alone cannot verify the compiled engine (T115)."""
+    """Not implemented: builds no engine. Enforces the contract, then raises (T115)."""
     if claim_verified_from_float_export_alone or not engine_built or not fresh_runtime_parity_checked:
         raise M5SurgeryError(
             "UNVERIFIED_TRT_ENGINE",
             "an exported float checkpoint alone cannot verify a compiled TensorRT-LLM engine (T115)",
         )
-    return ServingAdapterQualification(
-        adapter_id="tensorrt_llm",
-        pinned_version=pinned_version,
-        loopback_bound=True,
-        compiled_engine_digest=_digest({"adapter": "tensorrt_llm", "version": pinned_version}),
-        runtime_parity_verified=True,
+    raise NotImplementedError(
+        f"TensorRT-LLM {pinned_version} qualification is not implemented; no engine was built"
     )
 
 
@@ -556,26 +560,13 @@ def run_end_to_end_systems_profile(
     python_performs_hashing_and_copy: bool = True,
     workloads_matched: bool = True,
 ) -> SystemsProfileComparison:
-    """Profiles end-to-end transaction phases and rejects comparisons that omit hashing or copies (T116)."""
+    """Not implemented: it used to return fixed timings. Enforces the contract, then raises (T116)."""
     if not (rust_performs_hashing_and_copy and python_performs_hashing_and_copy and workloads_matched):
         raise M5SurgeryError(
             "UNEQUAL_INTEGRITY_WORK_COMPARISON",
             "systems profile comparison must perform identical hashing, copy-on-write, and verification work (T116)",
         )
-    phases = {
-        "compile_validation_ns": 150_000,
-        "checkpoint_io_hashing_ns": 420_000,
-        "allocation_copy_ns": 90_000,
-        "kernel_execution_ns": 180_000,
-        "synchronization_ns": 20_000,
-        "export_reload_ns": 310_000,
-    }
-    return SystemsProfileComparison(
-        phase_breakdown_ns=phases,
-        rust_assisted_total_ns=sum(phases.values()),
-        python_reference_total_ns=int(sum(phases.values()) * 1.45),
-        equal_integrity_work_verified=True,
-    )
+    raise NotImplementedError("the end-to-end systems profile is not implemented; no timing was measured")
 
 
 @dataclass(frozen=True)
@@ -585,6 +576,7 @@ class CustomKernelAdmissionReceipt:
     isolated_speedup_ratio: float
     end_to_end_speedup_ratio: float
     reference_parity_passed: bool
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_custom_kernel_admission(
@@ -595,7 +587,7 @@ def evaluate_custom_kernel_admission(
     isolated_speedup_ratio: float,
     end_to_end_speedup_ratio: float,
 ) -> CustomKernelAdmissionReceipt:
-    """Admits custom Triton/CUDA kernels only when profiler-backed, parity-verified, and faster end-to-end (T117)."""
+    """Applies the admission rule to caller-supplied results; profiles and runs nothing (T117)."""
     if not profiler_bottleneck_proven or not reference_parity_passed:
         raise M5SurgeryError(
             "UNQUALIFIED_CUSTOM_KERNEL",
@@ -629,7 +621,7 @@ def run_weight_efficiency_benchmark(
     claim_speedup_from_compressed_file_size_only: bool = False,
     claim_complete_comparison: bool = True,
 ) -> WeightEfficiencyBenchReport:
-    """Runs WeightEfficiencyBench across matched reference arms and rejects file-size-only speedup claims (T118)."""
+    """Not implemented: no arm is run or compared. Enforces the contract, then raises (T118)."""
     if claim_speedup_from_compressed_file_size_only:
         raise M5SurgeryError(
             "FILE_SIZE_NOT_RUNTIME_SPEEDUP",
@@ -641,11 +633,7 @@ def run_weight_efficiency_benchmark(
             "INCOMPLETE_EFFICIENCY_REFERENCE_ARMS",
             f"missing reference arms {sorted(missing)} prevent a complete comparison claim",
         )
-    return WeightEfficiencyBenchReport(
-        arms_evaluated=evaluated_arms,
-        pareto_optimal_arms=evaluated_arms,
-        complete_comparison_claimed=(len(missing) == 0 and claim_complete_comparison),
-    )
+    raise NotImplementedError(f"WeightEfficiencyBench is not implemented; arms {evaluated_arms} were not run")
 
 
 @dataclass(frozen=True)
@@ -655,8 +643,9 @@ class RealBackendQualificationArtifact:
     repeats: int
     retained_quality_verified: bool
     reload_parity_verified: bool
-    measured_speedup_ratio: float
-    m5_measured_improvement_status: Literal["verified_gain", "no_gain", "not_run_code_ready_only"]
+    measured_speedup_ratio: float | None
+    m5_measured_improvement_status: Literal["reported_gain", "no_gain", "not_run_code_ready_only"]
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def qualify_real_backend_artifact(
@@ -665,12 +654,12 @@ def qualify_real_backend_artifact(
     hardware_name: str,
     run_executed: bool,
     repeats: int = 5,
-    retained_quality_verified: bool = True,
-    reload_parity_verified: bool = True,
-    measured_speedup_ratio: float = 1.15,
+    retained_quality_verified: bool | None = None,
+    reload_parity_verified: bool | None = None,
+    measured_speedup_ratio: float | None = None,
     claim_measured_gain_when_skipped: bool = False,
 ) -> RealBackendQualificationArtifact:
-    """Emits truthful real-backend qualification status; code readiness or skipped runs never claim measured gain (T119)."""
+    """Records results the caller reports for a backend run. Executes nothing, so a gain is only reported (T119)."""
     if not run_executed and claim_measured_gain_when_skipped:
         raise M5SurgeryError(
             "SKIPPED_RUN_GAIN_CLAIM_FORBIDDEN",
@@ -683,11 +672,16 @@ def qualify_real_backend_artifact(
             repeats=0,
             retained_quality_verified=False,
             reload_parity_verified=False,
-            measured_speedup_ratio=1.0,
+            measured_speedup_ratio=None,
             m5_measured_improvement_status="not_run_code_ready_only",
         )
-    status: Literal["verified_gain", "no_gain"] = (
-        "verified_gain"
+    if retained_quality_verified is None or reload_parity_verified is None or measured_speedup_ratio is None:
+        raise M5SurgeryError(
+            "MISSING_BACKEND_RESULTS",
+            "an executed run must report quality, reload parity and speedup; there are no defaults",
+        )
+    status: Literal["reported_gain", "no_gain"] = (
+        "reported_gain"
         if (retained_quality_verified and reload_parity_verified and measured_speedup_ratio > 1.02)
         else "no_gain"
     )
