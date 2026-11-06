@@ -46,8 +46,8 @@ def test_real_eleutherai_pythia_14m_weight_programming_if_cached() -> None:
     assert report.promotion_verification["status"] == "passed"
 
 
-def test_pythia_gym_task_learning_branches_and_holdout_verification() -> None:
-    """Tests the 3-Skill Algorithmic Gym (Parity, Boolean Logic, Inequality) on mini-pythia and EleutherAI/pythia-14m."""
+def test_mini_pythia_gym_task_learning_branches() -> None:
+    """Tests the 3-Skill Algorithmic Gym (Parity, Boolean Logic, Inequality) on mini-pythia."""
     mini = build_mini_pythia_model()
     mini_rep = run_pythia_gym_task_learning_study(mini, target_strength=85.0)
     assert len(mini_rep.branches) == 3
@@ -56,9 +56,13 @@ def test_pythia_gym_task_learning_branches_and_holdout_verification() -> None:
     assert mini_rep.branches[2].gym_dev_accuracy == 1.0
     assert mini_rep.branches[2].retention_accuracy == 1.0
 
+
+@pytest.mark.qualification
+def test_real_pythia_14m_gym_task_learning_branches_and_holdout_verification() -> None:
+    """The same Gym on EleutherAI/pythia-14m. Skips without the checkpoint; NF_QUALIFICATION=1 makes that a failure."""
     pythia_dir = Path("/tmp/pythia-14m")
     if not (pythia_dir / "model.safetensors").is_file():
-        return
+        pytest.skip("checkpoint not present at /tmp/pythia-14m")
     real_model = PythiaModel.from_pretrained_dir(pythia_dir, model_name="EleutherAI/pythia-14m")
     real_rep = run_pythia_gym_task_learning_study(real_model)
 
