@@ -33,6 +33,8 @@ This document maps the **Weight Programming Studio** product requirements (`WP-0
 | `flagship.py` | Pretrained repetition-loop repair, matched LoRA baseline comparison, independent replay bundles, and M3 readiness reporting (`T060`–`T063`). |
 | `m4_modalities.py` & `m4_ecosystems.py` | Research memory, circuit tracing, sparse features, Pareto frontiers, cross-gym interference, symbolic rule construction (`CG-09`), weight transfer (`CG-10`), training/RL baselines (`CG-11`), external gym adapters, and library reuse (`CG-13`). |
 | `m5_surgery.py` | Coupled MLP width slicing, GQA/RoPE attention head surgery, layer reorganization, structural constructors, group quantization, compression accounting, and serving/efficiency benchmarks (`T102`–`T119`). |
+| `export_formats.py` | Native HuggingFace Safetensors and **GGUF v3** (`F32`, `F16`, `Q8_0`) export and reload round-trip verification, block-quantized `Q8_0` matrix editing (`execute_quantized_q8_matrix_edit`), and sharded Safetensors `mmap` copy-on-write checkpoint loader (`ShardedMmapCheckpoint`, up to `64 GiB`). |
+| `patch_ux.py` | Layer-by-layer weight diff summaries (`diff_model_weights`: Frobenius, spectral $\ell_2$, and $\ell_\infty$ norms), cryptographic patch signing (`sign_patch_envelope`, `verify_patch_signature`), and one-command rollback (`create_rollback_handle`, `rollback_model_patch`). |
 
 ---
 
@@ -105,5 +107,34 @@ assert prd_report.all_experiments_succeeded is True
    - Pre-populated with `claude-4-5-sonnet` and `gpt-6-astra`.
    - Register custom LLM or local agent backends via `studio.agents.register_agent("my-custom-agent", extra_tool_schemas=[...])`.
 5. **`studio.ir_builder` (`WeightIRTransactionBuilder` in `neural_foundry.ir`)**:
-   - Compiles and executes `low_rank_update`, `add_delta`, `scale`, and `subspace_projection` operations through the Rust `nf-weight-ir` compiler and `nf-surgeon` transactional engine in a single call, returning a `CompiledTransactionReceipt` with verified reload parity.
+   - Compiles and executes `low_rank_update`, `add_delta`, `scale`, and `subspace_projection` operations across `f16`, `bf16`, `f32`, and `f64` tensors through the Rust `nf-weight-ir` compiler and `nf-surgeon` transactional engine in a single call, returning a `CompiledTransactionReceipt` with verified reload parity.
+
+---
+
+## 5. 20-Point Scientific & Engineering Assurance Matrix
+
+All 20 audit requirements are enforced across the Rust core, Python SDK, CLI, and CI workflows (`tests/test_audit_20_points.py`):
+
+| # | Assurance Gate | Enforcement & Implementation |
+| ---: | :--- | :--- |
+| **1** | **Fail-Closed Evals** | `neural_foundry.evals.run_eval` and `crates/nf-cli/src/evals.rs` reject unknown model IDs (`--model nonexistent`), missing checkpoints, or missing task/type scores (`MISSING_MODEL`, `MISSING_SCORE`); no fallback default scores exist. |
+| **2** | **Real Score Provenance** | Every evaluation run records `score_provenance` (`producer`, `harness`, `runtime`, `sampler`, `seed`, `measurement_mode`). Precomputed dictionaries are labeled `supplied_fact`; only live model/callable executions are labeled `measured_result`. |
+| **3** | **Single Readiness Source of Truth** | `generate_release_conformance_report` in `studio.py` derives `capability_gates` and `milestones` directly from `_native.capabilities_json()` and `_native.m2_capabilities_json()` (`crates/nf-core/src/capabilities.rs`) plus live probes. |
+| **4** | **CLI `verify` Parity** | `nf eval verify` / `weightctl eval verify` enforces all `required_eval_types`, `noop_blocked`, `robustness`, `efficiency`, `bounded_parameter_change_pct`, and `out_of_target_side_effect_non_regression` checks identically to Python `verify_promotion`. |
+| **5** | **Sampler & Runtime Identity in Hash** | Decoding settings (`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `max_tokens`, `seed`) and `runtime` (`pytorch_cpu`, `pytorch_cuda`, `llama.cpp`, `vllm`, `rust_cpu`, `rust_cuda`) are bound into `experiment_identity_digest` and `run_digest`. |
+| **6** | **Mandatory No-Op & Random Controls** | Every Gym study (`run_pythia_gym_task_learning_study`) compiles and runs `control_noop_null_edit` and `control_random_matched_budget` in Rust and reports `net_gain_over_noop` and `net_gain_over_random`. |
+| **7** | **Established Baselines & External Probing** | `probe_external_baseline_packages()` checks for installed `easyeditor`, `mergekit`, and `peft`, labels adapter receipts with `implementation_source`, and fails closed when `require_external_package=True` and the external library is absent. |
+| **8** | **Operand-Disjoint Holdout & Exposure Ledger** | `ReusableTaskGym.holdout_rules` use unseen numbers/operands/expressions (`dev_and_holdout_expression_disjoint=True`), sealed by a hash-chained `ExposureLedgerReceipt` proving `holdout_exposure_count_during_synthesis == 0`. |
+| **9** | **Pre-Registered Metrics & Multiplicity** | `pre_register_study_plan` and `evaluate_grouped_bootstrap_and_multiplicity` freeze the hypothesis family before execution and compute cluster-resampled (`group_id`) bootstrap CIs with Holm-Bonferroni multiplicity correction. |
+| **10** | **Out-of-Target Regression Suite** | `verify_promotion` enforces `out_of_target_side_effect_non_regression`, blocking promotion if retention or per-capability performance drops below policy floors. |
+| **11** | **Native `f16`/`bf16` & Quantized `Q8_0` Support** | `crates/nf-surgeon` and `crates/nf-weight-ir` natively load, validate, and edit IEEE-754 `f16` and `bf16` tensors with `f32`/`f64` accumulation; `export_formats.execute_quantized_q8_matrix_edit` supports 32-element block-quantized `Q8_0` editing. |
+| **12** | **Large & Sharded `mmap` Checkpoints** | `StateLoadLimits::large_model()` and `CompilerBounds::large_model()` scale up to `64 GiB`, and `ShardedMmapCheckpoint` (`export_formats.py`) provides zero-copy `mmap` reads and copy-on-write per-shard export for `model.safetensors.index.json`. |
+| **13** | **Transactional GPU Execution Path** | `gpu.execute_transactional_gpu_edit_and_eval` unites DLPack GPU/device execution with Rust Weight IR parity verification, smoke probes, and source-immutability rollback guarantees. |
+| **14** | **HF Safetensors & GGUF v3 Round-Trip** | `export_huggingface_safetensors`, `reload_and_verify_huggingface_safetensors`, `export_gguf_v3` (`F32`, `F16`, `Q8_0`), and `reload_and_verify_gguf_v3` rebuild edited checkpoints from disk and verify 100% behavioral preservation. |
+| **15** | **Live LLM-Provider Agent Harness** | `FrontierAgentProgrammer` supports live HTTP API calls (Anthropic/OpenAI) and pluggable `llm_transport`, recording turn-by-turn `AgentTurnTranscript` logs, token counts, and USD costs, and failing closed on budget overrun (`AgentBudgetExceededError`). |
+| **16** | **Feedback-Tool vs. Weight-Reading Contrast** | `compare_weight_reading_only_vs_feedback_enabled_agent` empirically demonstrates why weight-reading alone fails (`< 50%` holdout) whereas forward passes, activation probes, and practice sets reach `100%` holdout accuracy. |
+| **17** | **Sandboxed Edit Execution in CI** | `.github/workflows/m1.yml` and `.github/workflows/m2.yml` pull the pinned rootless/no-network container image and run `tests/test_sandbox_isolation.py`. |
+| **18** | **Flagship End-to-End Loop-Repair Study** | `flagship.run_flagship_loop_repair_study_and_publish_bundle` repairs a documented pathological repetition attractor (`1.0` $\to$ `0.0` loop rate) and exports signed patch envelopes, transcripts, exposure ledgers, and HF + GGUF v3 bundles. |
+| **19** | **Hosted CI Runners & Default Scratch** | Both `.github/workflows/m1.yml` and `.github/workflows/m2.yml` run on `ubuntu-latest` with valid `uv` installation, and all Rust tests default `KIROCREW_SCRATCH` to `std::env::temp_dir()` when unset. |
+| **20** | **Patch Diff, Signing, Audit & Rollback UX** | `patch_ux.py` and CLI `nf patch diff|sign|verify-signature|audit|rollback` (`weightctl patch ...`) provide layer-wise Frobenius/$\ell_2$/$\ell_\infty$ diffs, tamper-evident signatures, and one-command rollback. |
 

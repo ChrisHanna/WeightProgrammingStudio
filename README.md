@@ -171,16 +171,16 @@ studio.models.register_model(
 
 ## Measured Results on Open-Weight Models (`Pythia-14m`, `Pythia-31m`, `Qwen2`)
 
-Running the reusable `algorithmic_three_skill` Gym (teaching **Number Parity**, **Boolean Logic**, and **Inequality Comparison** simultaneously across 6 output classes) and comparing **Direct Contrastive Prefix-Nullspace Weight Programming (`0` gradient steps)** against a **25-step Gradient LoRA baseline (`CG-11`)** on identical data:
+Running the reusable `algorithmic_three_skill` Gym (teaching **Number Parity**, **Boolean Logic**, and **Inequality Comparison** simultaneously across 6 output classes) with **operand-disjoint sealed holdout expressions**, a cryptographic `ExposureLedgerReceipt` (`holdout_exposure_count_during_synthesis == 0`), **mandatory null (`control_noop`) and matched-budget random (`control_random_matched_budget`) controls**, and comparing **Direct Contrastive Prefix-Nullspace Weight Programming (`0` gradient steps)** against a **25-step Gradient LoRA baseline (`CG-11`)** on identical data:
 
-| Selected Model | Architecture | Total Params | Edited Params (`%`) | Gym Dev | Gym Prefix-Val | Unseen Holdout Eval | 25-Step LoRA Holdout | Skill Retention | Eval Gate |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| **`EleutherAI/pythia-14m`** | `GPTNeoXForCausalLM` | `14,067,712` | `65,536` (`0.47%`) | **`100%`** | **`100%`** | **`100.0%` (`12/12`)** | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`91.7%` (`11/12`)** | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`75.0%` (`9/12`)** | `0.0%` | **`100%`** | **`passed`** |
-| **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`83.3%` (`10/12`)** | `0.0%` | **`100%`** | **`passed`** |
+| Selected Model | Architecture | Total Params | Edited Params (`%`) | Gym Dev | Gym Prefix-Val | Unseen Disjoint Holdout | No-Op / Random Controls | 25-Step LoRA Holdout | Skill Retention | Eval Gate |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| **`EleutherAI/pythia-14m`** | `GPTNeoXForCausalLM` | `14,067,712` | `65,536` (`0.47%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
+| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
+| **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | **`passed`** |
+| **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | **`passed`** |
 
-See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming-studio.md) for the complete `WP-01`–`WP-24` requirement mapping and Priority Experiments `A`–`D` details.
+See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming-studio.md) for the complete `WP-01`–`WP-24` requirement mapping, the **20-Point Scientific & Engineering Assurance Matrix**, and Priority Experiments `A`–`D` details.
 
 ---
 
