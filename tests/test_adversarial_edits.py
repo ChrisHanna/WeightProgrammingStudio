@@ -475,11 +475,10 @@ def test_base_model_with_extra_tensors_is_refused(model: Toy) -> None:
         apply_edit_graph(other, graph)
 
 
-@xfail("D1 edit_plan.py: base_model_id is never compared with anything")
 def test_graph_declaring_a_different_base_model_id_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     graph["base_model_id"] = "some/other-model"
-    with pytest.raises(EditGraphError):
+    with pytest.raises(EditGraphError, match="base_model_id"):
         apply_edit_graph(model, graph)
 
 

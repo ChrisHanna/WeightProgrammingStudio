@@ -544,6 +544,9 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
             total += len(operand["data_b64"])
     if total > EDIT_GRAPH_MAX_OPERAND_BYTES:
         raise EditGraphError("Graph operands exceed the size limit")
+    declared_id, actual_id = graph.get("base_model_id"), str(getattr(base_model, "model_name", ""))
+    if declared_id != actual_id:
+        raise EditGraphError(f"Graph declares base_model_id {declared_id!r}, but this base model is {actual_id!r}")
     base = _extract_model_state_tensors(base_model)
     # The per-step digests only cover edited tensors, so a base differing elsewhere needs this check.
     if tensor_state_digest(base) != graph.get("base_state_digest"):
@@ -623,19 +626,27 @@ def verify_exported_candidate(checkpoint_dir: str | Path, expected_state_digest:
     return actual
 
 
+def _declared_base_model_id(document: Any) -> str:
+    patch = document.get("patch") if isinstance(document, Mapping) else None
+    return str(patch.get("base_model_id", "")) if isinstance(patch, Mapping) else ""
+
+
 def _replay_main(argv: Sequence[str] | None = None) -> int:
     """Replay a signed graph from only a base checkpoint, the envelope and a public key."""
     parser = argparse.ArgumentParser(prog="python -m neural_foundry.edit_plan", description=_replay_main.__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--envelope", required=True)
     parser.add_argument("--public-key-file", required=True)
+    parser.add_argument("--base-model-id", help="The model ID you expect this checkpoint to be; the graph must declare the same one")
     parser.add_argument("--export-dir", help="Also export the replayed candidate as f64 safetensors and verify it")
     args = parser.parse_args(argv)
 
     from .pythia import PythiaModel
 
-    model = PythiaModel.from_pretrained_dir(args.checkpoint)
     envelope = json.loads(Path(args.envelope).read_text(encoding="utf-8"))
+    # A directory doesn't know its model ID, so without --base-model-id the graph's own label is taken as given.
+    # What binds the replay to these weights in that case is base_state_digest.
+    model = PythiaModel.from_pretrained_dir(args.checkpoint, model_name=args.base_model_id or _declared_base_model_id(envelope))
     candidate = apply_signed_edit_graph(model, envelope, public_key=Path(args.public_key_file).read_text(encoding="utf-8").strip())
     report = {
         "plan_digest": candidate.plan_digest,
