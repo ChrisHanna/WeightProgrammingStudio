@@ -9,6 +9,7 @@ import pytest
 import torch
 from neural_foundry.m4_ecosystems import (
     CommunityGymPackage,
+    TrainedProposerArtifact,
     build_proposer_dataset,
     enforce_private_gym_policy,
     evaluate_continual_protocol,
@@ -141,6 +142,7 @@ def test_circuit_tracing_adapter_maps_real_fixture_and_rejects_mocks() -> None:
     assert len(trace.nodes) == 2
     assert len(trace.edges) == 2
     assert trace.origin == "measured_result"
+    assert trace.external_package_executed is False
 
     with pytest.raises(M4ContractError) as exc_info:
         run_circuit_tracing_adapter(
@@ -234,7 +236,8 @@ def test_mechanism_confirmation_separates_behavioral_repair_from_causal_explanat
     )
     assert split_verdict.behavioral_repair_confirmed is True
     assert split_verdict.mechanism_explanation_confirmed is False
-    assert split_verdict.behavior_support_grade == "independently_confirmed_under_protocol"
+    assert split_verdict.behavior_support_grade == "suggestive"
+    assert split_verdict.evidence == "caller_supplied"
     assert split_verdict.mechanism_support_grade == "contradicted"
 
     # Negative: conflating behavior as mechanism proof
@@ -347,8 +350,8 @@ def test_rule_construction_compiles_exact_relu_weights_with_independent_oracle()
     assert art.normal_pass_rate == 1.0
     assert art.boundary_pass_rate == 1.0
     assert art.invalid_rejected_properly is True
-    assert art.integrated_gym_passed is True
-    assert art.reload_parity_passed is True
+    assert art.integrated_gym_passed is None
+    assert art.reload_parity_passed is None
 
     with pytest.raises(M4ContractError) as exc_info:
         construct_algorithmic_relu_rule(independent_oracle=ref_oracle, share_constructor_as_oracle=True)
@@ -406,6 +409,7 @@ def test_mapped_transfer_permutation_alignment_fitted_alignment_and_transfer_pro
     assert rep.functional_transfer_verified is True
     assert rep.aligned_transfer_mse < 1e-10
     assert rep.safe_unaligned_copy_mse > rep.aligned_transfer_mse
+    assert rep.retention_preserved is None
 
     with pytest.raises(M4ContractError) as exc_info:
         execute_mapped_weight_transfer(
@@ -432,7 +436,8 @@ def test_lora_baseline_sft_baseline_distillation_baseline_and_rl_baseline() -> N
     # T078: LoRA baseline
     _, lora_rec = run_lora_baseline(init_w, x, y, authorized_in_contract=True, rank=2, steps=20)
     assert lora_rec.eval_loss_after < lora_rec.eval_loss_before
-    assert lora_rec.reload_parity_verified is True
+    assert lora_rec.reload_parity_verified is None
+    assert lora_rec.evidence == "measured_on_fixture"
     with pytest.raises(M4ContractError):
         run_lora_baseline(init_w, x, y, authorized_in_contract=False)
 
@@ -478,6 +483,8 @@ def test_memory_methods_and_continual_protocols() -> None:
     )
     assert mem.production_history == "hybrid"
     assert mem.static_export_self_contained is True
+    assert mem.reset_between_eval_items is None
+    assert mem.evidence == "caller_supplied"
 
     with pytest.raises(M4ContractError):
         verify_external_memory_method(
@@ -494,7 +501,8 @@ def test_memory_methods_and_continual_protocols() -> None:
         state_growth_bytes=0,
     )
     assert cont.retention_score > 0.80
-    assert cont.isolated_episodes is True
+    assert cont.recovery_steps is None
+    assert cont.evidence == "caller_supplied"
 
     with pytest.raises(M4ContractError):
         evaluate_continual_protocol(
@@ -511,6 +519,9 @@ def test_nemo_adapter_verifiers_adapter_gymnasium_adapter_private_gym_policy_mea
     # T084: NeMo-Gym
     nemo = run_nemo_adapter(prompts=["2+2", "3+5"], model_fn=lambda p: 1.0)
     assert nemo.replay_deterministic is True
+    assert nemo.sandbox_used is False
+    assert nemo.external_package_executed is False
+    assert nemo.task_accuracy is None
     with pytest.raises(M4ContractError):
         run_nemo_adapter(prompts=["2+2"], model_fn=lambda p: 1.0, is_mock_only=True)
 
@@ -520,6 +531,9 @@ def test_nemo_adapter_verifiers_adapter_gymnasium_adapter_private_gym_policy_mea
     )
     assert ver.task_accuracy == pytest.approx(0.5)
     assert ver.mean_reward != ver.task_accuracy
+    assert ver.sandbox_used is False
+    assert ver.replay_deterministic is None
+    assert ver.evidence == "caller_supplied"
     with pytest.raises(M4ContractError):
         run_verifiers_adapter(
             rollouts=[{"format_reward": 1.0, "correctness_binary": 0.0}],
@@ -529,6 +543,9 @@ def test_nemo_adapter_verifiers_adapter_gymnasium_adapter_private_gym_policy_mea
     # T086: Gymnasium
     gym_rec = run_gymnasium_adapter(action_bridge=lambda state, step: -0.25 * state)
     assert gym_rec.mean_reward > 0.0
+    assert gym_rec.external_package_executed is False
+    calls = iter(range(1000))
+    assert run_gymnasium_adapter(action_bridge=lambda state, step: float(next(calls))).replay_deterministic is False
     with pytest.raises(M4ContractError):
         run_gymnasium_adapter(action_bridge=None)
 
@@ -552,6 +569,7 @@ def test_nemo_adapter_verifiers_adapter_gymnasium_adapter_private_gym_policy_mea
     m_rep = evaluate_measurement_research(
         {"gym_a": [1.0, 0.0, 1.0], "gym_b_dup": [1.0, 0.0, 1.0], "gym_c": [0.0, 1.0, 1.0]},
         shortcut_suspected_gyms=("gym_shortcut",),
+        human_approval_recorded=True,
     )
     assert m_rep.redundant_pairs == (("gym_a", "gym_b_dup"),)
     with pytest.raises(M4ContractError):
@@ -617,6 +635,19 @@ def test_library_reuse_strategy_retrieval_cross_model_protocol_proposer_dataset_
     assert recs[0].supporting_studies == 1
     assert recs[0].contradicting_studies == 1
     assert recs[0].is_accepted_edit is False
+    only_success = retrieve_repair_strategies(
+        [{"strategy_id": "s", "architecture_family": "f", "failure_feature": "c", "outcome": "success", "cost_cpu_ms": 1}],
+        architecture_family="f",
+        failure_feature="c",
+    )
+    assert only_success[0].evidence_grade == "suggestive"
+    with pytest.raises(M4ContractError) as exc_info:
+        retrieve_repair_strategies(
+            [{"strategy_id": "s", "architecture_family": "f", "failure_feature": "c", "outcome": "success"}],
+            architecture_family="f",
+            failure_feature="c",
+        )
+    assert exc_info.value.code == "MISSING_STRATEGY_COST"
 
     # T093: Cross-model protocol
     cm = evaluate_cross_model_protocol(
@@ -631,6 +662,7 @@ def test_library_reuse_strategy_retrieval_cross_model_protocol_proposer_dataset_
         target_adaptation_cost_ms=200,
     )
     assert cm.sample_efficiency_improved is True
+    assert cm.evidence == "caller_supplied"
 
     # T094, T095, T096: Proposer dataset, training, and learned proposer evaluation
     ds = build_proposer_dataset(
@@ -642,19 +674,33 @@ def test_library_reuse_strategy_retrieval_cross_model_protocol_proposer_dataset_
     )
     assert ds.train_count == 1
     assert ds.deduplicated_dropped == 1
-    trained_prop = run_proposer_training_study(ds, training_study_id="study-prop-v1")
+    with pytest.raises(NotImplementedError):
+        run_proposer_training_study(ds, training_study_id="study-prop-v1")
+    with pytest.raises(M4ContractError):
+        run_proposer_training_study(
+            ds, training_study_id="study-prop-v1", triggered_implicitly_inside_direct_study=True
+        )
     eval_prop = evaluate_learned_proposer_inference(
-        trained_prop,
+        TrainedProposerArtifact(
+            proposer_artifact_digest="sha256:fixture",
+            training_study_id="fixture",
+            dataset_digest=ds.dataset_digest,
+            steps=0,
+            compute_flops=0,
+        ),
         ir_valid_rate=0.98,
         learned_evals_to_success=3,
         no_history_evals_to_success=9,
         random_evals_to_success=14,
     )
     assert eval_prop.proposal_origin == "learned_proposer"
+    assert eval_prop.evidence == "caller_supplied"
 
     # T097 & T098: Transfer benchmark & research source records
-    tb = run_transfer_benchmark(scope_label="same_architecture", is_synthetic_permutation=True)
-    assert tb.aligned_direct_mse < tb.safe_unaligned_mse
+    with pytest.raises(NotImplementedError):
+        run_transfer_benchmark(scope_label="same_architecture", is_synthetic_permutation=True)
+    with pytest.raises(M4ContractError):
+        run_transfer_benchmark(scope_label="cross_family", is_synthetic_permutation=True)
     src = ingest_research_source_record(
         source_id="openai.circuit_sparsity.2025",
         version="1.0",
@@ -662,10 +708,22 @@ def test_library_reuse_strategy_retrieval_cross_model_protocol_proposer_dataset_
         claim_summary="Sparse bridges align features",
     )
     assert src.support == "suggestive"
+    declared = ingest_research_source_record(
+        source_id="s",
+        version="1.0",
+        license_spdx="Apache-2.0",
+        claim_summary="c",
+        locally_reproduced_under_protocol=True,
+    )
+    assert declared.origin == "supplied_fact"
+    assert declared.support == "suggestive"
+    assert declared.local_reproduction_declared is True
 
     # T099: Full M4 feature acceptance gate
     acceptance = run_m4_feature_acceptance_suite()
     assert acceptance.all_gates_passed is True
+    assert acceptance.qualified_engines == ()
+    assert acceptance.real_model_evaluated is False
     assert acceptance.cg09_construction_passed is True
     assert acceptance.cg10_transfer_passed is True
     assert acceptance.cg11_methods_and_costs_passed is True

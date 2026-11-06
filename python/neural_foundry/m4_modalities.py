@@ -1,5 +1,8 @@
 """M4 Interpretability, Multi-Objective Search, Rule Construction, and Weight Transfer (T065–T077).
 
+Evidence: everything here runs on small tensors supplied by the caller, or scores numbers the
+caller supplies. Results carry an ``evidence`` field. Nothing here is a real-model measurement.
+
 Implements:
 - T065 (`research_memory`): Access-controlled research memory queries preserving evidence labels
   and preventing holdout/private leakage or claim-to-fact promotion.
@@ -33,6 +36,14 @@ SupportGrade = Literal[
     "independently_confirmed_under_protocol",
     "contradicted",
     "inconclusive",
+]
+# How a result was obtained. Only "measured_on_fixture" means this code computed the value, and
+# then only on the small tensors it was given.
+EvidenceBasis = Literal[
+    "measured_on_fixture",
+    "caller_supplied",
+    "formula_estimate",
+    "builtin_fixture_stub",
 ]
 
 
@@ -177,6 +188,10 @@ class CircuitTraceArtifact:
     edges: tuple[tuple[str, str, float], ...]
     origin: EvidenceOrigin
     support: SupportGrade
+    # Attribution is computed here for a two-layer ReLU fixture. The adapter_id names a tracer
+    # that is not imported or run.
+    external_package_executed: Literal[False] = False
+    evidence: EvidenceBasis = "measured_on_fixture"
 
 
 SUPPORTED_TRACER_VERSIONS: dict[str, set[str]] = {
@@ -193,7 +208,7 @@ def run_circuit_tracing_adapter(
     probe_input: torch.Tensor,
     is_mocked_trace: bool = False,
 ) -> CircuitTraceArtifact:
-    """Executes real local circuit tracing over a 2-layer fixture and maps to canonical schema (T066)."""
+    """Computes |w2| * activation attribution for a 2-layer fixture; runs no external tracer (T066)."""
     if is_mocked_trace:
         raise M4ContractError(
             "MOCK_TRACE_REJECTED",
@@ -232,9 +247,7 @@ def run_circuit_tracing_adapter(
         )
         edges.append((node_site, "layers.1.readout", attrib))
 
-    model_digest = _digest(
-        {"w1_norm": round(float(w1.norm().item()), 8), "w2_norm": round(float(w2.norm().item()), 8)}
-    )
+    model_digest = _digest({"w1": w1.tolist(), "w2": w2.tolist()})
     probe_digest = _digest({"probe": [round(float(v), 8) for v in x.tolist()], "out": round(float(out.sum().item()), 8)})
     return CircuitTraceArtifact(
         adapter_id=adapter_id,
@@ -345,6 +358,7 @@ class MechanismConfirmationVerdict:
     alternative_explanation_eliminated: bool
     behavior_support_grade: SupportGrade
     mechanism_support_grade: SupportGrade
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def evaluate_mechanism_confirmation(
@@ -357,7 +371,7 @@ def evaluate_mechanism_confirmation(
     competing_alternative_effect: float,
     claim_mechanism_from_behavior_only: bool = False,
 ) -> MechanismConfirmationVerdict:
-    """Evaluates causal localization claims separately from behavioral improvements (T068)."""
+    """Scores caller-supplied effect sizes; runs no intervention, so support never exceeds suggestive (T068)."""
     if claim_mechanism_from_behavior_only:
         raise M4ContractError(
             "MECHANISM_BEHAVIOR_CONFLATION",
@@ -377,9 +391,9 @@ def evaluate_mechanism_confirmation(
         causal_specificity_ratio=specificity,
         reserved_challenge_passed=reserved_ok,
         alternative_explanation_eliminated=alt_eliminated,
-        behavior_support_grade="independently_confirmed_under_protocol" if behavioral_ok else "contradicted",
+        behavior_support_grade="suggestive" if behavioral_ok else "contradicted",
         mechanism_support_grade=(
-            "independently_confirmed_under_protocol"
+            "suggestive"
             if mechanism_ok
             else ("contradicted" if not reserved_ok else "inconclusive")
         ),
@@ -410,6 +424,8 @@ class ParetoFrontierReport:
     verified_frontier_ids: tuple[str, ...]
     infeasible_rejected_ids: tuple[str, ...]
     uncertain_nondominated_pairs: tuple[tuple[str, str], ...]
+    # Objectives and verified_on_holdout are copied from the caller's candidates.
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def _confidently_dominates(a: ParetoCandidate, b: ParetoCandidate) -> bool:
@@ -502,6 +518,7 @@ class InterferenceMatrixCell:
     interaction_synergy: float | None
     classification: Literal["synergy", "interference", "additive", "incomplete_missing_cell"]
     causal_circuit_sharing_proven: bool
+    evidence: EvidenceBasis = "caller_supplied"
 
 
 def analyze_gym_interference(
@@ -588,8 +605,10 @@ class ConstructedRuleArtifact:
     normal_pass_rate: float
     boundary_pass_rate: float
     invalid_rejected_properly: bool
-    integrated_gym_passed: bool
-    reload_parity_passed: bool
+    # None: no gym is run and nothing is written to disk and reloaded.
+    integrated_gym_passed: None
+    reload_parity_passed: None
+    evidence: EvidenceBasis = "measured_on_fixture"
 
 
 def construct_algorithmic_relu_rule(
@@ -664,12 +683,6 @@ def construct_algorithmic_relu_rule(
     except ValueError:
         invalid_rejected = True
 
-    # Reload parity check via serialized state roundtrip
-    serialized = {"w1": w1.tolist(), "w2": w2.tolist()}
-    reloaded_w1 = torch.tensor(serialized["w1"], dtype=torch.float64)
-    reloaded_w2 = torch.tensor(serialized["w2"], dtype=torch.float64)
-    reload_ok = bool(torch.equal(w1, reloaded_w1) and torch.equal(w2, reloaded_w2))
-
     return ConstructedRuleArtifact(
         rule_id=rule_id,
         derivation_steps=(
@@ -684,8 +697,8 @@ def construct_algorithmic_relu_rule(
         normal_pass_rate=normal_hits / len(normal_cases),
         boundary_pass_rate=boundary_hits / len(boundary_cases),
         invalid_rejected_properly=invalid_rejected,
-        integrated_gym_passed=(normal_hits == len(normal_cases) and boundary_hits == len(boundary_cases)),
-        reload_parity_passed=reload_ok,
+        integrated_gym_passed=None,
+        reload_parity_passed=None,
     )
 
 
@@ -837,9 +850,11 @@ class MappedTransferReport:
     noop_control_mse: float
     safe_unaligned_copy_mse: float
     aligned_transfer_mse: float
-    retention_preserved: bool
+    # None: no retention task is evaluated.
+    retention_preserved: None
     functional_transfer_verified: bool
     mapping_receipt_digest: str
+    evidence: EvidenceBasis = "measured_on_fixture"
 
 
 def execute_mapped_weight_transfer(
@@ -902,7 +917,7 @@ def execute_mapped_weight_transfer(
         noop_control_mse=noop_mse,
         safe_unaligned_copy_mse=unaligned_mse,
         aligned_transfer_mse=aligned_mse,
-        retention_preserved=True,
+        retention_preserved=None,
         functional_transfer_verified=functional_ok,
         mapping_receipt_digest=_digest(
             {

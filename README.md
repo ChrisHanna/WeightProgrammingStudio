@@ -1,22 +1,29 @@
 # Weight Programming Studio (`neural_foundry`)
 
-**Enterprise & Open-Source Platform for Agent-Native Weight-Space Programming, Pluggable Task Gyms, and Verifiable Model Editing**  
-*License: Apache-2.0 · 9-Crate Rust Transactional Kernel + Python Studio SDK + `weightctl` CLI*
+**A research toolkit for programmatic, verifiable weight edits on open-weight models. Most of it has only been tested on fixtures. See [Limitations](#limitations) and the [qualification matrix](docs/qualification-matrix.md).**  
+*License: Apache-2.0 · 9-crate Rust kernel + Python SDK + `weightctl` CLI*
 
-**Weight Programming Studio** lets researchers, engineers, and frontier AI agents (`Claude`, `GPT-6`, or custom LLMs) inspect, understand, modify, merge, and verify the weights of open-weight neural networks (`Pythia` / `GPT-NeoX`, `Qwen2`, `Llama`, `Mistral`, `Gemma`, or custom Safetensors models) **without conventional gradient training** — and compare those edits head-to-head against LoRA, SFT, distillation, and model-merging baselines under a single cryptographic evaluation firewall.
+**Weight Programming Studio** lets researchers and agents inspect, edit, merge and check the weights of open-weight networks without gradient training, and compare those edits with baselines. Inference and editing work for GPT-NeoX/Pythia and dense Qwen2 only. Other architectures can be inspected but not edited.
+
+Each capability below has one of these labels, defined in the [qualification matrix](docs/qualification-matrix.md):
+
+- **verified**: a passing test at the stated scope. No model architecture has reached this level.
+- **fixture-only**: works on a small built-in or synthetic model or tensor, which proves the software path only.
+- **experimental**: the code exists, but no qualification run has passed.
+- **unsupported**: refused or not implemented.
 
 ---
 
 ## Why Weight Programming Studio?
 
-Most model-editing and merging scripts mutate PyTorch tensors in-place inside the same Python process that holds the benchmark answers. **Weight Programming Studio** turns weight-space programming into a verifiable engineering discipline:
+Most model-editing scripts change tensors in the same process that holds the benchmark answers. This project separates proposing an edit from executing and evaluating it. What's implemented today:
 
-1. **Pluggable Open-Weight Models (`studio.models`)** — Load `EleutherAI/pythia-14m`, `EleutherAI/pythia-31m`, `Qwen2`, `Llama`, `Mistral`, `Gemma`, or register any custom Safetensors checkpoint via architecture-agnostic site profiles (`ArchitectureSiteProfile`).
-2. **Reusable Task Gyms (`studio.gyms`)** — Give agents and solvers structured experimentation environments with separated development, prefix-invariance validation, and skill-retention splits (`from_rules`, `NeMo-Gym`, `Verifiers`, `Gymnasium`).
-3. **Extensible Weight Editors & Mergers (`studio.methods`)** — Run built-in methods (`rome`, `memit`, `alphaedit`, `contrastive_subspace`, `task_arithmetic`, `ties`, `dare`, `mlp_surgery`, `attention_surgery`, `lora_baseline`) or register your own algorithm with `@studio.methods.register(...)` backed by `WeightIRTransactionBuilder`.
-4. **Interchangeable Frontier Agents (`studio.agents`)** — Run `claude-4-5-sonnet`, `gpt-6-astra`, or custom LLM agents over identical tool schemas with live HTTP/callable transport, token/USD budgets, hypothesis tracking, duplicate-proposal blocking, failed-experiment memory, and singular-component ablation.
-5. **Rust-Enforced Weight IR & Sealed Evaluation Firewall (`nf-weight-ir`, `nf-surgeon`, `studio.evals`)** — Every weight modification (`f16`, `bf16`, `f32`, `f64`, or `Q8_0`) is compiled into a typed, content-addressed Weight IR plan, executed copy-on-write in Rust with snapshot reload parity, compared against mandatory **no-op and matched-budget random controls**, and verified against **operand-disjoint sealed holdout suites** that agents cannot inspect or game.
-6. **Production Export & "Git for Weights" UX (`export_formats`, `patch_ux`, `weightctl patch`)** — Export edited checkpoints to **HuggingFace Safetensors** and **GGUF v3** (`F32`, `F16`, `Q8_0`), verify 100% behavioral survival on reload, inspect layer-wise $\|\Delta W\|_F / \|\Delta W\|_2 / \|\Delta W\|_\infty$ diffs, cryptographically sign patches, and roll back in one command.
+1. **Models (`studio.models`), experimental on Pythia, fixture-only on `nf/mini-pythia-fixture` and `Qwen/qwen2-dense-mini`.** `Qwen/qwen2-dense-mini` is a small synthetic fixture, not a Qwen release. The catalog loads Pythia only from `/tmp/pythia-14m` and `/tmp/pythia-31m`. Llama, Mistral and Gemma have site profiles and intake but no inference or editing.
+2. **Task gyms (`studio.gyms`), fixture-only.** Separate development, prefix-validation and retention splits. See [Limitations](#limitations) for the external gym adapters.
+3. **Editors and mergers (`studio.methods`), fixture-only.** `rome`, `memit`, `alphaedit`, `task_arithmetic`, `ties` and `dare` are local reimplementations, and their receipts say so. They aren't the EasyEdit or mergekit packages.
+4. **Agents (`studio.agents`), experimental.** The tool harness, budgets and transcripts are tested with custom transports. The agent IDs are labels. Without a live provider a session is scripted or local, and its `transport_mode` and `session_kind` record that. This audit made no live provider call.
+5. **Rust Weight IR and evaluation separation (`nf-weight-ir`, `nf-surgeon`, `studio.evals`), verified for f32/f64 tensor operations.** Differential tests compare native kernels with PyTorch. f16, bf16 and Q8_0 are fixture-only. Controls and holdout checks run in gym studies, but the holdout isn't process-isolated from Python studies.
+6. **Export and patch records (`export_formats`, `patch_ux`, `weightctl patch`), fixture-only.** Safetensors and GGUF v3 (`F32`, `F16`, `Q8_0`) round-trip through this package's own reader. Loading in `llama.cpp` or Ollama isn't verified here. A reload check compares only a few probe prompts.
 
 ```mermaid
 flowchart LR
@@ -243,7 +250,7 @@ with export_formats.ShardedMmapCheckpoint("/path/to/sharded_ckpt", max_checkpoin
 ```
 
 ### 2. Rebuild & Export Round-Trip: HuggingFace Safetensors & `GGUF v3` (`F32`, `F16`, `Q8_0`)
-Every edited model can be exported to standard **HuggingFace Safetensors** (`config.json` + `model.safetensors`) and **GGUF v3** (for `llama.cpp` / `Ollama`), reloaded into a fresh model instance, and verified to preserve 100% of its behavioral gain:
+Export to Safetensors and GGUF v3, reload through this package, and compare answers on the probe prompts you pass in. **Fixture-only:** a match on a few prompts is not a claim of full behavioural equivalence.
 
 ```python
 from pathlib import Path
@@ -273,7 +280,7 @@ assert gguf_receipt.gain_preserved_after_rebuild is True
 ```
 
 ### 3. Patch Diffs, Cryptographic Signing & Instant Rollback ("Git for Weights")
-Inspect human-readable layer diffs ($\|\Delta W\|_F$, spectral $\|\Delta W\|_2$, and $\|\Delta W\|_\infty$), cryptographically sign patches, detect tampering, and roll back to the exact pre-edit parameter digest:
+Inspect layer diffs, sign a patch record and roll back. **Fixture-only.** The signature authenticates the record, and the public key has to be obtained out of band.
 
 ```python
 from neural_foundry import patch_ux
@@ -299,7 +306,7 @@ assert rb_receipt["rollback_verified"] is True
 ```
 
 ### 4. Live LLM Agent Harness, Token Budgets & Feedback Tools vs. Blind Weight-Reading
-Connect `FrontierAgentProgrammer` to a live Anthropic/OpenAI HTTP endpoint or custom `llm_transport` with strict token/USD budget enforcement, and empirically verify why live feedback tools (`run_forward_pass`, `probe_activations`, `evaluate_practice_gym_split`) are essential compared to static weight-reading alone:
+Connect `FrontierAgentProgrammer` to a provider or a custom `llm_transport` with token and USD budgets. **Experimental:** the harness is tested with custom transports only. The comparison below is a fixture experiment. Without holdout leakage the fixture reaches `4/6` with feedback tools, so it doesn't show that they're necessary:
 
 ```python
 from neural_foundry import prd_adapters, pythia
@@ -316,9 +323,9 @@ agent = prd_adapters.FrontierAgentProgrammer(
 session = agent.run_reasoning_loop_repair_experiment(model, enable_feedback_tools=True)
 print(f"Turns: {len(session.transcript)} | Cost: ${session.total_cost_usd:.4f} | Holdout: {session.held_out_accuracy_after:.1%}")
 
-# B. Empirical ablation: Weight-Reading Alone (< 50% holdout) vs. Feedback-Tool Access (100% holdout)
+# B. Fixture comparison: read the result, don't assume one
 comparison = prd_adapters.compare_weight_reading_only_vs_feedback_enabled_agent(model)
-assert comparison.feedback_tools_proven_necessary is True
+print(comparison.feedback_tools_proven_necessary, comparison.feedback_gain_over_weight_reading_only)
 ```
 
 ### 5. Fail-Closed Evals, Real Provenance, Pre-Registration & Multiplicity-Corrected Bootstrap CIs
@@ -367,16 +374,16 @@ assert cand_run["evidence_label"]["origin"] == "measured_result"
 ### 6. Reproducible Flagship Loop-Repair Study Bundle
 Inject a repetition defect into a model you supply, attempt a repair using public rules only, and publish the measured outcome, including a failed one. The defect is created by the study, so results don't describe naturally occurring failures.
 
-**Current status: partial.** `repair.py` finds the attractor from predictions alone and removes it, measured on six sealed prompts:
+**Status: experimental, and it fails on real models.** `repair.py` finds the attractor from predictions alone and removes it, measured on six sealed prompts:
 
-| Model | Loop rate | Agreement with clean model (defective / repaired / sham) | Retention | Gate |
-| :--- | :--- | :--- | ---: | :--- |
-| `nf/mini-pythia-fixture` | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `100%` | passed |
-| `Qwen/qwen2-dense-mini` | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `60%` | failed |
-| `Pythia-14m` | `1.0` -> `0.0` | `33%` / `50%` / `33%` | `60%` | failed |
-| `Pythia-31m` | `1.0` -> `0.33` | `0%` / `17%` / `0%` | `20%` | failed, scan |
+| Model | Kind | Loop rate | Agreement with clean model (defective / repaired / sham) | Retention | Gate | Last re-run |
+| :--- | :--- | :--- | :--- | ---: | :--- | :--- |
+| `nf/mini-pythia-fixture` | fixture | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `100%` | passed | reproduced in this audit |
+| `Qwen/qwen2-dense-mini` | fixture | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `60%` | failed | reproduced in this audit |
+| `Pythia-14m` | real | `1.0` -> `0.0` | `33%` / `50%` / `33%` | `60%` | failed | not reproduced: run did not finish |
+| `Pythia-31m` | real | `1.0` -> `0.33` | `0%` / `17%` / `0%` | `20%` | failed, scan | not re-run |
 
-On real models the defect is suppressed but normal behaviour is not restored.
+The real-model rows have no stored run record. The defect is suppressed, but normal behaviour isn't restored.
 
 ```python
 from neural_foundry import flagship, pythia
@@ -456,27 +463,38 @@ tool_info = studio.editor_tool.call_tool("nf_inspect_model", {"model": "Qwen/qwe
 
 ## Real-Model Gap, Ecosystem Adoption & Supply-Chain Trust Layer
 
-1. **Checkpoint Intake (`pretrained.PRETRAINED_ARCHITECTURE_REGISTRY`)** — Qwen3, Llama, Gemma, Gemma2 and Mistral checkpoints can be inspected. Inference and editing are implemented for GPT-NeoX and Qwen2 only; other architectures are refused. Tensors load into memory as `float64`, so large checkpoints need several times their file size in RAM.
-2. **Dtypes & Stated `RoundingContract` (`ir.RoundingContract`, `export_formats`)** — `bf16`, `f16`, FP8 and GGUF `Q8_0`/`Q4_0`. `nf_q4` is a package-only format, and standard GGUF `Q4_K` is not supported.
-3. **Ecosystem Plugins & Agent Editor Tool Interface (`studio.plugins`, `studio.editor_tool`)** — Wrap any Studio model in a `TransformerLens`-compatible `HookedTransformer` adapter (`run_with_cache`, `run_with_hooks`), import `lm-eval` and `Inspect AI` suites, export Hugging Face Hub model-card bundles (`export_huggingface_hub_bundle`), or expose `studio.editor_tool.tool_schemas()` (`nf_inspect_model`, `nf_trace_layers`, `nf_repair_model`, `nf_verify_patch`) directly to Claude Code, Codex, or MCP agent loops.
-4. **Open Patch Format v1 and Anomaly Scan (`patch_ux`, `nf verify`)** — A signed record of an edit: digests, norms, evaluation provenance and scan result. It authenticates the record, but doesn't contain the weights change, so it can't apply or reproduce the edit. The scan is a sanity check, not proof that a patch has no backdoor. `nf verify` requires `--pubkey`.
+1. **Checkpoint intake (`pretrained.PRETRAINED_ARCHITECTURE_REGISTRY`), experimental.** Qwen3, Llama, Gemma, Gemma2 and Mistral checkpoints can be inspected. Inference and editing are implemented for GPT-NeoX and Qwen2 only, and other architectures are refused. Tensors load into memory as `float64`, so large checkpoints need several times their file size in RAM.
+2. **Dtypes and stated `RoundingContract` (`ir.RoundingContract`, `export_formats`), fixture-only.** `bf16`, `f16`, FP8 and GGUF `Q8_0`/`Q4_0`. `nf_q4` is a package-only format, and standard GGUF `Q4_K` is unsupported.
+3. **Ecosystem plugins and editor tools (`studio.plugins`, `studio.editor_tool`), fixture-only.** A `TransformerLens`-style hook adapter (not the TransformerLens package), `lm-eval` and `Inspect AI` suite importers, Hugging Face bundle export and tool schemas. Use with Claude Code, Codex or MCP hasn't been tested.
+4. **Open Patch Format v1 and anomaly scan (`patch_ux`, `nf verify`), fixture-only.** A signed record of an edit: digests, norms, evaluation provenance and scan result. It authenticates the record, but doesn't contain the weights change, so it can't apply or reproduce the edit. The scan is a sanity check, not proof that a patch has no backdoor. `nf verify` requires `--pubkey`.
 
 ---
 
-## Measured Results on Open-Weight Models (`Pythia-14m`, `Pythia-31m`, `Qwen2`)
+## Preliminary Gym Results
 
-Running the reusable `algorithmic_three_skill` Gym (teaching **Number Parity**, **Boolean Logic**, and **Inequality Comparison** simultaneously across 6 output classes) with **operand-disjoint sealed holdout expressions**, a cryptographic `ExposureLedgerReceipt` (`holdout_exposure_count_during_synthesis == 0`), **mandatory null (`control_noop`) and matched-budget random (`control_random_matched_budget`) controls**, and comparing **Direct Contrastive Prefix-Nullspace Weight Programming (`0` gradient steps)** against a **25-step Gradient LoRA baseline (`CG-11`)** on identical data:
+Status: **experimental.** The reusable `algorithmic_three_skill` Gym compared with a 25-step LoRA run, with no-op and matched random controls:
 
-| Selected Model | Architecture | Total Params | Edited Params (`%`) | Gym Dev | Gym Prefix-Val | Unseen Disjoint Holdout | No-Op / Random Controls | 25-Step LoRA Holdout | Skill Retention | Eval Gate |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| **`EleutherAI/pythia-14m`** | `GPTNeoXForCausalLM` | `14,067,712` | `65,536` (`0.47%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`83.3%` (`5/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`66.7%` (`4/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | `failed` |
-| **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`66.7%` (`4/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | `failed` |
+| Model | Kind | Edited params | Holdout gain over no-op | No-op / random | LoRA holdout | Gate | Last re-run |
+| :--- | :--- | ---: | ---: | :--- | ---: | :--- | :--- |
+| `EleutherAI/pythia-14m` | real | `65,536` (`0.47%`) | `1.00` | `0%` / `0%` | `50%` | passed | reproduced in this audit |
+| `EleutherAI/pythia-31m` | real | `262,144` (`0.86%`) | `0.83` | `0%` / `0%` | `50%` | passed | not re-run |
+| `Qwen/qwen2-dense-mini` | fixture | `2,048` (`3.99%`) | `0.67` | `0%` / `0%` | `0%` | rejected | reproduced in this audit |
+| `nf/mini-pythia-fixture` | fixture | `2,048` (`4.10%`) | `0.67` | `0%` / `0%` | `0%` | rejected | reproduced in this audit |
 
-**How far these results go:** with six holdout items, `6/6` only supports a true accuracy of about 54% or higher (95% CI), and the difference from LoRA is not statistically significant. The gym was also developed with this holdout visible, so these are preliminary signals, not evidence of general superiority. The zero-exposure count checks synthesis inputs for overlap; it is not process isolation.
+**How far these results go:** with six holdout items, `6/6` only supports a true accuracy of about 54% or higher (95% CI), and the difference from LoRA is not statistically significant. The gym was developed with this holdout visible, so these are preliminary signals, not evidence of general superiority. The zero-exposure count checks synthesis inputs for overlap; it is not process isolation. The `passed` label means this gym's own gate passed, not that the model qualified.
 
-See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming-studio.md) for the complete `WP-01`–`WP-24` requirement mapping, the **20-Point Scientific & Engineering Assurance Matrix**, and Priority Experiments `A`–`D` details.
+## Limitations
+
+- **Nothing is qualified on a real checkpoint.** Milestone 1 is schema only. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
+- **Other architectures:** Llama, Mistral, Gemma, Gemma2 and Qwen3 can't be edited. `Qwen/qwen2-dense-mini` is a fixture despite its name.
+- **Not external packages:** EasyEdit, mergekit, NeMo-Gym, Verifiers, Gymnasium and circuit-tracer names refer to local code unless a receipt says otherwise. The gym adapter receipts record `sandbox_used=False` and `external_package_executed=False`.
+- **Not implemented:** `run_transfer_benchmark`, `run_proposer_training_study`, `qualify_vllm_serving_adapter`, `qualify_tensorrt_llm_adapter`, `run_end_to_end_systems_profile` and `run_weight_efficiency_benchmark` raise `NotImplementedError` once their contract checks pass.
+- **Caller-supplied results:** many M4 and M5 evaluators score numbers they are given and mark them `evidence="caller_supplied"`. Their output isn't a measurement.
+- **M4 acceptance is not qualification:** `run_m4_feature_acceptance_suite` checks small fixtures and contract refusals, and qualifies no engine.
+- **Surgery** slices tensors you pass in and doesn't produce a loadable model.
+- **Statistics:** holdouts are small and were visible during gym development. No natural-defect or superiority claim is supported.
+- **Isolation:** the holdout overlap check isn't process isolation. Docker sandbox tests need a local daemon and weren't run in this audit.
+- **Resources:** real checkpoints load as `float64` in RAM, and Pythia studies take many minutes on CPU.
 
 ---
 
@@ -531,6 +549,8 @@ nf checkpoint restore REQUEST.json
 
 ## Rust & Python Architecture (`M1`–`M5`)
 
+This describes what the code is organized around, not what is qualified. M4 and M5 are mostly fixture-only or unsupported, as listed in [Limitations](#limitations).
+
 The repository implements a 9-crate Rust workspace (`nf-core`, `nf-checkpoint`, `nf-graph`, `nf-weight-ir`, `nf-surgeon`, `nf-patches`, `nf-experiments`, `nf-cli`, `nf-python`) paired with the `neural_foundry` Python SDK:
 
 - **M1 — Trusted Execution Core**: Strict Weight IR (`replace_slice`, `add_delta`, `scale`, `mask`, `permute_axis`, `linear_map`, `subspace_projection`, `low_rank_update`), search-space validation, copy-on-write transactional execution (`nf-surgeon`), single/multi-parent patch replay (`nf-patches`), and standalone Safetensors export/restore (`nf-checkpoint`).
@@ -539,7 +559,7 @@ The repository implements a 9-crate Rust workspace (`nf-core`, `nf-checkpoint`, 
 - **M4 — Multi-Modality Weight Programming, Adapters & Cross-Model Learning**: SQLite typed scientific graph (`nf_experiments::scientific_graph`), patch dependency/conflict composition (`nf_patches::composition`), evolutionary operators (`nf_patches::evolutionary_ops`), versioned recipe library (`nf_experiments::library_lifecycle`), symbolic rule-to-weights construction (`CG-09`), permutation/fitted weight transfer (`CG-10`), authorized LoRA/SFT/distillation/RL baselines (`CG-11`), `EasyEdit` (`ROME`, `MEMIT`, `AlphaEdit`) & `mergekit` (`task_arithmetic`, `ties`, `dare`) adapters (`neural_foundry.prd_adapters`), and `lm-evaluation-harness` / `Inspect AI` benchmark importers.
 - **M5 — Structural Architecture Surgery, Quantization & GPU Dispatch**: Symbolic architecture dependency & shape solver (`nf_graph::shape_solver`), structural IR lowering (`nf_weight_ir::structural_lowering`), coupled MLP/attention/layer surgery (`neural_foundry.m5_surgery`), and DLPack GPU dispatch & VRAM resource leasing (`neural_foundry.gpu`).
 
-Base wheel installation (`import neural_foundry`) requires **zero third-party Python runtime dependencies** (no Torch, NumPy, or network clients); PyTorch-backed research and GPU submodules load lazily on demand. Milestone and capability-gate statuses are always generated from live verification evidence (`generate_release_conformance_report`) rather than task checkbox counts.
+Base wheel installation (`import neural_foundry`) requires no third-party Python runtime dependencies. PyTorch-backed submodules load lazily. `generate_release_conformance_report` derives its gate statuses from native capabilities and fixture checks, so a passing gate there doesn't qualify a real model.
 
 ```sh
 nf core capabilities
