@@ -1,0 +1,50 @@
+[
+  [
+    "Task: Number 9 has parity",
+    " odd"
+  ],
+  [
+    "Task: Number 4 has parity",
+    " even"
+  ],
+  [
+    "Task: Boolean False AND True gives",
+    " False"
+  ],
+  [
+    "Task: Boolean False OR True gives",
+    " True"
+  ],
+  [
+    "Task: Relation 9 > 2 is",
+    " yes"
+  ],
+  [
+    "Task: Relation 2 > 6 is",
+    " no"
+  ],
+  [
+    "Rule: Number 9 has parity",
+    " odd"
+  ],
+  [
+    "Rule: Number 4 has parity",
+    " even"
+  ],
+  [
+    "Rule: Boolean False AND True gives",
+    " False"
+  ],
+  [
+    "Rule: Boolean False OR True gives",
+    " True"
+  ],
+  [
+    "Rule: Relation 9 > 2 is",
+    " yes"
+  ],
+  [
+    "Rule: Relation 2 > 6 is",
+    " no"
+  ]
+]

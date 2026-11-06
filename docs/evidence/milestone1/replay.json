@@ -1,0 +1,21 @@
+{
+  "blocked_modules": [
+    "neural_foundry.gpt_neox_adapter",
+    "neural_foundry.gym_scientist",
+    "neural_foundry.gyms"
+  ],
+  "candidate_state_digest": "sha256:131341ad2907320653d88ed53e34653848854c760bcbb8be1ffcb9c5185897bf",
+  "directory_contents": [
+    "envelope.json",
+    "public.txt"
+  ],
+  "export_state_digest": "sha256:131341ad2907320653d88ed53e34653848854c760bcbb8be1ffcb9c5185897bf",
+  "plan_digest": "sha256:cb0efaf3d0fdb8c196c89083c8ef446032ff8c201eddcec3a6649ea43e54fe4f",
+  "steps": [
+    {
+      "after_parameter_digest": "sha256:cdeb3c73605c4bbf10a2d5686040d8029fe758298d3c3304550656f2eb83a1a0",
+      "operation": "low_rank_update",
+      "tensor": "gpt_neox.layers.5.mlp.dense_4h_to_h.weight"
+    }
+  ]
+}

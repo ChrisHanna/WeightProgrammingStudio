@@ -1,0 +1,3900 @@
+{
+  "base_parameter_digest": "sha256:9f5d60e013438655ed2bfe3960545b8fae2694127b2b800f1cb3a0a5cea1b0d9",
+  "candidate": {
+    "all_tasks": {
+      "accuracy_delta": {
+        "ci95": [
+          -0.20833333333333334,
+          -0.07291666666666667
+        ],
+        "n": 96,
+        "value": -0.13541666666666666
+      },
+      "base_accuracy": {
+        "ci95": [
+          0.0808770644581112,
+          0.21801138502144396
+        ],
+        "n": 96,
+        "successes": 13,
+        "value": 0.13541666666666666
+      },
+      "candidate_accuracy": {
+        "ci95": [
+          0.0,
+          0.038475587857675686
+        ],
+        "n": 96,
+        "successes": 0,
+        "value": 0.0
+      },
+      "correct_retention": {
+        "ci95": [
+          0.0,
+          0.22809537235419838
+        ],
+        "n": 13,
+        "successes": 0,
+        "value": 0.0
+      },
+      "kl_nats": {
+        "ci95": [
+          11.774830012879784,
+          13.377781293350205
+        ],
+        "n": 96,
+        "value": 12.57570315020766
+      },
+      "n": 96,
+      "target_logprob_delta_nats": {
+        "ci95": [
+          -14.034542896467302,
+          -12.182761598656452
+        ],
+        "n": 96,
+        "value": -13.13317584961989
+      },
+      "top1_agreement": {
+        "ci95": [
+          0.0,
+          0.038475587857675686
+        ],
+        "n": 96,
+        "successes": 0,
+        "value": 0.0
+      },
+      "total_variation": {
+        "ci95": [
+          0.976959538777734,
+          0.9871139393048153
+        ],
+        "n": 96,
+        "value": 0.9822014178209354
+      }
+    },
+    "text": {
+      "base_perplexity": {
+        "ci95": [
+          114.37512239000075,
+          167.41783520011882
+        ],
+        "n_sentences": 48,
+        "n_tokens": 756,
+        "value": 138.27970902613635
+      },
+      "candidate_perplexity": {
+        "ci95": [
+          65223932.797054924,
+          143465282.7010989
+        ],
+        "n_sentences": 48,
+        "n_tokens": 756,
+        "value": 96380077.3022057
+      },
+      "kl_nats_per_token": {
+        "ci95": [
+          12.52681597137952,
+          13.150989778360662
+        ],
+        "n": 48,
+        "value": 12.845993658861246
+      },
+      "perplexity_ratio": {
+        "ci95": [
+          454560.14099401445,
+          1049206.4096823337
+        ],
+        "n_sentences": 48,
+        "value": 696993.6368899136
+      },
+      "top1_agreement": {
+        "ci95": [
+          0.0036423023630337012,
+          0.017206071513907333
+        ],
+        "n": 756,
+        "sentence_bootstrap_ci95": [
+          0.00262794867069783,
+          0.014531524117059122
+        ],
+        "successes": 6,
+        "value": 0.007936507936507936
+      },
+      "total_variation_per_token": {
+        "ci95": [
+          0.9835268856103613,
+          0.9882189030028388
+        ],
+        "n": 48,
+        "value": 0.9859705585446236
+      }
+    },
+    "top1_versus_kl": {
+      "kl_max_where_top1_kept": 7.327831462906505,
+      "kl_mean_where_top1_flipped": 12.866862730552969,
+      "kl_mean_where_top1_kept": 5.578806411870864,
+      "kl_p50_where_top1_kept": 5.017121920886753,
+      "kl_p90_where_top1_kept": 7.104376449940625,
+      "mean_kl_nats": 12.81553839028056,
+      "mean_total_variation": 0.9855458666320951,
+      "n_positions": 852,
+      "share_of_total_kl_where_top1_kept": 0.003065604261111503,
+      "top1_disagreement": 0.9929577464788732
+    }
+  },
+  "candidate_id": "milestone1",
+  "candidate_parameter_digest": "sha256:7c3e5adb60519f567b1464991db1c3b1afdcf5f25fee6a703b173842378d0677",
+  "config": {
+    "bootstrap_samples": 2000,
+    "bootstrap_seed": 20261106,
+    "interval_methods": {
+      "other": "percentile bootstrap over prompts or sentences",
+      "proportions": "wilson"
+    },
+    "kl_direction": "KL(base || candidate), nats",
+    "random_control_seeds": [
+      101,
+      102,
+      103,
+      104,
+      105
+    ]
+  },
+  "controls": {
+    "noop": {
+      "all_top1_agree": true,
+      "max_kl_nats": 0.0,
+      "nll_identical": true,
+      "passed": true
+    },
+    "random": {
+      "random_seed_101": {
+        "all_tasks": {
+          "accuracy_delta": {
+            "ci95": [
+              -0.20833333333333334,
+              -0.07291666666666667
+            ],
+            "n": 96,
+            "value": -0.13541666666666666
+          },
+          "base_accuracy": {
+            "ci95": [
+              0.0808770644581112,
+              0.21801138502144396
+            ],
+            "n": 96,
+            "successes": 13,
+            "value": 0.13541666666666666
+          },
+          "candidate_accuracy": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "correct_retention": {
+            "ci95": [
+              0.0,
+              0.22809537235419838
+            ],
+            "n": 13,
+            "successes": 0,
+            "value": 0.0
+          },
+          "kl_nats": {
+            "ci95": [
+              7.454400348460427,
+              8.58811354068477
+            ],
+            "n": 96,
+            "value": 8.003381248108024
+          },
+          "n": 96,
+          "target_logprob_delta_nats": {
+            "ci95": [
+              -10.663880865105227,
+              -9.13484868601071
+            ],
+            "n": 96,
+            "value": -9.89998845206262
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.1564891714560027,
+              0.3226851053002383
+            ],
+            "n": 96,
+            "successes": 22,
+            "value": 0.22916666666666666
+          },
+          "total_variation": {
+            "ci95": [
+              0.8605762010842511,
+              0.905525835351696
+            ],
+            "n": 96,
+            "value": 0.8837440520023062
+          }
+        },
+        "seed": 101,
+        "text": {
+          "base_perplexity": {
+            "ci95": [
+              114.68233090614628,
+              166.98230006210315
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 138.27970902613635
+          },
+          "candidate_perplexity": {
+            "ci95": [
+              1876541.7934711715,
+              3652778.330586216
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 2606387.228943611
+          },
+          "kl_nats_per_token": {
+            "ci95": [
+              9.18248967912379,
+              9.490800686173044
+            ],
+            "n": 48,
+            "value": 9.337643670304235
+          },
+          "perplexity_ratio": {
+            "ci95": [
+              13522.947671119793,
+              26215.62912547625
+            ],
+            "n_sentences": 48,
+            "value": 18848.660062272575
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.011062612290256095,
+              0.030842785804385126
+            ],
+            "n": 756,
+            "sentence_bootstrap_ci95": [
+              0.009408602150537635,
+              0.028075805897386334
+            ],
+            "successes": 14,
+            "value": 0.018518518518518517
+          },
+          "total_variation_per_token": {
+            "ci95": [
+              0.9457748680106105,
+              0.9523926982733139
+            ],
+            "n": 48,
+            "value": 0.9490682540709122
+          }
+        },
+        "top1_versus_kl": {
+          "kl_max_where_top1_kept": 10.958469852124733,
+          "kl_mean_where_top1_flipped": 9.340794125662697,
+          "kl_mean_where_top1_kept": 5.708200222989266,
+          "kl_p50_where_top1_kept": 5.563927885989657,
+          "kl_p90_where_top1_kept": 8.568193424872497,
+          "mean_kl_nats": 9.187304242451143,
+          "mean_total_variation": 0.9417077805983931,
+          "n_positions": 852,
+          "share_of_total_kl_where_top1_kept": 0.02625270181033073,
+          "top1_disagreement": 0.9577464788732394
+        }
+      },
+      "random_seed_102": {
+        "all_tasks": {
+          "accuracy_delta": {
+            "ci95": [
+              -0.20833333333333334,
+              -0.07291666666666667
+            ],
+            "n": 96,
+            "value": -0.13541666666666666
+          },
+          "base_accuracy": {
+            "ci95": [
+              0.0808770644581112,
+              0.21801138502144396
+            ],
+            "n": 96,
+            "successes": 13,
+            "value": 0.13541666666666666
+          },
+          "candidate_accuracy": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "correct_retention": {
+            "ci95": [
+              0.0,
+              0.22809537235419838
+            ],
+            "n": 13,
+            "successes": 0,
+            "value": 0.0
+          },
+          "kl_nats": {
+            "ci95": [
+              8.548978011712338,
+              9.663916551606633
+            ],
+            "n": 96,
+            "value": 9.111895530111322
+          },
+          "n": 96,
+          "target_logprob_delta_nats": {
+            "ci95": [
+              -10.189654583542854,
+              -8.826933152603516
+            ],
+            "n": 96,
+            "value": -9.495664392207976
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "total_variation": {
+            "ci95": [
+              0.9604236780637128,
+              0.9690032361065121
+            ],
+            "n": 96,
+            "value": 0.9647017564786071
+          }
+        },
+        "seed": 102,
+        "text": {
+          "base_perplexity": {
+            "ci95": [
+              113.85978410105209,
+              166.91656288600288
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 138.27970902613635
+          },
+          "candidate_perplexity": {
+            "ci95": [
+              4314285.112544761,
+              7796882.850696744
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 5799324.82271824
+          },
+          "kl_nats_per_token": {
+            "ci95": [
+              9.814699663414677,
+              10.31054196838259
+            ],
+            "n": 48,
+            "value": 10.069405008324258
+          },
+          "perplexity_ratio": {
+            "ci95": [
+              30506.8650385077,
+              55514.17442560669
+            ],
+            "n_sentences": 48,
+            "value": 41939.087546258226
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0007257922902672072,
+              0.009594069477823729
+            ],
+            "n": 756,
+            "sentence_bootstrap_ci95": [
+              0.0,
+              0.006587832552900809
+            ],
+            "successes": 2,
+            "value": 0.0026455026455026454
+          },
+          "total_variation_per_token": {
+            "ci95": [
+              0.971754006164555,
+              0.9772254949934716
+            ],
+            "n": 48,
+            "value": 0.9745458200562336
+          }
+        },
+        "top1_versus_kl": {
+          "kl_max_where_top1_kept": 6.581226777674608,
+          "kl_mean_where_top1_flipped": 9.973152980135254,
+          "kl_mean_where_top1_kept": 5.016062034430199,
+          "kl_p50_where_top1_kept": 5.016062034430199,
+          "kl_p90_where_top1_kept": 6.268193829025726,
+          "mean_kl_nats": 9.961516616412942,
+          "mean_total_variation": 0.973436629793966,
+          "n_positions": 852,
+          "share_of_total_kl_where_top1_kept": 0.0011820281952500636,
+          "top1_disagreement": 0.9976525821596244
+        }
+      },
+      "random_seed_103": {
+        "all_tasks": {
+          "accuracy_delta": {
+            "ci95": [
+              -0.20833333333333334,
+              -0.07291666666666667
+            ],
+            "n": 96,
+            "value": -0.13541666666666666
+          },
+          "base_accuracy": {
+            "ci95": [
+              0.0808770644581112,
+              0.21801138502144396
+            ],
+            "n": 96,
+            "successes": 13,
+            "value": 0.13541666666666666
+          },
+          "candidate_accuracy": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "correct_retention": {
+            "ci95": [
+              0.0,
+              0.22809537235419838
+            ],
+            "n": 13,
+            "successes": 0,
+            "value": 0.0
+          },
+          "kl_nats": {
+            "ci95": [
+              12.328592516969886,
+              14.064543728453646
+            ],
+            "n": 96,
+            "value": 13.201976107667681
+          },
+          "n": 96,
+          "target_logprob_delta_nats": {
+            "ci95": [
+              -15.191610569539844,
+              -12.589339875501997
+            ],
+            "n": 96,
+            "value": -13.871951213885458
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "total_variation": {
+            "ci95": [
+              0.9874156062404854,
+              0.991700727822217
+            ],
+            "n": 96,
+            "value": 0.9895619716563516
+          }
+        },
+        "seed": 103,
+        "text": {
+          "base_perplexity": {
+            "ci95": [
+              114.87323589399975,
+              169.3304540436982
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 138.27970902613635
+          },
+          "candidate_perplexity": {
+            "ci95": [
+              1134830245.1466181,
+              3098046133.039567
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 1908949039.9572425
+          },
+          "kl_nats_per_token": {
+            "ci95": [
+              15.82584580568144,
+              16.61350380932903
+            ],
+            "n": 48,
+            "value": 16.221618116840183
+          },
+          "perplexity_ratio": {
+            "ci95": [
+              8812287.1219167,
+              21383556.485970903
+            ],
+            "n_sentences": 48,
+            "value": 13804983.055007964
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0,
+              0.005055605713665889
+            ],
+            "n": 756,
+            "sentence_bootstrap_ci95": [
+              0.0,
+              0.0
+            ],
+            "successes": 0,
+            "value": 0.0
+          },
+          "total_variation_per_token": {
+            "ci95": [
+              0.9956826950040465,
+              0.9968964696290501
+            ],
+            "n": 48,
+            "value": 0.9963561874395174
+          }
+        },
+        "top1_versus_kl": {
+          "kl_max_where_top1_kept": null,
+          "kl_mean_where_top1_flipped": 15.881376763693988,
+          "kl_mean_where_top1_kept": null,
+          "kl_p50_where_top1_kept": null,
+          "kl_p90_where_top1_kept": null,
+          "mean_kl_nats": 15.881376763693988,
+          "mean_total_variation": 0.9955906419991607,
+          "n_positions": 852,
+          "share_of_total_kl_where_top1_kept": 0.0,
+          "top1_disagreement": 1.0
+        }
+      },
+      "random_seed_104": {
+        "all_tasks": {
+          "accuracy_delta": {
+            "ci95": [
+              -0.20833333333333334,
+              -0.0625
+            ],
+            "n": 96,
+            "value": -0.13541666666666666
+          },
+          "base_accuracy": {
+            "ci95": [
+              0.0808770644581112,
+              0.21801138502144396
+            ],
+            "n": 96,
+            "successes": 13,
+            "value": 0.13541666666666666
+          },
+          "candidate_accuracy": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "correct_retention": {
+            "ci95": [
+              0.0,
+              0.22809537235419838
+            ],
+            "n": 13,
+            "successes": 0,
+            "value": 0.0
+          },
+          "kl_nats": {
+            "ci95": [
+              12.066115759450913,
+              13.420759661402379
+            ],
+            "n": 96,
+            "value": 12.741847686228416
+          },
+          "n": 96,
+          "target_logprob_delta_nats": {
+            "ci95": [
+              -12.92578864247989,
+              -11.048830679449312
+            ],
+            "n": 96,
+            "value": -11.949035185642543
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "total_variation": {
+            "ci95": [
+              0.9794406854066047,
+              0.9900586232076544
+            ],
+            "n": 96,
+            "value": 0.9852693139093242
+          }
+        },
+        "seed": 104,
+        "text": {
+          "base_perplexity": {
+            "ci95": [
+              114.3725429316792,
+              166.21202822264306
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 138.27970902613635
+          },
+          "candidate_perplexity": {
+            "ci95": [
+              11735873.71403703,
+              24248560.56962814
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 17024097.65847714
+          },
+          "kl_nats_per_token": {
+            "ci95": [
+              11.001502005621886,
+              11.594403875282595
+            ],
+            "n": 48,
+            "value": 11.305966319909299
+          },
+          "perplexity_ratio": {
+            "ci95": [
+              85297.87561193782,
+              177739.99977336157
+            ],
+            "n_sentences": 48,
+            "value": 123113.49060807914
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0007257922902672072,
+              0.009594069477823729
+            ],
+            "n": 756,
+            "sentence_bootstrap_ci95": [
+              0.0,
+              0.006666666666666667
+            ],
+            "successes": 2,
+            "value": 0.0026455026455026454
+          },
+          "total_variation_per_token": {
+            "ci95": [
+              0.9772261482155037,
+              0.9811337840535358
+            ],
+            "n": 48,
+            "value": 0.9792105994125706
+          }
+        },
+        "top1_versus_kl": {
+          "kl_max_where_top1_kept": 5.774303960411325,
+          "kl_mean_where_top1_flipped": 11.481155217134987,
+          "kl_mean_where_top1_kept": 5.7729905823098155,
+          "kl_p50_where_top1_kept": 5.7729905823098155,
+          "kl_p90_where_top1_kept": 5.774041284791023,
+          "mean_kl_nats": 11.467755769635398,
+          "mean_total_variation": 0.9798932714685429,
+          "n_positions": 852,
+          "share_of_total_kl_where_top1_kept": 0.0011817151810223079,
+          "top1_disagreement": 0.9976525821596244
+        }
+      },
+      "random_seed_105": {
+        "all_tasks": {
+          "accuracy_delta": {
+            "ci95": [
+              -0.20833333333333334,
+              -0.07291666666666667
+            ],
+            "n": 96,
+            "value": -0.13541666666666666
+          },
+          "base_accuracy": {
+            "ci95": [
+              0.0808770644581112,
+              0.21801138502144396
+            ],
+            "n": 96,
+            "successes": 13,
+            "value": 0.13541666666666666
+          },
+          "candidate_accuracy": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "correct_retention": {
+            "ci95": [
+              0.0,
+              0.22809537235419838
+            ],
+            "n": 13,
+            "successes": 0,
+            "value": 0.0
+          },
+          "kl_nats": {
+            "ci95": [
+              10.342316268142495,
+              11.866051817920411
+            ],
+            "n": 96,
+            "value": 11.103457657191612
+          },
+          "n": 96,
+          "target_logprob_delta_nats": {
+            "ci95": [
+              -15.595164893638971,
+              -13.411024372964862
+            ],
+            "n": 96,
+            "value": -14.517229858722262
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0,
+              0.038475587857675686
+            ],
+            "n": 96,
+            "successes": 0,
+            "value": 0.0
+          },
+          "total_variation": {
+            "ci95": [
+              0.9738455557224441,
+              0.9820485666480899
+            ],
+            "n": 96,
+            "value": 0.9781070291541831
+          }
+        },
+        "seed": 105,
+        "text": {
+          "base_perplexity": {
+            "ci95": [
+              112.99415251139236,
+              168.63126570051665
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 138.27970902613635
+          },
+          "candidate_perplexity": {
+            "ci95": [
+              27246426.48165029,
+              57955597.80795528
+            ],
+            "n_sentences": 48,
+            "n_tokens": 756,
+            "value": 39742822.19285781
+          },
+          "kl_nats_per_token": {
+            "ci95": [
+              11.925959475548348,
+              12.628940537551305
+            ],
+            "n": 48,
+            "value": 12.268155345720272
+          },
+          "perplexity_ratio": {
+            "ci95": [
+              193825.11445180312,
+              432275.04993254144
+            ],
+            "n_sentences": 48,
+            "value": 287408.9226304781
+          },
+          "top1_agreement": {
+            "ci95": [
+              0.0,
+              0.005055605713665889
+            ],
+            "n": 756,
+            "sentence_bootstrap_ci95": [
+              0.0,
+              0.0
+            ],
+            "successes": 0,
+            "value": 0.0
+          },
+          "total_variation_per_token": {
+            "ci95": [
+              0.9860032456066228,
+              0.98891971424195
+            ],
+            "n": 48,
+            "value": 0.9874535052928831
+          }
+        },
+        "top1_versus_kl": {
+          "kl_max_where_top1_kept": null,
+          "kl_mean_where_top1_flipped": 12.136921803350845,
+          "kl_mean_where_top1_kept": null,
+          "kl_p50_where_top1_kept": null,
+          "kl_p90_where_top1_kept": null,
+          "mean_kl_nats": 12.136921803350845,
+          "mean_total_variation": 0.9864003812209169,
+          "n_positions": 852,
+          "share_of_total_kl_where_top1_kept": 0.0,
+          "top1_disagreement": 1.0
+        }
+      }
+    }
+  },
+  "corpus_digest": "sha256:ddd72d04fad4a19d2a402542b559a297bf80b30c1d540a80595fe5d29cf1b632",
+  "corpus_id": "independent_eval_corpus_v1",
+  "kind": "nf_independent_eval_report_v1",
+  "replayed_tensors": [
+    "gpt_neox.layers.5.mlp.dense_4h_to_h.weight"
+  ],
+  "retention_matrix": {
+    "agreement": {
+      "candidate": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.6875,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.4375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.35433043506668743
+          ],
+          "n": 7,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            10.350088593546895,
+            12.325788635958405
+          ],
+          "n": 16,
+          "value": 11.313949635939133
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -14.558521506964768,
+            -12.376754536636374
+          ],
+          "n": 16,
+          "value": -13.492411589525238
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9867645291084103,
+            0.9946272607739808
+          ],
+          "n": 16,
+          "value": 0.9908912096413437
+        }
+      },
+      "noop": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "correct_retention": {
+          "ci95": [
+            0.6456695649333126,
+            1.0
+          ],
+          "n": 7,
+          "successes": 7,
+          "value": 1.0
+        },
+        "kl_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        }
+      },
+      "random_seed_101": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.6875,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.4375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.35433043506668743
+          ],
+          "n": 7,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            7.713112512925103,
+            10.067168612182918
+          ],
+          "n": 16,
+          "value": 8.82704776365753
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -11.268711886157503,
+            -7.402074169265917
+          ],
+          "n": 16,
+          "value": -9.305554959964155
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.01111934476464252,
+            0.28328737570298945
+          ],
+          "n": 16,
+          "successes": 1,
+          "value": 0.0625
+        },
+        "total_variation": {
+          "ci95": [
+            0.903954469663444,
+            0.9569706479925876
+          ],
+          "n": 16,
+          "value": 0.9323551661098366
+        }
+      },
+      "random_seed_102": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.6875,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.4375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.35433043506668743
+          ],
+          "n": 7,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            6.75960208354918,
+            9.73344223670482
+          ],
+          "n": 16,
+          "value": 8.203949231405883
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -11.435915414539936,
+            -8.031329304313743
+          ],
+          "n": 16,
+          "value": -9.666664212399358
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9388057702887586,
+            0.9704108263409534
+          ],
+          "n": 16,
+          "value": 0.9543352927627602
+        }
+      },
+      "random_seed_103": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.6875,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.4375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.35433043506668743
+          ],
+          "n": 7,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            17.430381892624755,
+            21.194533917155642
+          ],
+          "n": 16,
+          "value": 19.25233504396595
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -26.418868625251193,
+            -21.743860941241635
+          ],
+          "n": 16,
+          "value": -24.056246825113668
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9958610791358473,
+            0.9989799518566181
+          ],
+          "n": 16,
+          "value": 0.9977751720930458
+        }
+      },
+      "random_seed_104": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.6875,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.4375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.35433043506668743
+          ],
+          "n": 7,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            13.753142641011358,
+            18.19992248800652
+          ],
+          "n": 16,
+          "value": 15.857522089042423
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -20.260044961539013,
+            -14.68851529922915
+          ],
+          "n": 16,
+          "value": -17.475436197253217
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9940137579680757,
+            0.9984826903929733
+          ],
+          "n": 16,
+          "value": 0.9964021330691374
+        }
+      },
+      "random_seed_105": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.6875,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.4375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.23098652405492354,
+            0.6682144360118811
+          ],
+          "n": 16,
+          "successes": 7,
+          "value": 0.4375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.35433043506668743
+          ],
+          "n": 7,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            10.94415440156777,
+            15.178565150209753
+          ],
+          "n": 16,
+          "value": 13.026237276607588
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -18.329666129969905,
+            -12.408894832826256
+          ],
+          "n": 16,
+          "value": -15.46067597064549
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9815021811390527,
+            0.9942259466702407
+          ],
+          "n": 16,
+          "value": 0.988635400905851
+        }
+      }
+    },
+    "arithmetic": {
+      "candidate": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            14.228497645859447,
+            15.31337650701579
+          ],
+          "n": 16,
+          "value": 14.753496774329863
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -14.283139294062588,
+            -12.83296645039258
+          ],
+          "n": 16,
+          "value": -13.538005201660384
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9959801358956981,
+            0.9980961182055463
+          ],
+          "n": 16,
+          "value": 0.9970907955763145
+        }
+      },
+      "noop": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        }
+      },
+      "random_seed_101": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            8.289088758499496,
+            9.40946342026099
+          ],
+          "n": 16,
+          "value": 8.844079529061453
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -8.372731503471128,
+            -7.417534862524562
+          ],
+          "n": 16,
+          "value": -7.90424254668911
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9598403046044488,
+            0.9777829750359224
+          ],
+          "n": 16,
+          "value": 0.9687051558241613
+        }
+      },
+      "random_seed_102": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            9.818215013737296,
+            11.598401097352497
+          ],
+          "n": 16,
+          "value": 10.692053028358064
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -10.617952941880404,
+            -8.326191004492165
+          ],
+          "n": 16,
+          "value": -9.446399628390505
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9689125472976601,
+            0.9818425010237087
+          ],
+          "n": 16,
+          "value": 0.9755012726683878
+        }
+      },
+      "random_seed_103": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            13.986522601503987,
+            16.277431533644627
+          ],
+          "n": 16,
+          "value": 15.120124256924536
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -16.938576044236388,
+            -14.830654491064688
+          ],
+          "n": 16,
+          "value": -15.906178621260864
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9948862383017133,
+            0.9977402872383739
+          ],
+          "n": 16,
+          "value": 0.9964629012417625
+        }
+      },
+      "random_seed_104": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            10.603114144469156,
+            12.869610765163394
+          ],
+          "n": 16,
+          "value": 11.777835376065623
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -11.31401933297634,
+            -9.355097758574882
+          ],
+          "n": 16,
+          "value": -10.321211545527593
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9778335052292674,
+            0.9879754229781478
+          ],
+          "n": 16,
+          "value": 0.9832485786186796
+        }
+      },
+      "random_seed_105": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            14.487883266641438,
+            16.786218356690917
+          ],
+          "n": 16,
+          "value": 15.632753283316209
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -17.23645301483741,
+            -13.265664035902317
+          ],
+          "n": 16,
+          "value": -15.238596208593751
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9972914158960148,
+            0.9979640214565021
+          ],
+          "n": 16,
+          "value": 0.9976445332498163
+        }
+      }
+    },
+    "capitals": {
+      "candidate": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            6.888089370416832,
+            7.268690283316891
+          ],
+          "n": 16,
+          "value": 7.0763562430222535
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -15.916457352525466,
+            -13.33968694681463
+          ],
+          "n": 16,
+          "value": -14.58448318541482
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9225757730169253,
+            0.9428173892187421
+          ],
+          "n": 16,
+          "value": 0.9334069032579031
+        }
+      },
+      "noop": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        }
+      },
+      "random_seed_101": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            6.379892283955213,
+            6.683207392794529
+          ],
+          "n": 16,
+          "value": 6.53515507853286
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -11.815615260628492,
+            -8.78994546061212
+          ],
+          "n": 16,
+          "value": -10.356479175458581
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.14164643854782039,
+            0.5559564416525933
+          ],
+          "n": 16,
+          "successes": 5,
+          "value": 0.3125
+        },
+        "total_variation": {
+          "ci95": [
+            0.7827522907689936,
+            0.8084847460921026
+          ],
+          "n": 16,
+          "value": 0.7942661950811111
+        }
+      },
+      "random_seed_102": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            6.486176007838205,
+            6.705489214871737
+          ],
+          "n": 16,
+          "value": 6.595844070567645
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -7.702245859520757,
+            -5.8813631131514
+          ],
+          "n": 16,
+          "value": -6.7461060485563795
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9481631953880507,
+            0.9534084180807704
+          ],
+          "n": 16,
+          "value": 0.9508224656842144
+        }
+      },
+      "random_seed_103": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            9.181733656811756,
+            9.498702509897797
+          ],
+          "n": 16,
+          "value": 9.347916104104495
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -9.167400845994667,
+            -6.477530510900294
+          ],
+          "n": 16,
+          "value": -7.886513591374117
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9764156194404474,
+            0.9790269944404909
+          ],
+          "n": 16,
+          "value": 0.9778329613998795
+        }
+      },
+      "random_seed_104": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            13.135992608099547,
+            13.514046196773977
+          ],
+          "n": 16,
+          "value": 13.325122820454181
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -11.355468828099541,
+            -9.411775697943211
+          ],
+          "n": 16,
+          "value": -10.405155271116795
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9967780271151213,
+            0.9973388446746856
+          ],
+          "n": 16,
+          "value": 0.997070716119103
+        }
+      },
+      "random_seed_105": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            9.555461397666004,
+            9.82943869572308
+          ],
+          "n": 16,
+          "value": 9.701341197109986
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -22.461597216913198,
+            -20.17607503075206
+          ],
+          "n": 16,
+          "value": -21.28488371892518
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9613298340779842,
+            0.9684008180169207
+          ],
+          "n": 16,
+          "value": 0.9651107137300413
+        }
+      }
+    },
+    "collocations": {
+      "candidate": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.625,
+            -0.125
+          ],
+          "n": 16,
+          "value": -0.375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.3903342879021653
+          ],
+          "n": 6,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            11.336283048914462,
+            15.01529499803449
+          ],
+          "n": 16,
+          "value": 13.072640902562881
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -18.24123651584168,
+            -13.180441090680466
+          ],
+          "n": 16,
+          "value": -15.657654248862247
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9788401279367158,
+            0.9951992418286913
+          ],
+          "n": 16,
+          "value": 0.9881953657942777
+        }
+      },
+      "noop": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "correct_retention": {
+          "ci95": [
+            0.6096657120978346,
+            1.0
+          ],
+          "n": 6,
+          "successes": 6,
+          "value": 1.0
+        },
+        "kl_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        }
+      },
+      "random_seed_101": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.625,
+            -0.125
+          ],
+          "n": 16,
+          "value": -0.375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.3903342879021653
+          ],
+          "n": 6,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            8.066828049263687,
+            11.258098106836504
+          ],
+          "n": 16,
+          "value": 9.599149467364331
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -14.872587746854819,
+            -9.877182078497396
+          ],
+          "n": 16,
+          "value": -12.311370629462967
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9527326281491489,
+            0.9760866329421432
+          ],
+          "n": 16,
+          "value": 0.9644196660155622
+        }
+      },
+      "random_seed_102": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.625,
+            -0.125
+          ],
+          "n": 16,
+          "value": -0.375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.3903342879021653
+          ],
+          "n": 6,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            7.875749945475022,
+            10.22664044662274
+          ],
+          "n": 16,
+          "value": 8.906649232990247
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -12.483524333252035,
+            -9.146719529414579
+          ],
+          "n": 16,
+          "value": -10.826828360190326
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9682467000177615,
+            0.9861738510258876
+          ],
+          "n": 16,
+          "value": 0.9780154280855748
+        }
+      },
+      "random_seed_103": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.625,
+            -0.125
+          ],
+          "n": 16,
+          "value": -0.375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.3903342879021653
+          ],
+          "n": 6,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            8.969996965816756,
+            11.955039073325182
+          ],
+          "n": 16,
+          "value": 10.309912984436636
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -15.025180423447155,
+            -10.619264799203513
+          ],
+          "n": 16,
+          "value": -12.712161289200958
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9739183231617219,
+            0.9888396667706668
+          ],
+          "n": 16,
+          "value": 0.9815181989983875
+        }
+      },
+      "random_seed_104": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.625,
+            -0.125
+          ],
+          "n": 16,
+          "value": -0.375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.3903342879021653
+          ],
+          "n": 6,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            9.734428714986494,
+            13.94999276605553
+          ],
+          "n": 16,
+          "value": 11.766448390575968
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -15.380888391972091,
+            -11.106070621774187
+          ],
+          "n": 16,
+          "value": -13.181551538229478
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9534867998348895,
+            0.9889499165502608
+          ],
+          "n": 16,
+          "value": 0.9729262076718375
+        }
+      },
+      "random_seed_105": {
+        "accuracy_delta": {
+          "ci95": [
+            -0.625,
+            -0.1875
+          ],
+          "n": 16,
+          "value": -0.375
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.18481232558863633,
+            0.6135895945449727
+          ],
+          "n": 16,
+          "successes": 6,
+          "value": 0.375
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": [
+            0.0,
+            0.3903342879021653
+          ],
+          "n": 6,
+          "successes": 0,
+          "value": 0.0
+        },
+        "kl_nats": {
+          "ci95": [
+            9.38032676873607,
+            12.700430957621768
+          ],
+          "n": 16,
+          "value": 10.954417515558305
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -15.06611991926316,
+            -11.222017060111991
+          ],
+          "n": 16,
+          "value": -13.173944253907829
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9703235138530432,
+            0.9916589595708979
+          ],
+          "n": 16,
+          "value": 0.9821522881976585
+        }
+      }
+    },
+    "opposites": {
+      "candidate": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            15.90031993833501,
+            16.88310801736592
+          ],
+          "n": 16,
+          "value": 16.36375177750461
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -7.923587681348971,
+            -5.476621009511945
+          ],
+          "n": 16,
+          "value": -6.639716071616924
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.994911761179092,
+            0.9964685343521241
+          ],
+          "n": 16,
+          "value": 0.9956396352913408
+        }
+      },
+      "noop": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        }
+      },
+      "random_seed_101": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            3.883045387778152,
+            4.450672289505815
+          ],
+          "n": 16,
+          "value": 4.1404180134602955
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -8.453327689223492,
+            -5.800010267206404
+          ],
+          "n": 16,
+          "value": -7.138575898171748
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.6618848823303177,
+            0.7109018694559347
+          ],
+          "n": 16,
+          "value": 0.684118737397002
+        }
+      },
+      "random_seed_102": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            8.739151764729547,
+            9.606756779602474
+          ],
+          "n": 16,
+          "value": 9.18300288127335
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -8.800298599961568,
+            -6.822767416658162
+          ],
+          "n": 16,
+          "value": -7.794591504688592
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9579152605203646,
+            0.967426733052684
+          ],
+          "n": 16,
+          "value": 0.9625333890804338
+        }
+      },
+      "random_seed_103": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            10.563671330646459,
+            11.808984079555675
+          ],
+          "n": 16,
+          "value": 11.195465878822816
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -8.268415140538435,
+            -5.43259619800237
+          ],
+          "n": 16,
+          "value": -6.815674171016118
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9855979233520671,
+            0.9915117277744274
+          ],
+          "n": 16,
+          "value": 0.9887711448824446
+        }
+      },
+      "random_seed_104": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            12.568109843177107,
+            13.83271955857406
+          ],
+          "n": 16,
+          "value": 13.23523077227775
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -9.749498006978323,
+            -6.8286582005945675
+          ],
+          "n": 16,
+          "value": -8.434797762611193
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.990063688441634,
+            0.9937266033755321
+          ],
+          "n": 16,
+          "value": 0.991881070250844
+        }
+      },
+      "random_seed_105": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            6.535134353345809,
+            7.5009482391614934
+          ],
+          "n": 16,
+          "value": 7.023392318794672
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -10.916199289097065,
+            -7.5718314362189
+          ],
+          "n": 16,
+          "value": -9.299704225256239
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9448130608629506,
+            0.9634859358690531
+          ],
+          "n": 16,
+          "value": 0.9547018644467833
+        }
+      }
+    },
+    "sequences": {
+      "candidate": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            10.655763216945909,
+            15.202394244731728
+          ],
+          "n": 16,
+          "value": 12.87402356788723
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -17.637204796147323,
+            -12.248399360664838
+          ],
+          "n": 16,
+          "value": -14.886784800639736
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.98209748393033,
+            0.9933451686610936
+          ],
+          "n": 16,
+          "value": 0.987984597364432
+        }
+      },
+      "noop": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.8063923194655637,
+            1.0
+          ],
+          "n": 16,
+          "successes": 16,
+          "value": 1.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        }
+      },
+      "random_seed_101": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            8.89141247758046,
+            11.183497885413475
+          ],
+          "n": 16,
+          "value": 10.074437636571673
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -13.400117768154155,
+            -11.337170090141838
+          ],
+          "n": 16,
+          "value": -12.383707502629168
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9317464257387862,
+            0.9805388678163286
+          ],
+          "n": 16,
+          "value": 0.9585993915861649
+        }
+      },
+      "random_seed_102": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            9.318680221801426,
+            13.087075277748877
+          ],
+          "n": 16,
+          "value": 11.08987473607274
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -14.895860131137512,
+            -10.4838977324821
+          ],
+          "n": 16,
+          "value": -12.493396599022699
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9564610206334663,
+            0.9770659632440105
+          ],
+          "n": 16,
+          "value": 0.9670026905902716
+        }
+      },
+      "random_seed_103": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            12.425105732449078,
+            15.52355308867187
+          ],
+          "n": 16,
+          "value": 13.986102377751653
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -17.379101359344563,
+            -14.32894059930668
+          ],
+          "n": 16,
+          "value": -15.854932785347028
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9923444318320791,
+            0.9974491257742465
+          ],
+          "n": 16,
+          "value": 0.9950114513225898
+        }
+      },
+      "random_seed_104": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            9.262406792409488,
+            11.60142918300496
+          ],
+          "n": 16,
+          "value": 10.488926668954544
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -13.183968541408,
+            -10.815027143939632
+          ],
+          "n": 16,
+          "value": -11.876058799116985
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.9451180139851018,
+            0.9850309594028357
+          ],
+          "n": 16,
+          "value": 0.9700871777263438
+        }
+      },
+      "random_seed_105": {
+        "accuracy_delta": {
+          "ci95": [
+            0.0,
+            0.0
+          ],
+          "n": 16,
+          "value": 0.0
+        },
+        "base_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "candidate_accuracy": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "correct_retention": {
+          "ci95": null,
+          "n": 0,
+          "successes": 0,
+          "value": null
+        },
+        "kl_nats": {
+          "ci95": [
+            9.153356209395033,
+            11.315256881879414
+          ],
+          "n": 16,
+          "value": 10.28260435176291
+        },
+        "n": 16,
+        "target_logprob_delta_nats": {
+          "ci95": [
+            -14.168131367132425,
+            -11.085064903707039
+          ],
+          "n": 16,
+          "value": -12.645574775005077
+        },
+        "top1_agreement": {
+          "ci95": [
+            0.0,
+            0.1936076805344365
+          ],
+          "n": 16,
+          "successes": 0,
+          "value": 0.0
+        },
+        "total_variation": {
+          "ci95": [
+            0.968689377932605,
+            0.9894503758452249
+          ],
+          "n": 16,
+          "value": 0.9803973743949488
+        }
+      }
+    }
+  },
+  "schema_version": 1,
+  "signed_candidate_state_digest": "sha256:131341ad2907320653d88ed53e34653848854c760bcbb8be1ffcb9c5185897bf",
+  "target": {
+    "cases": [
+      "Task: Number 9 has parity",
+      "Task: Number 4 has parity",
+      "Task: Boolean False AND True gives",
+      "Task: Boolean False OR True gives",
+      "Task: Relation 9 > 2 is",
+      "Task: Relation 2 > 6 is",
+      "Rule: Number 9 has parity",
+      "Rule: Number 4 has parity",
+      "Rule: Boolean False AND True gives",
+      "Rule: Boolean False OR True gives",
+      "Rule: Relation 9 > 2 is",
+      "Rule: Relation 2 > 6 is"
+    ],
+    "metrics": {
+      "accuracy_delta": {
+        "ci95": [
+          1.0,
+          1.0
+        ],
+        "n": 12,
+        "value": 1.0
+      },
+      "base_accuracy": {
+        "ci95": [
+          0.0,
+          0.24249400665524085
+        ],
+        "n": 12,
+        "successes": 0,
+        "value": 0.0
+      },
+      "candidate_accuracy": {
+        "ci95": [
+          0.7575059933447592,
+          1.0
+        ],
+        "n": 12,
+        "successes": 12,
+        "value": 1.0
+      },
+      "correct_retention": {
+        "ci95": null,
+        "n": 0,
+        "successes": 0,
+        "value": null
+      },
+      "kl_nats": {
+        "ci95": [
+          17.734625853492005,
+          20.61077022183621
+        ],
+        "n": 12,
+        "value": 19.191223474773558
+      },
+      "n": 12,
+      "target_logprob_delta_nats": {
+        "ci95": [
+          6.332896195026311,
+          8.290328431352963
+        ],
+        "n": 12,
+        "value": 7.278967794446249
+      },
+      "top1_agreement": {
+        "ci95": [
+          0.0,
+          0.24249400665524085
+        ],
+        "n": 12,
+        "successes": 0,
+        "value": 0.0
+      },
+      "total_variation": {
+        "ci95": [
+          0.9947211879309802,
+          0.9987959800132394
+        ],
+        "n": 12,
+        "value": 0.9969103602225099
+      }
+    },
+    "source": "declared by the frozen candidate, which may have seen these prompts"
+  },
+  "transformers_parity": {
+    "max_abs_logit_difference": {
+      "base": 4.8917132158265986e-06,
+      "candidate": 3.354575221337086e-05
+    },
+    "sentences": 8
+  }
+}
