@@ -18,9 +18,9 @@ A capability is done when its pass conditions hold on a real checkpoint. Passing
 
 ## Milestone 1: Generic Gym Proposal / GPT-NeoX Qualification
 
-Status: **pipeline qualified on Pythia-14M; the qualified edit itself is harmful.** Every condition below has a test or recorded run. The conditions cover replay and measurement, not edit quality.
+Status: **pipeline qualified on Pythia-14M; the qualified candidate is harmful and rejected.** Every condition below has a test or recorded run. Qualification proves compilation, replay and measurement, not edit quality. Promotion is a separate decision.
 
-Recorded run: `docs/evidence/milestone1/`, made by `scripts/qualify_milestone1.py` at commit `8cb4070` on `EleutherAI/pythia-14m` revision `cf967c0`, starting from the proposal the Gym emitted.
+Recorded run: `docs/evidence/milestone1/`, made by `scripts/qualify_milestone1.py --candidate branch_3_contrastive_prefix_nullspace_rank6` at commit `6fa14b8` on `EleutherAI/pythia-14m` revision `cf967c0`. The Gym selected no branch, so this named candidate was qualified anyway. `promotion.json` records `promotion_status: rejected` with the exact reasons, and `selection.json` records every branch's scores.
 
 | # | Status | Evidence |
 | --- | --- | --- |
@@ -43,8 +43,9 @@ Measured result, which is not a success claim:
 
 Known limits:
 
-- The recorded run predates real selection, when the Gym always chose branch 3. `select_gym_branch` now selects no branch on Pythia-14M, so `scripts/qualify_milestone1.py` stops with that reason and can't currently reproduce this run.
-- The study still evaluates its holdout rules after freezing, so the qualification run exposes them. They aren't used for any choice, and the same rules are public in the repository.
+- Without `--candidate`, `scripts/qualify_milestone1.py` stops when the Gym selects no branch.
+- The study reads its holdout rules only after selecting a branch, so this run didn't read them. Those rules are public in the repository, so they aren't sealed either.
+- The promotion gate has not passed any real edit. See the [calibration](promotion-gate-calibration.md).
 - Importing the package loads its other modules, so condition 5 shows the named modules weren't used, not that the rest of the package is absent.
 - The signing key is ephemeral: it proves integrity since the run, not who ran it.
 - The recorded run executes a `/tmp` copy of the code. The script refuses a copy whose Python package differs from the recorded repository, but the prebuilt native extension is identified only by its digest.

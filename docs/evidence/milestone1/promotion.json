@@ -1,0 +1,143 @@
+{
+  "candidate_branch_id": "branch_3_contrastive_prefix_nullspace_rank6",
+  "gate": {
+    "checks": [
+      {
+        "check": "target_accuracy_gain",
+        "direction": "at_least",
+        "observed": 1.0,
+        "passed": true,
+        "threshold": 0.01
+      },
+      {
+        "check": "pooled_retention_task_agreement",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.98
+      },
+      {
+        "check": "retention_task_agreement:agreement",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.95
+      },
+      {
+        "check": "retention_task_agreement:arithmetic",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.95
+      },
+      {
+        "check": "retention_task_agreement:capitals",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.95
+      },
+      {
+        "check": "retention_task_agreement:collocations",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.95
+      },
+      {
+        "check": "retention_task_agreement:opposites",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.95
+      },
+      {
+        "check": "retention_task_agreement:sequences",
+        "direction": "at_least",
+        "observed": 0.0,
+        "passed": false,
+        "threshold": 0.95
+      },
+      {
+        "check": "free_text_agreement",
+        "direction": "at_least",
+        "observed": 0.007936507936507936,
+        "passed": false,
+        "threshold": 0.98
+      },
+      {
+        "check": "kl_nats_per_token",
+        "direction": "at_most",
+        "observed": 12.845993658861246,
+        "passed": false,
+        "threshold": 0.04879016416943205
+      },
+      {
+        "check": "perplexity_ratio",
+        "direction": "at_most",
+        "observed": 696993.6368899136,
+        "passed": false,
+        "threshold": 1.05
+      },
+      {
+        "check": "noop_control",
+        "observed": true,
+        "passed": true
+      },
+      {
+        "check": "kl_below_every_random_control",
+        "direction": "below",
+        "observed": 12.845993658861246,
+        "passed": false,
+        "threshold": 9.337643670304235
+      },
+      {
+        "check": "agreement_above_every_random_control",
+        "direction": "above",
+        "observed": 0.007936507936507936,
+        "passed": false,
+        "threshold": 0.018518518518518517
+      }
+    ],
+    "failed_checks": [
+      "pooled_retention_task_agreement",
+      "retention_task_agreement:agreement",
+      "retention_task_agreement:arithmetic",
+      "retention_task_agreement:capitals",
+      "retention_task_agreement:collocations",
+      "retention_task_agreement:opposites",
+      "retention_task_agreement:sequences",
+      "free_text_agreement",
+      "kl_nats_per_token",
+      "perplexity_ratio",
+      "kl_below_every_random_control",
+      "agreement_above_every_random_control"
+    ],
+    "kind": "nf_promotion_decision_v1",
+    "markdown_dashboard": "# Promotion decision: `rejected`\n\nMeasured by: neural_foundry.independent_eval\n\n| Check | Result | Observed | Limit |\n| --- | --- | ---: | ---: |\n| target_accuracy_gain | pass | 1.0 | 0.01 |\n| pooled_retention_task_agreement | FAIL | 0.0 | 0.98 |\n| retention_task_agreement:agreement | FAIL | 0.0 | 0.95 |\n| retention_task_agreement:arithmetic | FAIL | 0.0 | 0.95 |\n| retention_task_agreement:capitals | FAIL | 0.0 | 0.95 |\n| retention_task_agreement:collocations | FAIL | 0.0 | 0.95 |\n| retention_task_agreement:opposites | FAIL | 0.0 | 0.95 |\n| retention_task_agreement:sequences | FAIL | 0.0 | 0.95 |\n| free_text_agreement | FAIL | 0.007936507936507936 | 0.98 |\n| kl_nats_per_token | FAIL | 12.845993658861246 | 0.04879016416943205 |\n| perplexity_ratio | FAIL | 696993.6368899136 | 1.05 |\n| noop_control | pass | True |  |\n| kl_below_every_random_control | FAIL | 12.845993658861246 | 9.337643670304235 |\n| agreement_above_every_random_control | FAIL | 0.007936507936507936 | 0.018518518518518517 |\n",
+    "measured_by": "neural_foundry.independent_eval",
+    "promote_eligible": false,
+    "reason": null,
+    "schema_version": 1,
+    "status": "rejected"
+  },
+  "gym_selected_branch_id": null,
+  "promotion_status": "rejected",
+  "qualification_scope": "Proves compilation, replay and measurement of this candidate. It is not evidence of edit quality.",
+  "rejection_reasons": [
+    "gate: pooled_retention_task_agreement",
+    "gate: retention_task_agreement:agreement",
+    "gate: retention_task_agreement:arithmetic",
+    "gate: retention_task_agreement:capitals",
+    "gate: retention_task_agreement:collocations",
+    "gate: retention_task_agreement:opposites",
+    "gate: retention_task_agreement:sequences",
+    "gate: free_text_agreement",
+    "gate: kl_nats_per_token",
+    "gate: perplexity_ratio",
+    "gate: kl_below_every_random_control",
+    "gate: agreement_above_every_random_control",
+    "selection: not selected, selected branch is None",
+    "selection: retention 0.0 below 0.98"
+  ]
+}

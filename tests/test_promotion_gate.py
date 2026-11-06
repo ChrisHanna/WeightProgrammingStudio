@@ -91,6 +91,19 @@ def test_an_incomplete_report_is_refused(remove) -> None:  # type: ignore[no-unt
     assert decision["status"] == "not_evaluated"
 
 
+def test_recorded_calibration_promotes_nothing_and_the_no_op_fails_on_target_gain() -> None:
+    document = json.loads(EVIDENCE.parents[1].joinpath("promotion_gate_calibration.json").read_text(encoding="utf-8"))
+    arms = {row["arm"]: row for row in document["arms"]}
+    assert len(arms) == 7 and not any(row["promote_eligible"] for row in arms.values())
+    assert arms["no-op (exact)"]["status"] == "not_evaluated"
+    assert "target_accuracy_gain" in arms["no-op (near, scale 1 + 1e-9)"]["failed_checks"]
+
+
+def test_thresholds_are_the_frozen_values() -> None:
+    assert (pg.MIN_POOLED_TASK_AGREEMENT, pg.MIN_TEXT_AGREEMENT, pg.MIN_PER_TASK_AGREEMENT) == (0.98, 0.98, 0.95)
+    assert (pg.MAX_PERPLEXITY_RATIO, pg.MIN_TARGET_ACCURACY_GAIN) == (1.05, 0.01)
+
+
 def test_kl_limit_is_the_perplexity_limit_in_nats() -> None:
     assert pg.MAX_KL_NATS_PER_TOKEN == math.log(pg.MAX_PERPLEXITY_RATIO)
 

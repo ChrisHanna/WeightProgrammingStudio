@@ -1,0 +1,46 @@
+{
+  "branches": [
+    {
+      "branch_id": "branch_1_early_layer_rank2",
+      "development_accuracy": 0.16666666666666666,
+      "disqualified_because": [
+        "development 0.167 below 0.7",
+        "validation 0.167 below 0.7",
+        "retention 0.0 below 0.98"
+      ],
+      "reload_parity_verified": true,
+      "retention_guard_accuracy": 0.0,
+      "retention_guard_source": "selection_time_retention_guard",
+      "synthesis_retention_accuracy": 0.0,
+      "validation_accuracy": 0.16666666666666666
+    },
+    {
+      "branch_id": "branch_2_final_layer_naive_ridge_rank6",
+      "development_accuracy": 0.6666666666666666,
+      "disqualified_because": [
+        "development 0.667 below 0.7",
+        "validation 0.500 below 0.7",
+        "retention 0.0 below 0.98"
+      ],
+      "reload_parity_verified": true,
+      "retention_guard_accuracy": 0.0,
+      "retention_guard_source": "selection_time_retention_guard",
+      "synthesis_retention_accuracy": 1.0,
+      "validation_accuracy": 0.5
+    },
+    {
+      "branch_id": "branch_3_contrastive_prefix_nullspace_rank6",
+      "development_accuracy": 1.0,
+      "disqualified_because": [
+        "retention 0.0 below 0.98"
+      ],
+      "reload_parity_verified": true,
+      "retention_guard_accuracy": 0.0,
+      "retention_guard_source": "selection_time_retention_guard",
+      "synthesis_retention_accuracy": 1.0,
+      "validation_accuracy": 1.0
+    }
+  ],
+  "retention_guard_digest": "sha256:b12f927c7ddc9e08511a1e0fbe94535d6fbc4adce015d15e3e4b548962c46f72",
+  "selected_branch_id": null
+}

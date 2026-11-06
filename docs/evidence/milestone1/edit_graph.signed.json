@@ -1,5 +1,5 @@
 {
-  "key_fingerprint": "sha256:b93b822672488c663039efc872e51dde0e83c4ed027f77bd6eaaae2e73b846ad",
+  "key_fingerprint": "sha256:877d0e940e331fdca0f2f2e6a538883298464a153dd2e7c936211df55e2bec27",
   "kind": "nf_signed_patch_envelope",
   "patch": {
     "base_model_id": "EleutherAI/pythia-14m",
@@ -57,9 +57,9 @@
     ]
   },
   "patch_digest": "sha256:a2e3ef0e66f6ee17cbb2785ba2fb15fe49e99408f220dae8800403824edb8e91",
-  "public_key": "ed25519_pub:0b1a8f04fb352357b64839ae9d4718acb9a795650453c1a41875b4f6d573747c",
+  "public_key": "ed25519_pub:d85248f4eee357f209a65bea0c1c480308b75e751fda56c7da235c0749d4eb51",
   "schema_version": 1,
-  "signature": "ed25519_sig:b97683f7fcda249ed09bd25e651e6e1ebfc4e1266aa6820ef593029103737497a326158d1673d5d8246439489508677a28fa88cdaa4b142d10b92d05ecf7d60a",
+  "signature": "ed25519_sig:7872867a2f8ac91b662c12e12b9f661858afbf8c6a2f8adda5852d937f13bf88c957a032f5ca1011cd506c0091f92c7c1f94c306d90753582e10ee0ce58d5100",
   "signature_scheme": "ed25519_v1",
   "signer_id": "nf.edit_graph.v1"
 }
