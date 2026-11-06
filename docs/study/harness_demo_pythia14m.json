@@ -1,0 +1,515 @@
+{
+  "candidates": [
+    {
+      "candidate_digest": "sha256:a18b74fcc814a7e9a44fef5355acb00f9c2ce067f7a950b26f00154fdeff719e",
+      "synthesis_seed": 101
+    },
+    {
+      "candidate_digest": "sha256:05e00bcab9949852f593759c07420589cd9181df58f4e599b646ff54e60f08e3",
+      "synthesis_seed": 202
+    },
+    {
+      "candidate_digest": "sha256:53339d88cea05086823d4b8139f8ac9ec21e81cac28092071fd0a1ec5f51190c",
+      "synthesis_seed": 303
+    }
+  ],
+  "commit": "",
+  "decision": {
+    "effects": [
+      {
+        "base_accuracy": 0.5,
+        "candidate_accuracy": 0.5122222222222222,
+        "ci_high": 0.12574537037037034,
+        "ci_level": 0.9833333333333333,
+        "ci_low": -0.10575925925925918,
+        "clusters": 200,
+        "items": 600,
+        "mean_delta": 0.012222222222222169,
+        "p_adjusted": 0.8102379524095181,
+        "p_value": 0.40511897620475906,
+        "seed_deltas": {
+          "101": 0.015000000000000013,
+          "202": 0.015000000000000013,
+          "303": 0.006666666666666599
+        },
+        "task": "parity"
+      },
+      {
+        "base_accuracy": 0.5,
+        "candidate_accuracy": 0.5472222222222222,
+        "ci_high": 0.16407870370370367,
+        "ci_level": 0.9833333333333333,
+        "ci_low": -0.0766666666666667,
+        "clusters": 200,
+        "items": 600,
+        "mean_delta": 0.04722222222222218,
+        "p_adjusted": 0.555488902219556,
+        "p_value": 0.1851629674065187,
+        "seed_deltas": {
+          "101": 0.05666666666666664,
+          "202": 0.03833333333333333,
+          "303": 0.046666666666666634
+        },
+        "task": "boolean"
+      },
+      {
+        "base_accuracy": 0.5,
+        "candidate_accuracy": 0.5005555555555555,
+        "ci_high": 0.15815740740740744,
+        "ci_level": 0.9833333333333333,
+        "ci_low": -0.1585231481481481,
+        "clusters": 200,
+        "items": 600,
+        "mean_delta": 0.000555555555555558,
+        "p_adjusted": 0.8102379524095181,
+        "p_value": 0.4947010597880424,
+        "seed_deltas": {
+          "101": 0.0,
+          "202": -0.0050000000000000044,
+          "303": 0.006666666666666599
+        },
+        "task": "comparison"
+      }
+    ],
+    "failed_candidates": [],
+    "holdout_commitment": "sha256:3278c1d6d8af78d39309db81e0c00cf5176da614e537dfe6543c5f260934c077",
+    "label": "harness_demo",
+    "ledger_head": "sha256:7b91072d022371a24f20154b788a24f886cdbdd9b5126451d633fb27f0e107d8",
+    "manifest_digest": "sha256:7cb4fda5da454376caa9fc709537503ae772a63ad1b11c9af9b6d9fb76d454a1",
+    "plan_digest": "sha256:2b983dac3f578dd3effaf0aabc9c8270940e9aaca11dd2b9dc2374e63f32713b",
+    "promoted": false,
+    "rejection_reasons": [
+      {
+        "code": "NON_CONFIRMATORY_LABEL",
+        "message": "a 'harness_demo' plan can never promote",
+        "observed": null,
+        "scope": "study",
+        "threshold": null
+      },
+      {
+        "code": "EFFECT_CI_BELOW_MINIMUM",
+        "message": "the corrected 0.9833 CI lower bound is below the minimum effect",
+        "observed": -0.10575925925925918,
+        "scope": "parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value exceeds alpha",
+        "observed": 0.8102379524095181,
+        "scope": "parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "ACCURACY_BELOW_MINIMUM",
+        "message": "pooled candidate accuracy is below the minimum",
+        "observed": 0.5122222222222222,
+        "scope": "parity",
+        "threshold": 0.6
+      },
+      {
+        "code": "INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds reach the minimum effect",
+        "observed": 0.0,
+        "scope": "parity",
+        "threshold": 1.0
+      },
+      {
+        "code": "EFFECT_CI_BELOW_MINIMUM",
+        "message": "the corrected 0.9833 CI lower bound is below the minimum effect",
+        "observed": -0.0766666666666667,
+        "scope": "boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value exceeds alpha",
+        "observed": 0.555488902219556,
+        "scope": "boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "ACCURACY_BELOW_MINIMUM",
+        "message": "pooled candidate accuracy is below the minimum",
+        "observed": 0.5472222222222222,
+        "scope": "boolean",
+        "threshold": 0.6
+      },
+      {
+        "code": "INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds reach the minimum effect",
+        "observed": 0.3333333333333333,
+        "scope": "boolean",
+        "threshold": 1.0
+      },
+      {
+        "code": "EFFECT_CI_BELOW_MINIMUM",
+        "message": "the corrected 0.9833 CI lower bound is below the minimum effect",
+        "observed": -0.1585231481481481,
+        "scope": "comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value exceeds alpha",
+        "observed": 0.8102379524095181,
+        "scope": "comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "ACCURACY_BELOW_MINIMUM",
+        "message": "pooled candidate accuracy is below the minimum",
+        "observed": 0.5005555555555555,
+        "scope": "comparison",
+        "threshold": 0.6
+      },
+      {
+        "code": "INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds reach the minimum effect",
+        "observed": 0.0,
+        "scope": "comparison",
+        "threshold": 1.0
+      },
+      {
+        "code": "RETENTION_AGREEMENT_BELOW_MINIMUM",
+        "message": "the worst candidate's top-1 agreement with base is too low",
+        "observed": 0.0,
+        "scope": "retention",
+        "threshold": 0.9
+      },
+      {
+        "code": "RETENTION_KL_ABOVE_MAXIMUM",
+        "message": "the worst candidate's KL from base is too high",
+        "observed": 13.121802125751962,
+        "scope": "retention",
+        "threshold": 0.1
+      }
+    ],
+    "retention": {
+      "items": 200,
+      "worst_agreement_ci_low": 0.0,
+      "worst_kl_ci_high": 13.121802125751962
+    },
+    "study_id": "harness-demo-pythia-14m"
+  },
+  "freeze": {
+    "holdout_commitment": "sha256:3278c1d6d8af78d39309db81e0c00cf5176da614e537dfe6543c5f260934c077",
+    "manifest_digest": "sha256:7cb4fda5da454376caa9fc709537503ae772a63ad1b11c9af9b6d9fb76d454a1",
+    "retention_items": 200,
+    "task_items": 1800
+  },
+  "label": "HARNESS DEMO, NOT A SCIENTIFIC RESULT",
+  "not_evidence_for": "any edit method, Pythia-14M capability, or promotion of anything",
+  "per_candidate_aggregates": [
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 200,
+            "high": 0.0,
+            "level": 0.9833333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 200,
+            "high": 13.121802125751962,
+            "level": 0.9833333333333333,
+            "low": 12.077302568624852,
+            "mean": 12.579057531734215
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5566666666666666,
+              "clusters": 200,
+              "high": 0.14999999999999997,
+              "level": 0.9833333333333333,
+              "low": -0.04504166666666643,
+              "mean": 0.056666666666666636
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.3516666666666666,
+              "clusters": 200,
+              "high": 0.39166666666666666,
+              "level": 0.9833333333333333,
+              "low": 0.3094305555555556,
+              "mean": 0.3516666666666666
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 200,
+              "high": 0.1489027777777778,
+              "level": 0.9833333333333333,
+              "low": -0.1466666666666667,
+              "mean": -1.6653345369377347e-17
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.34,
+              "clusters": 200,
+              "high": 0.39833333333333326,
+              "level": 0.9833333333333333,
+              "low": 0.2866666666666666,
+              "mean": 0.34
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.515,
+              "clusters": 200,
+              "high": 0.175,
+              "level": 0.9833333333333333,
+              "low": -0.15500000000000003,
+              "mean": 0.014999999999999968
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5133333333333333,
+              "clusters": 200,
+              "high": 0.5939027777777779,
+              "level": 0.9833333333333333,
+              "low": 0.4333333333333333,
+              "mean": 0.5133333333333333
+            }
+          }
+        }
+      },
+      "candidate_digest": "sha256:a18b74fcc814a7e9a44fef5355acb00f9c2ce067f7a950b26f00154fdeff719e"
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 200,
+            "high": 0.0,
+            "level": 0.9833333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 200,
+            "high": 12.472891216626921,
+            "level": 0.9833333333333333,
+            "low": 11.262377339764726,
+            "mean": 11.85296014605077
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5383333333333333,
+              "clusters": 200,
+              "high": 0.17556944444444447,
+              "level": 0.9833333333333333,
+              "low": -0.11280555555555541,
+              "mean": 0.0383333333333333
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5383333333333333,
+              "clusters": 200,
+              "high": 0.605,
+              "level": 0.9833333333333333,
+              "low": 0.47443055555555563,
+              "mean": 0.5383333333333333
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.495,
+              "clusters": 200,
+              "high": 0.1589027777777778,
+              "level": 0.9833333333333333,
+              "low": -0.17333333333333337,
+              "mean": -0.005000000000000016
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.495,
+              "clusters": 200,
+              "high": 0.575,
+              "level": 0.9833333333333333,
+              "low": 0.4116666666666667,
+              "mean": 0.495
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.515,
+              "clusters": 200,
+              "high": 0.05890277777777781,
+              "level": 0.9833333333333333,
+              "low": -0.030000000000000013,
+              "mean": 0.014999999999999975
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5133333333333333,
+              "clusters": 200,
+              "high": 0.5683333333333332,
+              "level": 0.9833333333333333,
+              "low": 0.4577638888888889,
+              "mean": 0.5133333333333333
+            }
+          }
+        }
+      },
+      "candidate_digest": "sha256:05e00bcab9949852f593759c07420589cd9181df58f4e599b646ff54e60f08e3"
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 200,
+            "high": 0.0,
+            "level": 0.9833333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 200,
+            "high": 12.928936173575707,
+            "level": 0.9833333333333333,
+            "low": 11.767738810479067,
+            "mean": 12.359484544749794
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5466666666666666,
+              "clusters": 200,
+              "high": 0.1789027777777778,
+              "level": 0.9833333333333333,
+              "low": -0.0905694444444444,
+              "mean": 0.04666666666666661
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5233333333333333,
+              "clusters": 200,
+              "high": 0.5822361111111112,
+              "level": 0.9833333333333333,
+              "low": 0.46833333333333327,
+              "mean": 0.5233333333333333
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5066666666666666,
+              "clusters": 200,
+              "high": 0.17,
+              "level": 0.9833333333333333,
+              "low": -0.16166666666666668,
+              "mean": 0.0066666666666666515
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.31666666666666665,
+              "clusters": 200,
+              "high": 0.3705694444444445,
+              "level": 0.9833333333333333,
+              "low": 0.2633333333333333,
+              "mean": 0.31666666666666665
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5066666666666666,
+              "clusters": 200,
+              "high": 0.15504166666666677,
+              "level": 0.9833333333333333,
+              "low": -0.14223611111111106,
+              "mean": 0.00666666666666663
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5066666666666666,
+              "clusters": 200,
+              "high": 0.5689027777777778,
+              "level": 0.9833333333333333,
+              "low": 0.44609722222222226,
+              "mean": 0.5066666666666667
+            }
+          }
+        }
+      },
+      "candidate_digest": "sha256:53339d88cea05086823d4b8139f8ac9ec21e81cac28092071fd0a1ec5f51190c"
+    }
+  ],
+  "plan": {
+    "alpha": 0.05,
+    "analysis_seed": 20261106,
+    "bootstrap_resamples": 2000,
+    "checkpoint_digest": "sha256:116a02532db461f91386a5b20f942ff2c8d4de7341e21b55caafc3d7b25f49a1",
+    "checkpoint_dir": "/tmp/pythia-14m",
+    "clusters_per_task_per_draw": 100,
+    "correction": "holm",
+    "development_prefixes": [
+      "Task:",
+      "Rule:"
+    ],
+    "evaluator": "pythia_mlp_override",
+    "holdout_draws": 2,
+    "holdout_prefixes": [
+      "Today:",
+      "Check:",
+      "Quiz:"
+    ],
+    "hypothesis": "HARNESS DEMO, NOT A SCIENTIFIC RESULT: a scripted AlphaEdit candidate exercises the protocol",
+    "label": "harness_demo",
+    "number_domain": [
+      0,
+      9999
+    ],
+    "permutation_resamples": 5000,
+    "primary_metric": "forced_choice_accuracy",
+    "retention_items": 200,
+    "schema_version": "nf.study.plan.v1",
+    "secondary_metrics": [
+      "top1_accuracy"
+    ],
+    "study_id": "harness-demo-pythia-14m",
+    "synthesis_seeds": [
+      101,
+      202,
+      303
+    ],
+    "tasks": [
+      "parity",
+      "boolean",
+      "comparison"
+    ],
+    "thresholds": {
+      "max_retention_kl": 0.1,
+      "min_accuracy": 0.6,
+      "min_effect": 0.05,
+      "min_retention_agreement": 0.9,
+      "min_seed_pass_fraction": 1.0
+    },
+    "torch_threads": 2
+  },
+  "plan_digest": "sha256:2b983dac3f578dd3effaf0aabc9c8270940e9aaca11dd2b9dc2374e63f32713b",
+  "repeat_query_response": "ALREADY_QUERIED: this candidate has already used its only query",
+  "synthesis": {
+    "algorithm": "AlphaEdit",
+    "layer": 5,
+    "rules_per_task": 4,
+    "strength": 80.0
+  },
+  "wall_seconds": 153.9
+}
