@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 import torch
 
+from .method_plans import MethodEditStep, add_delta_step, low_rank_step
 from . import ir
 from .m4_modalities import construct_algorithmic_relu_rule
 from .pythia import (
@@ -270,6 +271,7 @@ class EasyEditAdapterReceipt:
     target_layers: tuple[int, ...] = ()
     edited_weights_by_layer: dict[int, torch.Tensor] | None = None
     layer_plan_digests: tuple[str, ...] = ()
+    edit_steps: tuple[MethodEditStep, ...] = ()
 
 
 def run_easyedit_adapter(
@@ -334,6 +336,8 @@ def run_easyedit_adapter(
     rank = len(associations)
 
     override: dict[int, torch.Tensor] = {}
+    # A repeated target layer restarts from the base weight, so its last edit replaces the earlier one.
+    steps_by_layer: dict[int, MethodEditStep] = {}
     plan_digests: list[str] = []
     cand_digests: list[str] = []
     all_reload_ok = True
@@ -414,6 +418,7 @@ def run_easyedit_adapter(
             smoke_probe_vec=k_mat[:, 0],
         )
         override[layer_idx] = w_edited
+        steps_by_layer[layer_idx] = low_rank_step(site_name, str(algorithm).lower(), left_u, right_v)
         plan_digests.append(plan_d)
         cand_digests.append(cand_d)
         all_reload_ok = all_reload_ok and reload_ok
@@ -450,6 +455,7 @@ def run_easyedit_adapter(
         target_layers=resolved_layers,
         edited_weights_by_layer=dict(override),
         layer_plan_digests=tuple(plan_digests),
+        edit_steps=tuple(steps_by_layer.values()),
     )
 
 
