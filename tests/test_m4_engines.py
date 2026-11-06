@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from neural_foundry import m4_ecosystems
 from neural_foundry.m4_ecosystems import (
     CommunityGymPackage,
     TrainedProposerArtifact,
@@ -727,5 +730,37 @@ def test_library_reuse_strategy_retrieval_cross_model_protocol_proposer_dataset_
     assert acceptance.cg09_construction_passed is True
     assert acceptance.cg10_transfer_passed is True
     assert acceptance.cg11_methods_and_costs_passed is True
+    assert acceptance.cg11_reload_parity_verified is True
     assert acceptance.cg12_evidence_quality_passed is True
     assert acceptance.cg13_library_lifecycle_passed is True
+
+
+def _exported_lora_weight(directory: Path) -> tuple[torch.Tensor, torch.Tensor]:
+    probes = torch.tensor([[1.0, 0.5], [-0.5, 2.0]], dtype=torch.float64)
+    merged = torch.tensor([[0.25, -1.5]], dtype=torch.float64)
+    m4_ecosystems.export_huggingface_safetensors(SimpleNamespace(tensors={"merged_weight": merged}, config={}), directory, dtype="f64")
+    return merged, probes
+
+
+def test_baseline_reload_parity_passes_on_the_exported_bytes(tmp_path: Path) -> None:
+    merged, probes = _exported_lora_weight(tmp_path)
+    assert m4_ecosystems.verify_baseline_reload_parity(merged, probes, tmp_path) is True
+
+
+def test_baseline_reload_parity_fails_when_the_file_was_altered(tmp_path: Path) -> None:
+    merged, probes = _exported_lora_weight(tmp_path)
+    path = tmp_path / "model.safetensors"
+    raw = bytearray(path.read_bytes())
+    raw[-1] ^= 0x01  # Changes the last f64's exponent; the value stays finite and the layout valid.
+    path.write_bytes(bytes(raw))
+    assert m4_ecosystems.reload_exported_baseline_weight(tmp_path).shape == merged.shape
+    assert m4_ecosystems.verify_baseline_reload_parity(merged, probes, tmp_path) is False
+
+
+def test_m4_gate_fails_when_the_reloaded_tensor_differs(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = m4_ecosystems.reload_exported_baseline_weight
+    monkeypatch.setattr(m4_ecosystems, "reload_exported_baseline_weight", lambda directory: real(directory) + 1e-9)
+    report = m4_ecosystems.run_m4_feature_acceptance_suite()
+    assert report.cg11_reload_parity_verified is False
+    assert report.cg11_methods_and_costs_passed is False
+    assert report.all_gates_passed is False

@@ -20,11 +20,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
+import struct
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import torch
 
+from .export_formats import _map_file, _parse_safetensors_header, export_huggingface_safetensors
 from .m4_modalities import (
     EvidenceBasis,
     EvidenceOrigin,
@@ -1083,11 +1089,47 @@ class M4FeatureAcceptanceReport:
     cg11_methods_and_costs_passed: bool
     cg12_evidence_quality_passed: bool
     cg13_library_lifecycle_passed: bool
+    # The merged LoRA fixture weight was written to safetensors and read back identical; part of CG-11.
+    cg11_reload_parity_verified: bool
     # Empty: these gates exercise fixtures and contract refusals, so they qualify no engine.
     qualified_engines: tuple[str, ...]
     all_gates_passed: bool
     real_model_evaluated: Literal[False] = False
     evidence: EvidenceBasis = "measured_on_fixture"
+
+
+_BASELINE_WEIGHT_NAME = "merged_weight"
+
+
+def reload_exported_baseline_weight(checkpoint_dir: Path) -> torch.Tensor:
+    """Read a weight back from the exported safetensors bytes, sharing nothing with the tensor that was written."""
+    blob = _map_file(checkpoint_dir / "model.safetensors")
+    header, data_start = _parse_safetensors_header(blob)
+    meta = header[_BASELINE_WEIGHT_NAME]
+    if meta["dtype"] != "F64":
+        raise M4ContractError("RELOAD_PARITY_FAILED", f"expected an F64 weight, found {meta['dtype']}")
+    start, end = meta["data_offsets"]
+    shape = [int(d) for d in meta["shape"]]
+    values = struct.unpack(f"<{math.prod(shape)}d", blob[data_start + start : data_start + end])
+    return torch.tensor(values, dtype=torch.float64).reshape(shape)
+
+
+def verify_baseline_reload_parity(merged: torch.Tensor, probe_inputs: torch.Tensor, checkpoint_dir: Path) -> bool:
+    """True only if the exported weight reloads with identical bits and identical outputs on the probes.
+
+    This is a same-process file round trip of one fixture matrix, not a fresh-process model reload.
+    """
+    reloaded = reload_exported_baseline_weight(checkpoint_dir)
+    if reloaded.shape != merged.shape or not torch.equal(reloaded, merged):
+        return False
+    return torch.equal(probe_inputs @ reloaded.T, probe_inputs @ merged.T)
+
+
+def _lora_reload_parity(merged: torch.Tensor, probe_inputs: torch.Tensor) -> bool:
+    with tempfile.TemporaryDirectory() as scratch:
+        fixture = SimpleNamespace(tensors={_BASELINE_WEIGHT_NAME: merged}, config={})
+        export_huggingface_safetensors(fixture, scratch, dtype="f64")
+        return verify_baseline_reload_parity(merged, probe_inputs, Path(scratch))
 
 
 def run_m4_feature_acceptance_suite(
@@ -1096,7 +1138,8 @@ def run_m4_feature_acceptance_suite(
 ) -> M4FeatureAcceptanceReport:
     """Software-path checks on small fixtures for CG-09 to CG-13 (T099). A pass is not a qualification.
 
-    CG-09 to CG-11 compute on tiny tensors. CG-12 and CG-13 check only that the labelling and reuse
+    CG-09 to CG-11 compute on tiny tensors; CG-11 also exports the merged LoRA weight and checks its
+    reload. CG-12 and CG-13 check only that the labelling and reuse
     contracts refuse bad inputs.
     """
     if allow_partial_qualification:
@@ -1139,7 +1182,7 @@ def run_m4_feature_acceptance_suite(
     cg10_ok = transfer_rep.functional_transfer_verified and transfer_rep.aligned_transfer_mse < 1e-10
 
     # 3. CG-11: Authorized baseline cost accounting & reload parity
-    _, lora_rec = run_lora_baseline(
+    lora_merged, lora_rec = run_lora_baseline(
         torch.zeros(1, 2, dtype=torch.float64),
         probe_x,
         target_y,
@@ -1147,7 +1190,8 @@ def run_m4_feature_acceptance_suite(
         rank=1,
         steps=8,
     )
-    cg11_ok = lora_rec.eval_loss_after < lora_rec.eval_loss_before
+    cg11_reload_ok = _lora_reload_parity(lora_merged, probe_x)
+    cg11_ok = lora_rec.eval_loss_after < lora_rec.eval_loss_before and cg11_reload_ok
 
     # 4. CG-12: a declared reproduction must not raise a source's evidence grade
     src_rec = ingest_research_source_record(
@@ -1202,6 +1246,7 @@ def run_m4_feature_acceptance_suite(
         cg09_construction_passed=cg09_ok,
         cg10_transfer_passed=cg10_ok,
         cg11_methods_and_costs_passed=cg11_ok,
+        cg11_reload_parity_verified=cg11_reload_ok,
         cg12_evidence_quality_passed=cg12_ok,
         cg13_library_lifecycle_passed=cg13_ok,
         qualified_engines=(),
