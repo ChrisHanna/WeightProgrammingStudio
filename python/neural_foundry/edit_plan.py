@@ -128,6 +128,36 @@ def _decode_matrix(doc: Mapping[str, Any]) -> torch.Tensor:
     return torch.tensor(struct.unpack(f"<{shape[0] * shape[1]}d", raw), dtype=torch.float64).reshape(shape)
 
 
+def _tied_pairs(model: Any, base: Mapping[str, torch.Tensor], edited: Sequence[str]) -> list[tuple[str, str]]:
+    """Each edited tensor paired with any tensor tied to it: sharing storage, or identical under a declared tie."""
+    config = getattr(model, "config", None)
+    declared = isinstance(config, Mapping) and bool(config.get("tie_word_embeddings"))
+    pairs = []
+    for name in sorted(edited):
+        weight = base[name]
+        for other, candidate in base.items():
+            if other == name or candidate.shape != weight.shape or candidate.dtype != weight.dtype:
+                continue
+            if candidate.data_ptr() == weight.data_ptr() or (declared and torch.equal(candidate, weight)):
+                pairs.append((name, other))
+    return pairs
+
+
+def _require_ties_kept(
+    pairs: Sequence[tuple[str, str]], base: Mapping[str, torch.Tensor], working: Mapping[str, torch.Tensor], error: type[ValueError]
+) -> None:
+    for name, other in pairs:
+        if not torch.equal(working[name], working.get(other, base[other].to(torch.float64))):
+            raise error(f"Tensors {name!r} and {other!r} are tied, and this edit would split them; apply the same edit to both")
+
+
+def _retie(model: Any, pairs: Sequence[tuple[str, str]]) -> Any:
+    """Cloning gives every tensor its own storage, so point tied names back at one tensor."""
+    for name, other in pairs:
+        model.tensors[other] = model.tensors[name]
+    return model
+
+
 def _spectrum(matrix: torch.Tensor, limit: int = 16) -> tuple[float, ...]:
     return tuple(round(float(v), 6) for v in torch.linalg.svdvals(matrix)[:limit])
 
@@ -383,6 +413,8 @@ class EditPlan:
                     arguments,
                 )
             )
+        ties = _tied_pairs(self.base_model, base, list(working))
+        _require_ties_kept(ties, base, working, EditConstraintViolation)
         changed = 0
         frobenius = 0.0
         spectral_delta = 0.0
@@ -403,7 +435,7 @@ class EditPlan:
         ):
             if limit is not None and value > limit:
                 raise EditConstraintViolation(f"{label} {value:.6g} exceeds the limit of {limit:.6g}")
-        candidate_model = _apply_state_tensors_to_clone(self.base_model, {**base, **working})
+        candidate_model = _retie(_apply_state_tensors_to_clone(self.base_model, {**base, **working}), ties)
         retention = None
         if c.preserve_prompts:
             kept = sum(
@@ -576,6 +608,8 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     digest = str(content_digest(canonicalize({"schema_version": 1, "kind": "nf_edit_plan", "steps": [r.plan_digest for r in receipts]})))
     if digest != graph.get("plan_digest"):
         raise EditGraphError("Replay produced a different plan digest")
+    ties = _tied_pairs(base_model, base, list(working))
+    _require_ties_kept(ties, base, working, EditGraphError)
     changed = frobenius = spectral = 0.0
     for name, edited in working.items():
         delta = edited - base[name].to(torch.float64)
@@ -586,7 +620,7 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     if state != graph.get("candidate_state_digest"):
         raise EditGraphError("Replay produced a different whole-model digest")
     return PlanCandidate(
-        _apply_state_tensors_to_clone(base_model, {**base, **working}), working, tuple(receipts), digest, int(changed), frobenius**0.5, spectral, None, state
+        _retie(_apply_state_tensors_to_clone(base_model, {**base, **working}), ties), working, tuple(receipts), digest, int(changed), frobenius**0.5, spectral, None, state
     )
 
 

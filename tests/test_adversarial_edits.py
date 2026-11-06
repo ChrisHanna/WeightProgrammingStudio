@@ -206,14 +206,48 @@ def _tied_model() -> Toy:
     return toy
 
 
-@xfail("D6 edit_plan.py: an edit changes one of two tied tensors and the tie is silently lost")
 def test_edit_of_a_tied_weight_does_not_silently_split_the_tie() -> None:
     toy = _tied_model()
     try:
         out = EditPlan(toy).scale(SITE, 2.0).preview().model
-    except REFUSED:
+    except REFUSED as refusal:
+        assert "tied" in str(refusal)
         return
     assert torch.equal(out.tensors[SITE], out.tensors[TWIN])
+
+
+def test_the_same_edit_to_both_tied_weights_keeps_the_tie_through_replay() -> None:
+    toy = _tied_model()
+    plan = EditPlan(toy).scale(SITE, 2.0).scale(TWIN, 2.0)
+    out = plan.preview().model
+    assert out.tensors[SITE] is out.tensors[TWIN]
+    assert torch.equal(out.tensors[SITE], toy.tensors[SITE] * 2.0)
+    replayed = apply_edit_graph(_tied_model(), plan.to_graph()).model
+    assert replayed.tensors[SITE] is replayed.tensors[TWIN]
+
+
+def test_different_edits_to_tied_weights_are_refused() -> None:
+    with pytest.raises(EditConstraintViolation, match="tied"):
+        EditPlan(_tied_model()).scale(SITE, 2.0).scale(TWIN, 3.0).preview()
+
+
+def test_a_declared_tie_is_seen_after_loading_gave_each_name_its_own_storage() -> None:
+    toy = _tied_model()
+    toy.tensors[TWIN] = toy.tensors[SITE].clone()
+    with pytest.raises(EditConstraintViolation, match="tied"):
+        EditPlan(toy).scale(SITE, 2.0).preview()
+
+
+def test_replay_on_a_tied_base_refuses_to_split_the_tie() -> None:
+    graph = EditPlan(Toy()).scale(SITE, 2.0).to_graph()
+    tied = Toy()
+    tied.tensors[TWIN] = tied.tensors[SITE]
+    graph["base_state_digest"] = edit_plan.tensor_state_digest(tied.tensors)
+    edited = dict(tied.tensors)
+    edited[SITE] = edited[SITE] * 2.0
+    graph["candidate_state_digest"] = edit_plan.tensor_state_digest(edited)
+    with pytest.raises(EditGraphError, match="tied"):
+        apply_edit_graph(tied, graph)
 
 
 def test_graph_cannot_be_redirected_to_a_tensor_with_identical_bytes() -> None:
