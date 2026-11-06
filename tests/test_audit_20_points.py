@@ -361,7 +361,7 @@ def test_points_11_12_13_14_f16_bf16_quantized_sharded_mmap_gpu_and_gguf_roundtr
 
     for qmode in ("f32", "f16", "q8_0"):
         gguf_file = tmp_path / f"model_{qmode}.gguf"
-        export_formats.export_gguf_v3(edited_model, gguf_file, quantization=qmode)
+        export_formats.export_gguf_v3(edited_model, gguf_file, quantization=qmode, behaviour_override="small fixture; checked by the reload below")
         _, gguf_ver = export_formats.reload_and_verify_gguf_v3(gguf_file, edited_model, probes)
         assert gguf_ver.gain_preserved_after_rebuild is True
         assert gguf_ver.behavioral_match_rate == 1.0
@@ -658,7 +658,7 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
         tensors[model.mlp_down_proj_site(l_idx)] = w_t
     edited_model = export_formats._apply_state_tensors_to_clone(model, tensors)
     gguf_q4 = tmp_path / "edited_q4_0.gguf"
-    export_formats.export_gguf_v3(edited_model, gguf_q4, quantization="q4_0")
+    export_formats.export_gguf_v3(edited_model, gguf_q4, quantization="q4_0", behaviour_override="small fixture; checked by the reload below")
     _, q4_ver = export_formats.reload_and_verify_gguf_v3(
         gguf_q4, edited_model, ["The capital of France is", "The capital of Japan is"]
     )
@@ -777,7 +777,7 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
 
     qwen_m = st.select_model("Qwen/qwen2-dense-mini")
     gguf_q4km = tmp_path / "qwen_q4km.gguf"
-    export_formats.export_gguf_v3(qwen_m, gguf_q4km, quantization="nf_q4")
+    export_formats.export_gguf_v3(qwen_m, gguf_q4km, quantization="nf_q4", behaviour_override="small fixture; checked by the reload below")
     _, q4km_ver = export_formats.reload_and_verify_gguf_v3(gguf_q4km, qwen_m, ["Hello world"])
     assert q4km_ver.gain_preserved_after_rebuild is True
 
