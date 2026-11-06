@@ -287,8 +287,9 @@ assert hf_receipt.gain_preserved_after_rebuild is True
 # Lossy modes need at least 20 behaviour_probes, or a behaviour_override stating why they're accepted.
 export_formats.export_gguf_v3(edited_model, Path("/tmp/edited_q8.gguf"), quantization="q8_0", behaviour_override="demo on a fixture")
 _, gguf_receipt = export_formats.reload_and_verify_gguf_v3("/tmp/edited_q8.gguf", edited_model, probes)
-assert gguf_receipt.gain_preserved_after_rebuild is True
+assert gguf_receipt.behavioral_match_rate == 1.0
 assert gguf_receipt.behaviour_status == "override_unverified"
+assert gguf_receipt.gain_preserved_after_rebuild is False  # The export gate never measured it.
 ```
 
 ### 3. Patch Diffs, Cryptographic Signing & Instant Rollback ("Git for Weights")

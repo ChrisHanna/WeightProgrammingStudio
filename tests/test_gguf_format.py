@@ -331,6 +331,15 @@ def test_failed_gate_stays_marked_even_when_reload_probes_all_match(tmp_path: Pa
     assert receipt.gain_preserved_after_rebuild is False
 
 
+def test_unmeasured_override_does_not_claim_preservation_even_when_reload_probes_all_match(tmp_path: Path) -> None:
+    model = Behaving({"w": torch.ones(2, 32)})
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q8_0", behaviour_override="no probes on purpose")
+    _, receipt = export_formats.reload_and_verify_gguf_v3(path, model, PROBES)
+    assert receipt.behaviour_status == "override_unverified"
+    assert receipt.behavioral_match_rate == 1.0
+    assert receipt.gain_preserved_after_rebuild is False
+
+
 @pytest.mark.parametrize("reason", ["", "   "])
 def test_override_needs_a_reason(tmp_path: Path, reason: str) -> None:
     with pytest.raises(ValueError, match="reason"):

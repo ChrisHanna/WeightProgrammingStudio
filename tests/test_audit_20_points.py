@@ -363,7 +363,8 @@ def test_points_11_12_13_14_f16_bf16_quantized_sharded_mmap_gpu_and_gguf_roundtr
         gguf_file = tmp_path / f"model_{qmode}.gguf"
         export_formats.export_gguf_v3(edited_model, gguf_file, quantization=qmode, behaviour_override="small fixture; checked by the reload below")
         _, gguf_ver = export_formats.reload_and_verify_gguf_v3(gguf_file, edited_model, probes)
-        assert gguf_ver.gain_preserved_after_rebuild is True
+        # f32 has no gate to pass. The lossy modes carry an override that was never measured, so they can't claim it.
+        assert gguf_ver.gain_preserved_after_rebuild is (qmode == "f32")
         assert gguf_ver.behavioral_match_rate == 1.0
 
 
@@ -662,7 +663,8 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
     _, q4_ver = export_formats.reload_and_verify_gguf_v3(
         gguf_q4, edited_model, ["The capital of France is", "The capital of Japan is"]
     )
-    assert q4_ver.gain_preserved_after_rebuild is True
+    assert q4_ver.behaviour_status == "override_unverified" and q4_ver.gain_preserved_after_rebuild is False
+    assert q4_ver.behavioral_match_rate == 1.0
 
     # Subprocess evaluator for runtime="llama.cpp"
     suite = _minimal_suite()
@@ -779,7 +781,8 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
     gguf_q4km = tmp_path / "qwen_q4km.gguf"
     export_formats.export_gguf_v3(qwen_m, gguf_q4km, quantization="nf_q4", behaviour_override="small fixture; checked by the reload below")
     _, q4km_ver = export_formats.reload_and_verify_gguf_v3(gguf_q4km, qwen_m, ["Hello world"])
-    assert q4km_ver.gain_preserved_after_rebuild is True
+    assert q4km_ver.behaviour_status == "override_unverified" and q4km_ver.gain_preserved_after_rebuild is False
+    assert q4km_ver.behavioral_match_rate == 1.0
 
     # 3. Section 3a & 4a: One-command `nf repair --model Qwen/... --failure looping` + `nf verify <patch>` in Rust CLI & Python SDK
     # The native CLI cannot execute a model, so it must refuse rather than sign invented results.

@@ -1467,7 +1467,9 @@ def reload_and_verify_gguf_v3(
         prompts_tested=len(prompts),
         behavioral_match_rate=round(match_rate, 6),
         max_logit_abs_diff=round(max_diff, 8),
-        gain_preserved_after_rebuild=match_rate == 1.0 and metadata.get("nf.behaviour_status") != GGUF_BEHAVIOUR_FAILED_GATE,
+        # Reload probes can't stand in for the export gate: an override means the gate didn't pass or never ran.
+        gain_preserved_after_rebuild=match_rate == 1.0
+        and metadata.get("nf.behaviour_status") not in (GGUF_BEHAVIOUR_FAILED_GATE, GGUF_BEHAVIOUR_UNVERIFIED),
     )
 
 
