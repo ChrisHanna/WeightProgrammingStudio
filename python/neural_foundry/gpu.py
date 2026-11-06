@@ -692,6 +692,8 @@ def execute_transactional_gpu_edit_and_eval(
         orthonormal_basis=left_basis.detach().cpu() if left_basis is not None and operation == "subspace_projection" else None,
         provenance_tag="studio.gpu_transactional.v1",
     )
+    from .ir import require_reload_parity
+    require_reload_parity(rust_tx)
     shape = (int(source_tensor.shape[0]), int(source_tensor.shape[1]))
     rust_mat = torch.tensor(
         unpack_matrix_bytes(rust_tx.edited_bytes, shape, requested_dtype),

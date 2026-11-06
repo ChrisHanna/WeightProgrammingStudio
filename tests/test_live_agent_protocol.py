@@ -160,7 +160,7 @@ def test_different_proposals_produce_different_candidates(provider: Any) -> None
     assert all(o.get("agent_proposal_applied") is True for o in observations), observations
     assert len({o["candidate_id"] for o in observations}) == 3
     # Nothing was submitted, so nothing is evaluated on the holdout.
-    assert report.held_out_accuracy_after is None and report.rust_candidate_digest == ""
+    assert report.held_out_accuracy_after is None and report.rust_candidate_digest is None
 
 
 def test_openai_wire_format(provider: Any) -> None:

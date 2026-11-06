@@ -21,14 +21,14 @@ import re
 import struct
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
-from . import evals, ir
+from . import evals, independent_eval, ir, promotion_gate
 from .gym_proposal import GymWeightProposalSpec, ProposedOperation, ResolvedGymWeightProposal, SemanticSite
 from .method_plans import VerifiedMethodSteps, low_rank_step, verify_method_steps
 from .provenance import evidence_grade_for_model
@@ -1050,6 +1050,29 @@ def build_mini_qwen2_causal_lm() -> Qwen2CausalLM:
     )
 
 
+def _independent_promotion(
+    model: Any,
+    *,
+    candidate_id: str,
+    edited: Mapping[str, torch.Tensor],
+    target_cases: Sequence[tuple[str, str]],
+    self_check: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Decide promotion from the independent evaluator. The study's own check is kept beside it, unused."""
+    cases = [(prompt, target.replace("Ġ", " ")) for prompt, target in target_cases]
+    try:
+        candidate = independent_eval.freeze_candidate(model.tensors, edited, candidate_id=candidate_id, target_cases=cases)
+        decision = promotion_gate.decide_promotion(independent_eval.evaluate_candidate(model, candidate))
+    except (independent_eval.IndependentEvalError, KeyError) as exc:
+        # For example a fixture whose tokenizer can't express the corpus. Unmeasured is not promoted.
+        decision = promotion_gate.not_evaluated(f"The independent evaluator could not run: {exc}")
+    if evidence_grade_for_model(model) == "fixture_synthetic":
+        decision = promotion_gate.not_evaluated("Fixtures prove the software path only, so they are never promotable.")
+    decision["gym_self_check"] = dict(self_check)
+    decision["dashboard"] = dict(self_check.get("dashboard", {}))
+    return decision
+
+
 def run_pythia_weight_programming_study(
     model: PythiaModel,
     *,
@@ -1134,8 +1157,9 @@ def run_pythia_weight_programming_study(
         provenance_tag="pythia.whitened_nullspace_rank4.v1",
         engine_name="pythia.whitened_subspace",
     )
+    ir.require_reload_parity(tx)
     w_before_digest = tx.before_parameter_digest
-    reload_parity_ok = tx.reload_parity_verified
+    reload_parity_ok = True  # require_reload_parity above raised otherwise.
     w_edited = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -1265,11 +1289,17 @@ def run_pythia_weight_programming_study(
         caller_role="verifier",
     )
     comparison = evals.compare_runs(base_eval_run, cand_eval_run)
-    promotion = evals.verify_promotion(
-        candidate_run=cand_eval_run,
-        baseline_run=base_eval_run,
-        policy="production",
-        caller_role="verifier",
+    promotion = _independent_promotion(
+        model,
+        candidate_id=f"{model.model_name}:direct_low_rank",
+        edited={site_name: w_edited},
+        target_cases=dev_Associations,
+        self_check=evals.verify_promotion(
+            candidate_run=cand_eval_run,
+            baseline_run=base_eval_run,
+            policy="production",
+            caller_role="verifier",
+        ),
     )
 
     return PythiaWeightEditReport(
@@ -1310,7 +1340,7 @@ class ExposureLedgerReceipt:
     holdout_exposure_count_during_synthesis: int
     proposer_accessed_digests: tuple[str, ...]
     synthesis_freeze_digest: str
-    verifier_holdout_evaluation_digest: str
+    verifier_holdout_evaluation_digest: str | None
     ledger_chain_digest: str
 
 
@@ -1325,6 +1355,13 @@ class GymBranchTrial:
     gym_prefix_val_accuracy: float
     retention_accuracy: float
     selected_by_gym_scientist: bool
+    # Measured on the frozen selection-time guard prompts. This score chooses a branch, so it isn't independent evidence.
+    retention_guard_accuracy: float | None = None
+    retention_guard_source: str | None = None
+    reload_parity_verified: bool | None = None
+    disqualified_because: tuple[str, ...] = ()
+    # How many unwanted directions synthesis was told to avoid: retention, then prefix nuisance.
+    synthesis_guards: int = 0
 
 
 @dataclass(frozen=True)
@@ -1342,9 +1379,10 @@ class PythiaGymTaskReport:
     gym_id: str
     skills_taught: tuple[str, ...]
     branches: tuple[GymBranchTrial, ...]
-    selected_branch_id: str
-    rust_plan_digest: str
-    rust_candidate_digest: str
+    # None for all of these when no branch qualified: nothing was frozen, and the holdout stayed sealed.
+    selected_branch_id: str | None
+    rust_plan_digest: str | None
+    rust_candidate_digest: str | None
     reload_parity_verified: bool
     changed_parameters: int
     changed_parameter_pct_of_model: float
@@ -1352,21 +1390,23 @@ class PythiaGymTaskReport:
     holdout_after: tuple[PythiaPrediction, ...]
     retention_after: tuple[PythiaPrediction, ...]
     lora_baseline_trial: GymBranchTrial
-    lora_holdout_accuracy: float
+    lora_holdout_accuracy: float | None
     eval_comparison: dict[str, Any]
     promotion_verification: dict[str, Any]
     control_noop_trial: GymBranchTrial | None = None
     control_random_trial: GymBranchTrial | None = None
-    noop_control_holdout_accuracy: float = 0.0
-    random_control_holdout_accuracy: float = 0.0
-    net_gain_over_noop: float = 0.0
-    net_gain_over_random: float = 0.0
+    noop_control_holdout_accuracy: float | None = 0.0
+    random_control_holdout_accuracy: float | None = 0.0
+    net_gain_over_noop: float | None = 0.0
+    net_gain_over_random: float | None = 0.0
     exposure_ledger: ExposureLedgerReceipt | None = None
     pre_registration: evals.PreRegisteredStudyPlan | None = None
     # Frozen before any holdout evaluation. Empty for architectures with no resolver.
     gym_proposals: tuple[GymProposalCandidate, ...] = ()
     edited_weight: torch.Tensor | None = None
     edit_steps: VerifiedMethodSteps | tuple[()] = ()
+    selection_retention_guard_digest: str | None = None
+    lora_weight: torch.Tensor | None = None
 
     @property
     def selected_proposal(self) -> ResolvedGymWeightProposal | None:
@@ -1416,6 +1456,7 @@ def _compile_and_apply_rust_low_rank_update(
         provenance_tag="pythia.contrastive_prefix_nullspace.v1",
         engine_name="pythia.contrastive_prefix_nullspace",
     )
+    ir.require_reload_parity(tx)
     w_edited = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -1449,6 +1490,73 @@ class ReusableTaskGym:
         "In computer science a list is",
         "Once upon a time there was",
     )
+    # Selection-time retention guards: public, kept from synthesis, and consulted by selection. Not a holdout.
+    # Post-selection evaluation uses other data, the independent evaluator's corpus and `holdout_rules`.
+    selection_retention_guard_prompts: tuple[str, ...] = (
+        "She opened the door and",
+        "The weather this morning was",
+        "He picked up the phone and",
+        "My favorite kind of music is",
+        "The children went outside to",
+        "After dinner we usually",
+        "The river flows through the",
+        "Scientists have recently discovered that",
+        "The old house at the end of the",
+        "People often ask me why",
+    )
+
+
+# Selection limits repeat values the production policy in `evals.DEFAULT_POLICIES` already set:
+# `min_generalization_score` for learning the task and `min_retention_ratio` for keeping behaviour.
+SELECTION_RETENTION_GUARD_DIGEST = "sha256:b12f927c7ddc9e08511a1e0fbe94535d6fbc4adce015d15e3e4b548962c46f72"
+SELECTION_MIN_DEV_ACCURACY = 0.70
+SELECTION_MIN_VAL_ACCURACY = 0.70
+SELECTION_MIN_RETENTION = 0.98
+GYM_BRANCH_METHODS = {
+    "branch_1_early_layer_rank2": "gym_early_layer_ridge",
+    "branch_2_final_layer_naive_ridge_rank6": "gym_final_layer_ridge",
+    "branch_3_contrastive_prefix_nullspace_rank6": "gym_contrastive_prefix_nullspace",
+}
+
+
+def retention_guard_digest(prompts: Sequence[str]) -> str:
+    return str(content_digest(canonicalize({"kind": "nf_selection_retention_guard_v1", "prompts": list(prompts)})))
+
+
+def select_gym_branch(trials: Sequence[GymBranchTrial]) -> tuple[tuple[GymBranchTrial, ...], GymBranchTrial | None]:
+    """Choose from development, validation and selection-time retention guard scores. A holdout isn't an input.
+
+    Every branch below a limit, or whose reload parity failed, is out. The rest rank by validation,
+    then retention, then development. A tie goes to the branch with more synthesis guards, since equal
+    scores can't separate them and a guard can only narrow what the edit touches, then to the smaller
+    rank. Returns every
+    trial with its reasons recorded, and the selected one, or None when no branch qualifies.
+    """
+    judged: list[GymBranchTrial] = []
+    for trial in trials:
+        reasons = tuple(
+            label
+            for label, failed in (
+                (f"development {trial.gym_dev_accuracy:.3f} below {SELECTION_MIN_DEV_ACCURACY}", trial.gym_dev_accuracy < SELECTION_MIN_DEV_ACCURACY),
+                (f"validation {trial.gym_prefix_val_accuracy:.3f} below {SELECTION_MIN_VAL_ACCURACY}", trial.gym_prefix_val_accuracy < SELECTION_MIN_VAL_ACCURACY),
+                (
+                    f"retention {trial.retention_guard_accuracy} below {SELECTION_MIN_RETENTION}",
+                    trial.retention_guard_accuracy is None or trial.retention_guard_accuracy < SELECTION_MIN_RETENTION,
+                ),
+                ("reload parity failed", trial.reload_parity_verified is not True),
+            )
+            if failed
+        )
+        judged.append(replace(trial, disqualified_because=reasons, selected_by_gym_scientist=False))
+    qualified = [t for t in judged if not t.disqualified_because]
+    if not qualified:
+        return tuple(judged), None
+    best = min(
+        qualified,
+        key=lambda t: (-t.gym_prefix_val_accuracy, -(t.retention_guard_accuracy or 0.0), -t.gym_dev_accuracy, -t.synthesis_guards, t.rank, t.branch_id),
+    )
+    chosen = replace(best, selected_by_gym_scientist=True)
+    return tuple(chosen if t.branch_id == best.branch_id else t for t in judged), chosen
 
 
 ALGORITHMIC_THREE_SKILL_GYM = ReusableTaskGym(
@@ -1501,8 +1609,8 @@ def run_pythia_gym_task_learning_study(
     - Explores 3 candidate weight-programming branches inside the Gym (`early_layer_rank2`,
       `final_layer_naive_ridge_rank6`, and `final_layer_contrastive_prefix_nullspace_rank6`).
     - Runs mandatory `control_noop` and `control_random_matched_budget` controls (`Audit Point 6`) plus a 25-step gradient LoRA baseline (`CG-11`).
-    - Selects the Pareto-winning branch in the Gym, compiles and executes it in Rust, and
-      verifies it on unseen holdout operands & prefixes via the independent `EvaluationEngine`.
+    - Selects a branch with `select_gym_branch`, or none. Only a selected branch reaches the holdout
+      and the independent evaluator, and the report's selected fields are None without one.
     """
     pre_reg = evals.pre_register_study_plan(
         hypothesis_id=f"{gym.gym_id}:contrastive_nullspace_vs_controls",
@@ -1549,6 +1657,12 @@ def run_pythia_gym_task_learning_study(
     in_dim = int(model.config["intermediate_size"])
 
     ret_before = tuple(model.evaluate_prompt(p) for p in retention_prompts)
+    # A fixture's small vocabulary reduces the guard prompts to fragments, so it uses the prompts
+    # synthesis saw. That proves the software path only, and each trial records the weaker source.
+    is_fixture = evidence_grade_for_model(model) == "fixture_synthetic"
+    selection_source = "fixture_synthesis_prompts" if is_fixture else "selection_time_retention_guard"
+    selection_prompts = tuple(retention_prompts) if is_fixture else tuple(gym.selection_retention_guard_prompts)
+    selection_before = tuple(model.evaluate_prompt(p).top1_token_id for p in selection_prompts)
 
     w_eff = model.effective_unembedding()
     cov = w_eff.T @ w_eff + 10.0 * torch.eye(out_dim, dtype=torch.float64)
@@ -1585,6 +1699,12 @@ def run_pythia_gym_task_learning_study(
         ) / len(retention_prompts)
         return dev_acc, val_acc, ret_acc
 
+    def _selection_retention(override: dict[int, torch.Tensor]) -> float:
+        return sum(
+            model.evaluate_prompt(p, layer_down_proj_override=override).top1_token_id == before
+            for p, before in zip(selection_prompts, selection_before, strict=True)
+        ) / len(selection_before)
+
     # --- Branch 1: Early-layer rank-2 edit (under-ranked & perturbs downstream layers) ---
     k_dev_b1 = torch.stack(
         [model.forward_with_mlp_key(model.tokenizer.encode(p), capture_layer=early_layer)[1] for p, _ in gym_dev_items],
@@ -1594,9 +1714,13 @@ def run_pythia_gym_task_learning_study(
     gram_b1 = k_dev_b1 @ k_dev_b1.T + 1.0 * torch.eye(in_dim, dtype=torch.float64)
     delta_b1 = v_dev_b1 @ torch.linalg.solve(gram_b1, k_dev_b1).T
     u1, s1, vh1 = torch.linalg.svd(delta_b1, full_matrices=False)
-    w_b1 = (
-        model.tensors[model.mlp_down_proj_site(early_layer)]
-        + (u1[:, :2] * s1[:2].unsqueeze(0)) @ vh1[:2, :]
+    left_u1 = (u1[:, :2] * s1[:2].unsqueeze(0)).contiguous()
+    right_v1 = vh1[:2, :].contiguous()
+    w_b1, plan_b1, cand_b1, before_b1, after_b1, reload_b1 = _compile_and_apply_rust_low_rank_update(
+        w_orig=model.tensors[model.mlp_down_proj_site(early_layer)],
+        left_factors=left_u1,
+        right_factors=right_v1,
+        smoke_probe_vec=k_dev_b1[:, 0],
     )
     b1_dev, b1_val, b1_ret = _score_override({early_layer: w_b1})
     trial_b1 = GymBranchTrial(
@@ -1609,6 +1733,9 @@ def run_pythia_gym_task_learning_study(
         gym_prefix_val_accuracy=b1_val,
         retention_accuracy=b1_ret,
         selected_by_gym_scientist=False,
+        retention_guard_accuracy=_selection_retention({early_layer: w_b1}),
+        retention_guard_source=selection_source,
+        reload_parity_verified=reload_b1,
     )
 
     # --- Branch 2: Final-layer naive ridge Rank-K (fits Task:/Rule: but overfits prefix tokens) ---
@@ -1625,9 +1752,13 @@ def run_pythia_gym_task_learning_study(
     delta_b2 = v_dev_b2 @ torch.linalg.solve(gram_b2, k_dev_b2).T
     u2, s2, vh2 = torch.linalg.svd(delta_b2, full_matrices=False)
     b2_rank = min(3, max_rank)
-    w_b2 = (
-        model.tensors[model.mlp_down_proj_site(final_layer)]
-        + (u2[:, :b2_rank] * s2[:b2_rank].unsqueeze(0)) @ vh2[:b2_rank, :]
+    left_u2 = (u2[:, :b2_rank] * s2[:b2_rank].unsqueeze(0)).contiguous()
+    right_v2 = vh2[:b2_rank, :].contiguous()
+    w_b2, plan_b2, cand_b2, before_b2, after_b2, reload_b2 = _compile_and_apply_rust_low_rank_update(
+        w_orig=model.tensors[model.mlp_down_proj_site(final_layer)],
+        left_factors=left_u2,
+        right_factors=right_v2,
+        smoke_probe_vec=k_dev_b2[:, 0],
     )
     b2_dev, b2_val, b2_ret = _score_override({final_layer: w_b2})
     trial_b2 = GymBranchTrial(
@@ -1640,6 +1771,10 @@ def run_pythia_gym_task_learning_study(
         gym_prefix_val_accuracy=b2_val,
         retention_accuracy=b2_ret,
         selected_by_gym_scientist=False,
+        synthesis_guards=1,
+        retention_guard_accuracy=_selection_retention({final_layer: w_b2}),
+        retention_guard_source=selection_source,
+        reload_parity_verified=reload_b2,
     )
 
     # --- Branch 3: Final-layer Contrastive + Prefix-Nullspace Rank-K (compiled & executed in Rust) ---
@@ -1675,11 +1810,11 @@ def run_pythia_gym_task_learning_study(
     w_orig_final = model.tensors[model.mlp_down_proj_site(final_layer)]
     (
         w_b3_rust,
-        plan_digest,
-        cand_digest,
-        before_param_digest,
-        after_param_digest,
-        reload_ok,
+        plan_b3,
+        cand_b3,
+        before_b3,
+        after_b3,
+        reload_b3,
     ) = _compile_and_apply_rust_low_rank_update(
         w_orig=w_orig_final,
         left_factors=left_u3,
@@ -1696,8 +1831,25 @@ def run_pythia_gym_task_learning_study(
         gym_dev_accuracy=b3_dev,
         gym_prefix_val_accuracy=b3_val,
         retention_accuracy=b3_ret,
-        selected_by_gym_scientist=True,
+        selected_by_gym_scientist=False,
+        synthesis_guards=2,
+        retention_guard_accuracy=_selection_retention({final_layer: w_b3_rust}),
+        retention_guard_source=selection_source,
+        reload_parity_verified=reload_b3,
     )
+
+    # Selection happens here, before the freeze and before anything reads the holdout.
+    trials, selected_trial = select_gym_branch((trial_b1, trial_b2, trial_b3))
+    built = {
+        trial_b1.branch_id: (w_b1, plan_b1, cand_b1, before_b1, after_b1, reload_b1, left_u1, right_v1),
+        trial_b2.branch_id: (w_b2, plan_b2, cand_b2, before_b2, after_b2, reload_b2, left_u2, right_v2),
+        trial_b3.branch_id: (w_b3_rust, plan_b3, cand_b3, before_b3, after_b3, reload_b3, left_u3, right_v3),
+    }
+    plan_digest: str | None = None
+    cand_digest: str | None = None
+    if selected_trial is not None:
+        w_selected, plan_digest, cand_digest, before_param_digest, after_param_digest, reload_ok, left_selected, right_selected = built[selected_trial.branch_id]
+        selected_layer = selected_trial.target_layer
 
     # Freeze synthesis event in exposure ledger BEFORE holdout is ever evaluated (Audit Point 8)
     seq1 = str(content_digest(canonicalize({"seq": 1, "actor": "proposer", "access": "dev", "split_digest": dev_split_digest})))
@@ -1709,7 +1861,7 @@ def run_pythia_gym_task_learning_study(
                     "seq": 3,
                     "prev": seq2,
                     "actor": "rust_compiler",
-                    "event": "candidate_plan_frozen",
+                    "event": "candidate_plan_frozen" if selected_trial is not None else "no_branch_qualified",
                     "plan_digest": plan_digest,
                     "candidate_digest": cand_digest,
                     "holdout_exposures": holdout_input_overlap,
@@ -1722,31 +1874,33 @@ def run_pythia_gym_task_learning_study(
         model,
         gym.gym_id,
         (dev_split_digest, val_split_digest),
-        (
-            (trial_b1, u1[:, :2] * s1[:2].unsqueeze(0), vh1[:2, :]),
-            (trial_b2, u2[:, :b2_rank] * s2[:b2_rank].unsqueeze(0), vh2[:b2_rank, :]),
-            (trial_b3, left_u3, right_v3),
-        ),
+        tuple((trial, built[trial.branch_id][6], built[trial.branch_id][7]) for trial in trials),
     )
+
+    # Controls match the selected branch. With none selected they still describe branch 3's site and size.
+    control_layer = selected_trial.target_layer if selected_trial is not None else final_layer
+    control_left, control_right = (left_selected, right_selected) if selected_trial is not None else (left_u3, right_v3)
+    w_orig_control = model.tensors[model.mlp_down_proj_site(control_layer)]
 
     # --- Mandatory Control 1: Null / No-Op Edit Control (Audit Point 6) ---
     noop_tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
-        w_orig_final,
+        w_orig_control,
         operation_type="scale",
         factor=1.0,
         smoke_probe=k_mean[:, 0],
         provenance_tag="pythia.control_noop.v1",
     )
+    ir.require_reload_parity(noop_tx)
     w_noop = (
         torch.frombuffer(bytearray(noop_tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
         .clone()
     )
-    noop_dev, noop_val, noop_ret = _score_override({final_layer: w_noop})
+    noop_dev, noop_val, noop_ret = _score_override({control_layer: w_noop})
     control_noop_trial = GymBranchTrial(
         branch_id="control_noop_null_edit",
         description="Mandatory no-op control (factor=1.0, changed_parameters=0, Rust compiled)",
-        target_layer=final_layer,
+        target_layer=control_layer,
         rank=0,
         optimizer_steps=0,
         gym_dev_accuracy=noop_dev,
@@ -1761,23 +1915,23 @@ def run_pythia_gym_task_learning_study(
     rand_u_raw = torch.randn((out_dim, max_rank), generator=rng_ctrl, dtype=torch.float64)
     rand_v_raw = torch.randn((max_rank, in_dim), generator=rng_ctrl, dtype=torch.float64)
     rand_delta = rand_u_raw @ rand_v_raw
-    cand_frob = float(torch.linalg.norm(left_u3 @ right_v3).item())
+    cand_frob = float(torch.linalg.norm(control_left @ control_right).item())
     rand_frob = float(torch.linalg.norm(rand_delta).item()) + 1e-12
     # Scale random update to match the exact rank and parameter budget (bounded so logits stay finite)
     scale_rand = min(1.0, (cand_frob * 0.05) / rand_frob)
     left_rand = (rand_u_raw * scale_rand).contiguous()
     right_rand = rand_v_raw.contiguous()
     (w_rand_rust, _, _, _, _, _) = _compile_and_apply_rust_low_rank_update(
-        w_orig=w_orig_final,
+        w_orig=w_orig_control,
         left_factors=left_rand,
         right_factors=right_rand,
         smoke_probe_vec=k_mean[:, 0],
     )
-    rand_dev, rand_val, rand_ret = _score_override({final_layer: w_rand_rust})
+    rand_dev, rand_val, rand_ret = _score_override({control_layer: w_rand_rust})
     control_random_trial = GymBranchTrial(
         branch_id="control_random_matched_budget",
         description="Mandatory matched-budget random low-rank edit control (same rank & site, Rust compiled)",
-        target_layer=final_layer,
+        target_layer=control_layer,
         rank=max_rank,
         optimizer_steps=0,
         gym_dev_accuracy=rand_dev,
@@ -1814,9 +1968,58 @@ def run_pythia_gym_task_learning_study(
         selected_by_gym_scientist=False,
     )
 
+    if selected_trial is None:
+        reason = "No Gym branch qualified, so there is no candidate to evaluate: " + "; ".join(
+            f"{t.branch_id}: {', '.join(t.disqualified_because)}" for t in trials
+        )
+        promotion = promotion_gate.not_evaluated(reason)
+        promotion["gym_self_check"] = {}
+        promotion["dashboard"] = {}
+        return PythiaGymTaskReport(
+            model_name=model.model_name,
+            gym_id=gym.gym_id,
+            skills_taught=gym.skills_taught,
+            branches=trials,
+            selected_branch_id=None,
+            rust_plan_digest=None,
+            rust_candidate_digest=None,
+            reload_parity_verified=all(t.reload_parity_verified is True for t in trials),
+            changed_parameters=0,
+            changed_parameter_pct_of_model=0.0,
+            holdout_before=(),
+            holdout_after=(),
+            retention_after=(),
+            lora_baseline_trial=lora_trial,
+            lora_holdout_accuracy=None,
+            eval_comparison={"status": "not_evaluated", "reason": reason, "dashboard": {}},
+            promotion_verification=promotion,
+            control_noop_trial=control_noop_trial,
+            control_random_trial=control_random_trial,
+            noop_control_holdout_accuracy=None,
+            random_control_holdout_accuracy=None,
+            net_gain_over_noop=None,
+            net_gain_over_random=None,
+            exposure_ledger=ExposureLedgerReceipt(
+                dev_split_digest=dev_split_digest,
+                val_split_digest=val_split_digest,
+                holdout_split_digest=holdout_split_digest,
+                dev_and_holdout_expression_disjoint=expr_disjoint,
+                dev_and_holdout_prompt_disjoint=prompt_disjoint,
+                holdout_exposure_count_during_synthesis=holdout_input_overlap,
+                proposer_accessed_digests=(dev_split_digest, val_split_digest),
+                synthesis_freeze_digest=synthesis_freeze_digest,
+                verifier_holdout_evaluation_digest=None,
+                ledger_chain_digest=synthesis_freeze_digest,
+            ),
+            pre_registration=pre_reg,
+            gym_proposals=gym_proposals,
+            selection_retention_guard_digest=retention_guard_digest(selection_prompts),
+            lora_weight=w_lora,
+        )
+
     # --- Final Sealed Holdout Evaluation (strictly after synthesis_freeze_digest!) ---
     holdout_before = tuple(model.evaluate_prompt(p, target_token=t) for p, t in holdout_items)
-    override_win = {final_layer: w_b3_rust}
+    override_win = {selected_layer: w_selected}
     holdout_after = tuple(
         model.evaluate_prompt(p, target_token=t, layer_down_proj_override=override_win)
         for p, t in holdout_items
@@ -1824,12 +2027,12 @@ def run_pythia_gym_task_learning_study(
     noop_holdout_acc = sum(
         1.0
         for p, t in holdout_items
-        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_noop}).matched_target
+        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={control_layer: w_noop}).matched_target
     ) / len(holdout_items)
     random_holdout_acc = sum(
         1.0
         for p, t in holdout_items
-        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_rand_rust}).matched_target
+        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={control_layer: w_rand_rust}).matched_target
     ) / len(holdout_items)
     lora_holdout_acc = sum(
         1.0
@@ -1941,7 +2144,7 @@ def run_pythia_gym_task_learning_study(
     )
     cand_eval_run = evals.run_eval(
         model={
-            "model_id": f"{model.model_name}@gym_contrastive_rank6",
+            "model_id": f"{model.model_name}@{selected_trial.branch_id}",
             "checkpoint_digest": after_param_digest,
             "measurement_attestation": evals.TRUSTED_IN_PROCESS_MEASUREMENT,
             "evidence_grade": evidence_grade_for_model(model),
@@ -1958,9 +2161,9 @@ def run_pythia_gym_task_learning_study(
                 "optimizer_steps": 0,
             },
             "task_scores": {
-                "gym_dev_skills": b3_dev,
+                "gym_dev_skills": selected_trial.gym_dev_accuracy,
                 "unseen_holdout_skills": hold_cand_acc,
-                "english_retention": b3_ret,
+                "english_retention": selected_trial.retention_accuracy,
                 "finite_logits_safety": 1.0,
                 "prefix_shift_robustness": hold_cand_acc,
                 "zero_grad_efficiency": 1.0,
@@ -1977,30 +2180,35 @@ def run_pythia_gym_task_learning_study(
         suite=suite,
         pre_registration=pre_reg,
         additional_branch_gains=(
-            b1_val - hold_base_acc,
-            b2_val - hold_base_acc,
+            *(t.gym_prefix_val_accuracy - hold_base_acc for t in trials if t.branch_id != selected_trial.branch_id),
             random_holdout_acc - hold_base_acc,
             lora_holdout_acc - hold_base_acc,
         ),
     )
-    promotion = evals.verify_promotion(
-        candidate_run=cand_eval_run,
-        baseline_run=base_eval_run,
-        policy="production",
-        caller_role="verifier",
+    selected_site = model.mlp_down_proj_site(selected_layer)
+    promotion = _independent_promotion(
+        model,
+        candidate_id=f"{gym.gym_id}:{selected_trial.branch_id}",
+        edited={selected_site: w_selected},
+        target_cases=gym_dev_items,
+        self_check=evals.verify_promotion(
+            candidate_run=cand_eval_run,
+            baseline_run=base_eval_run,
+            policy="production",
+            caller_role="verifier",
+        ),
     )
 
-    final_site = model.mlp_down_proj_site(final_layer)
     return PythiaGymTaskReport(
-        edited_weight=w_b3_rust,
+        edited_weight=w_selected,
         edit_steps=verify_method_steps(
-            model, (low_rank_step(final_site, "gym_contrastive_prefix_nullspace", left_u3, right_v3),), {final_site: w_b3_rust}
+            model, (low_rank_step(selected_site, GYM_BRANCH_METHODS[selected_trial.branch_id], left_selected, right_selected),), {selected_site: w_selected}
         ),
         model_name=model.model_name,
         gym_id=gym.gym_id,
         skills_taught=gym.skills_taught,
-        branches=(trial_b1, trial_b2, trial_b3),
-        selected_branch_id=trial_b3.branch_id,
+        branches=trials,
+        selected_branch_id=selected_trial.branch_id,
         rust_plan_digest=plan_digest,
         rust_candidate_digest=cand_digest,
         reload_parity_verified=reload_ok,
@@ -2022,6 +2230,8 @@ def run_pythia_gym_task_learning_study(
         exposure_ledger=exposure_ledger,
         pre_registration=pre_reg,
         gym_proposals=gym_proposals,
+        selection_retention_guard_digest=retention_guard_digest(selection_prompts),
+        lora_weight=w_lora,
     )
 
 

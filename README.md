@@ -88,7 +88,7 @@ report = studio.run_reusable_gym_study(
 print(f"Rust Plan Digest:      {report.rust_plan_digest}")
 print(f"Rust Candidate Digest: {report.rust_candidate_digest}")
 print(f"Reload Parity:         {report.reload_parity_verified}")
-print(report.promotion_verification["markdown_dashboard"])
+print(report.promotion_verification["markdown_dashboard"])  # The digests are None when no branch qualifies.
 ```
 
 ### 2. Knowledge Editing (`EasyEdit`) & Multi-Checkpoint Merging (`mergekit`)
@@ -391,7 +391,7 @@ Inject a repetition defect into a model you supply, attempt a repair using publi
 
 | Model | Kind | Loop rate | Agreement with clean model (defective / repaired / sham) | Retention | Gate | Last re-run |
 | :--- | :--- | :--- | :--- | ---: | :--- | :--- |
-| `nf/mini-pythia-fixture` | fixture | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `100%` | passed | reproduced in this audit |
+| `nf/mini-pythia-fixture` | fixture | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `100%` | repair gate passed on a fixture | reproduced in this audit |
 | `Qwen/qwen2-dense-mini` | fixture | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `60%` | failed | reproduced in this audit |
 | `Pythia-14m` | real | `1.0` -> `0.0` | `33%` / `50%` / `33%` | `60%` | failed | not reproduced: run did not finish |
 | `Pythia-31m` | real | `1.0` -> `0.33` | `0%` / `17%` / `0%` | `20%` | failed, scan | not re-run |
@@ -485,16 +485,20 @@ tool_info = studio.editor_tool.call_tool("nf_inspect_model", {"model": "Qwen/qwe
 
 ## Preliminary Gym Results
 
-Status: **experimental.** The reusable `algorithmic_three_skill` Gym compared with a 25-step LoRA run, with no-op and matched random controls:
+Status: **experimental, and the real-model edits are harmful.** These rows measured one thing: branch 3 of the reusable `algorithmic_three_skill` Gym on its sealed target rules, compared with a 25-step LoRA run and no-op and matched random controls. They don't measure general behaviour. They were recorded when selection was hard-coded to branch 3 and the Gym's own five-prompt check decided promotion.
 
-| Model | Kind | Edited params | Holdout gain over no-op | No-op / random | LoRA holdout | Gate | Last re-run |
+| Model | Kind | Edited params | Target holdout gain over no-op | No-op / random | LoRA holdout | Gym's own five-prompt check | Last re-run |
 | :--- | :--- | ---: | ---: | :--- | ---: | :--- | :--- |
-| `EleutherAI/pythia-14m` | real | `65,536` (`0.47%`) | `1.00` | `0%` / `0%` | `50%` | passed | reproduced in this audit |
-| `EleutherAI/pythia-31m` | real | `262,144` (`0.86%`) | `0.83` | `0%` / `0%` | `50%` | passed | not re-run |
+| `EleutherAI/pythia-14m` | real | `65,536` (`0.47%`) | `1.00` | `0%` / `0%` | `50%` | own check passed; independent evaluator: harmful | reproduced in this audit |
+| `EleutherAI/pythia-31m` | real | `262,144` (`0.86%`) | `0.83` | `0%` / `0%` | `50%` | own check passed; not independently evaluated | not re-run |
 | `Qwen/qwen2-dense-mini` | fixture | `2,048` (`3.99%`) | `0.67` | `0%` / `0%` | `0%` | rejected | reproduced in this audit |
 | `nf/mini-pythia-fixture` | fixture | `2,048` (`4.10%`) | `0.67` | `0%` / `0%` | `0%` | rejected | reproduced in this audit |
 
-**How far these results go:** with six holdout items, `6/6` only supports a true accuracy of about 54% or higher (95% CI), and the difference from LoRA is not statistically significant. The gym was developed with this holdout visible, so these are preliminary signals, not evidence of general superiority. The zero-exposure count checks synthesis inputs for overlap; it is not process isolation. The `passed` label means this gym's own gate passed, not that the model qualified.
+**How far these results go:** with six holdout items, `6/6` only supports a true accuracy of about 54% or higher (95% CI), and the difference from LoRA is not statistically significant. The gym was developed with this holdout visible, so these are preliminary signals, not evidence of general superiority. The zero-exposure count checks synthesis inputs for overlap; it is not process isolation. `own check passed` says nothing about whether the model still works.
+
+**Independent evaluator result on Pythia-14M, the same edit:** top-1 agreement with the base model is 0.8% on free text and 0% on all six retention tasks. KL divergence is 12.8 nats per token, and perplexity rises from 138 to about 96 million ([recorded run](docs/evidence/milestone1/)).
+
+**What happens now:** promotion reads only that evaluator (`neural_foundry/promotion_gate.py`), and it rejects this edit. The Gym selects from development and validation scores and 10 frozen selection-time retention guard prompts, and on Pythia-14M it selects no branch: branch 3 keeps 0 of 10 of those answers. The guards are public and selection reads them, so they aren't a holdout or independent evidence. So no real-model row above is a current selection or a qualification. Pythia-31M hasn't been run through either step. Fixtures can't take the evaluator's corpus, so they are never promoted.
 
 ## Limitations
 

@@ -87,6 +87,8 @@ def verify_method_steps(base: Any, steps: Sequence[MethodEditStep], expected: Ma
         tx = WeightIRTransactionBuilder.execute_matrix_edit(
             current, provenance_tag=f"edit_plan.{step.method}.v1", engine_name="studio.edit_plan", **_arguments(step, current.shape)
         )
+        from .ir import require_reload_parity
+        require_reload_parity(tx)
         working[step.tensor] = torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64).reshape(current.shape).clone()
     if not working or set(working) != set(expected):
         raise EditGraphError(f"The steps edit {sorted(working)}, but the method edited {sorted(expected)}")

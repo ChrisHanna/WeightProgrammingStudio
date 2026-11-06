@@ -233,6 +233,7 @@ def _compile_and_apply_rust_add_delta(
         provenance_tag=provenance_tag,
         engine_name="mergekit.rust_ir",
     )
+    ir.require_reload_parity(tx)
     w_edited = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -677,7 +678,7 @@ class FrontierAgentSessionReport:
     repaired_loop_rate_before: float | None  # None: this session did not measure it
     repaired_loop_rate_after: float | None
     held_out_accuracy_after: float | None  # None: nothing was submitted
-    rust_candidate_digest: str
+    rust_candidate_digest: str | None  # None: no candidate. Never an empty string.
     transport_mode: Literal["live_http_api", "live_custom_transport", "local_tool_harness"] = "local_tool_harness"
     transcript: tuple[AgentTurnTranscript, ...] = ()
     total_prompt_tokens: int = 0
@@ -687,7 +688,7 @@ class FrontierAgentSessionReport:
     budget_remaining_usd: float = 5.0
     feedback_tools_enabled: bool = True
     session_kind: Literal["scripted_protocol", "agent_driven"] = "scripted_protocol"
-    submitted_plan_digest: str = ""
+    submitted_plan_digest: str | None = None
     submitted_weights_by_layer: dict[int, torch.Tensor] | None = None
     holdout_access_denied_count: int = 0
     stop_reason: str = ""
@@ -703,9 +704,9 @@ class FeedbackToolComparisonReport:
     model_name: str
     weight_reading_only_report: FrontierAgentSessionReport
     feedback_enabled_report: FrontierAgentSessionReport
-    weight_reading_only_holdout_accuracy: float
-    feedback_enabled_holdout_accuracy: float
-    feedback_gain_over_weight_reading_only: float
+    weight_reading_only_holdout_accuracy: float | None
+    feedback_enabled_holdout_accuracy: float | None
+    feedback_gain_over_weight_reading_only: float | None
     feedback_tools_proven_necessary: bool
 
 
@@ -1155,7 +1156,7 @@ class FrontierAgentProgrammer:
         )
         self.record_proposal(
             {"layer": final_layer, "op": "contrastive_prefix_nullspace_rank6", "plan": gym_rep.rust_plan_digest},
-            succeeded=True,
+            succeeded=gym_rep.selected_branch_id is not None,
         )
         self._record_turn(
             tool_name="evaluate_practice_gym_split",
@@ -1176,7 +1177,9 @@ class FrontierAgentProgrammer:
         )
 
         ablation_results: tuple[AblationComponentResult, ...] = ()  # Not measured by this session.
-        hold_acc = sum(1.0 for p in gym_rep.holdout_after if p.matched_target) / len(gym_rep.holdout_after)
+        # With no selected branch nothing was submitted, and the holdout was never read.
+        submitted = gym_rep.selected_branch_id is not None
+        hold_acc = sum(1.0 for p in gym_rep.holdout_after if p.matched_target) / len(gym_rep.holdout_after) if submitted else None
 
         t_mode: Literal["live_http_api", "live_custom_transport", "local_tool_harness"] = (
             "live_custom_transport" if self._llm_transport is not None else "local_tool_harness"
@@ -1200,7 +1203,7 @@ class FrontierAgentProgrammer:
             budget_usd=self.budget_usd,
             budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
             feedback_tools_enabled=True,
-            submitted_weights_by_layer={final_layer: gym_rep.edited_weight},
+            submitted_weights_by_layer={next(b.target_layer for b in gym_rep.branches if b.selected_by_gym_scientist): gym_rep.edited_weight} if submitted else None,
             submitted_edit_steps=gym_rep.edit_steps,
         )
 
@@ -1571,7 +1574,7 @@ class FrontierAgentProgrammer:
             repaired_loop_rate_before=None,
             repaired_loop_rate_after=None,
             held_out_accuracy_after=holdout_accuracy,
-            rust_candidate_digest=final["candidate_digest"] if final else "",
+            rust_candidate_digest=final["candidate_digest"] if final else None,
             transport_mode=t_mode,
             transcript=tuple(self._transcript),
             total_prompt_tokens=self.total_prompt_tokens,
@@ -1581,7 +1584,7 @@ class FrontierAgentProgrammer:
             budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
             feedback_tools_enabled=True,
             session_kind="agent_driven",
-            submitted_plan_digest=final["plan_digest"] if final else "",
+            submitted_plan_digest=final["plan_digest"] if final else None,
             submitted_weights_by_layer={final["layer"]: final["weight"]} if final else None,
             holdout_access_denied_count=denied,
             stop_reason=stop_reason,
@@ -1605,6 +1608,16 @@ def compare_weight_reading_only_vs_feedback_enabled_agent(
     feedback_rep = feedback_agent.run_reasoning_loop_repair_experiment(
         target_model, enable_feedback_tools=True
     )
+    if feedback_rep.held_out_accuracy_after is None or blind_rep.held_out_accuracy_after is None:
+        return FeedbackToolComparisonReport(
+            model_name=target_model.model_name,
+            weight_reading_only_report=blind_rep,
+            feedback_enabled_report=feedback_rep,
+            weight_reading_only_holdout_accuracy=blind_rep.held_out_accuracy_after,
+            feedback_enabled_holdout_accuracy=feedback_rep.held_out_accuracy_after,
+            feedback_gain_over_weight_reading_only=None,
+            feedback_tools_proven_necessary=False,
+        )
     gain = round(feedback_rep.held_out_accuracy_after - blind_rep.held_out_accuracy_after, 6)
     return FeedbackToolComparisonReport(
         model_name=target_model.model_name,
@@ -1635,9 +1648,9 @@ class PRDExperimentsSuiteReport:
     experiment_b_random_search_accuracy: float
     experiment_b_evolutionary_baseline_accuracy: float
     experiment_c_merge_receipt: MergekitAdapterReceipt
-    experiment_d_direct_holdout_accuracy: float
-    experiment_d_lora_holdout_accuracy: float
-    experiment_d_direct_retention_accuracy: float
+    experiment_d_direct_holdout_accuracy: float | None
+    experiment_d_lora_holdout_accuracy: float | None
+    experiment_d_direct_retention_accuracy: float | None
     experiment_d_lora_retention_accuracy: float
     all_experiments_succeeded: bool
 
@@ -1655,6 +1668,9 @@ def run_prd_priority_experiments_suite(
     rep_gpt6 = gpt6_agent.run_reasoning_loop_repair_experiment(target_model)
     interop_ok = (
         rep_claude.tool_schemas_digest == rep_gpt6.tool_schemas_digest
+        # Two missing candidates agree about nothing, so each digest must exist before they are compared.
+        and bool(rep_claude.rust_candidate_digest)
+        and bool(rep_gpt6.rust_candidate_digest)
         and rep_claude.rust_candidate_digest == rep_gpt6.rust_candidate_digest
         and rep_claude.duplicate_proposals_blocked == 1
     )
@@ -1697,8 +1713,10 @@ def run_prd_priority_experiments_suite(
 
     # --- Experiment D: Direct Weight Programming vs. LoRA under matched task & evaluation contract ---
     gym_study = run_pythia_gym_task_learning_study(target_model, target_strength=80.0)
-    direct_holdout = sum(1.0 for p in gym_study.holdout_after if p.matched_target) / len(gym_study.holdout_after)
-    direct_ret = sum(1.0 for p in gym_study.retention_after if p.matched_target) / len(gym_study.retention_after)
+    # With no selected branch there is no direct edit to compare, so experiment D can't succeed.
+    has_direct = gym_study.selected_branch_id is not None
+    direct_holdout = sum(1.0 for p in gym_study.holdout_after if p.matched_target) / len(gym_study.holdout_after) if has_direct else None
+    direct_ret = sum(1.0 for p in gym_study.retention_after if p.matched_target) / len(gym_study.retention_after) if has_direct else None
     lora_holdout = gym_study.lora_holdout_accuracy
     lora_ret = gym_study.lora_baseline_trial.retention_accuracy
 
@@ -1709,6 +1727,7 @@ def run_prd_priority_experiments_suite(
         and merge_rec.task_a_survival_rate == 1.0
         and merge_rec.task_b_survival_rate == 1.0
         and merge_rec.retention_rate == 1.0
+        and has_direct
         and direct_holdout > lora_holdout
         and direct_ret > lora_ret
     )

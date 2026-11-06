@@ -42,8 +42,10 @@ def test_real_eleutherai_pythia_14m_weight_programming_if_cached() -> None:
     assert all(p.matched_target is True for p in report.dev_after)
     assert all(p.matched_target is True for p in report.generalization_after)
     assert all(p.matched_target is True for p in report.retention_after)
-    assert report.promotion_verification["promote_eligible"] is True
-    assert report.promotion_verification["status"] == "passed"
+    # The study's own prompts pass, but the independent evaluator measures a harmful edit.
+    assert report.promotion_verification["gym_self_check"]["status"] == "passed"
+    assert report.promotion_verification["promote_eligible"] is False
+    assert report.promotion_verification["status"] == "rejected"
 
 
 def test_mini_pythia_gym_task_learning_branches() -> None:
@@ -66,15 +68,18 @@ def test_real_pythia_14m_gym_task_learning_branches_and_holdout_verification() -
     real_model = PythiaModel.from_pretrained_dir(pythia_dir, model_name="EleutherAI/pythia-14m")
     real_rep = run_pythia_gym_task_learning_study(real_model)
 
-    # Branch 3 beats Branch 1 and Branch 2 in the Gym and achieves 100% on unseen holdout prompts
+    # Branch 3 beats Branch 1 and Branch 2 on the prompts synthesis saw, but fails its selection-time retention guards.
     b1, b2, b3 = real_rep.branches
     assert b3.gym_dev_accuracy == 1.0
     assert b3.gym_prefix_val_accuracy == 1.0
     assert b3.retention_accuracy == 1.0
     assert b3.gym_prefix_val_accuracy > b2.gym_prefix_val_accuracy
     assert b3.gym_dev_accuracy > b1.gym_dev_accuracy
-    assert all(p.matched_target is True for p in real_rep.holdout_after)
-    assert all(p.matched_target is True for p in real_rep.retention_after)
-    assert real_rep.promotion_verification["promote_eligible"] is True
-    assert real_rep.promotion_verification["status"] == "passed"
+    assert b3.retention_guard_source == "selection_time_retention_guard"
+    assert b3.retention_guard_accuracy < 0.98
+    assert real_rep.selected_branch_id is None
+    assert real_rep.selected_proposal is None
+    assert real_rep.holdout_after == ()
+    assert real_rep.promotion_verification["promote_eligible"] is False
+    assert real_rep.promotion_verification["status"] == "not_evaluated"
 

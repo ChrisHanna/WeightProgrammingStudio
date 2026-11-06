@@ -20,6 +20,7 @@ from .ir import (
     _bf16_u16_to_f32,
     _f32_to_bf16_u16,
     build_rounding_contract,
+    require_reload_parity,
     unpack_matrix_bytes,
 )
 from .provenance import parse_strict_json, sha256_file, write_artifact_manifest
@@ -282,6 +283,7 @@ def execute_quantized_q8_matrix_edit(
         projection_side=projection_side,
         provenance_tag="studio.quantized_q8_0.v1",
     )
+    require_reload_parity(tx)
     edited_f32 = unpack_matrix_bytes(tx.edited_bytes, shape, "f32")
     new_q8_bytes, _ = quantize_matrix_q8_0(edited_f32)
     deq_after = dequantize_matrix_q8_0(new_q8_bytes, shape)
@@ -430,6 +432,7 @@ def execute_quantized_q4_matrix_edit(
         projection_side=projection_side,
         provenance_tag="studio.quantized_q4_0.v1",
     )
+    require_reload_parity(tx)
     edited_f32 = unpack_matrix_bytes(tx.edited_bytes, shape, "f32")
     new_q4_bytes, _ = quantize_matrix_q4_0(
         edited_f32, hessian_error_diffusion=hessian_error_diffusion
@@ -595,6 +598,7 @@ def execute_fp8_matrix_edit(
         projection_side=projection_side,
         provenance_tag=f"studio.{fp8_format}.v1",
     )
+    require_reload_parity(tx)
     edited_f32 = unpack_matrix_bytes(tx.edited_bytes, shape, "f32")
     new_fp8_bytes, _, _ = quantize_matrix_fp8(edited_f32, fp8_format=fp8_format)
     deq_after = dequantize_matrix_fp8(new_fp8_bytes, shape, fp8_format=fp8_format)

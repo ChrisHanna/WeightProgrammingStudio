@@ -1,5 +1,5 @@
 {
-  "key_fingerprint": "sha256:b93b822672488c663039efc872e51dde0e83c4ed027f77bd6eaaae2e73b846ad",
+  "key_fingerprint": "sha256:877d0e940e331fdca0f2f2e6a538883298464a153dd2e7c936211df55e2bec27",
   "kind": "nf_signed_patch_envelope",
   "patch": {
     "artifact_manifest": [
@@ -9,8 +9,8 @@
         "path": "proposal.json"
       },
       {
-        "bytes": 80385,
-        "digest": "sha256:35e5e848f460397041339ef5a8714600d16a69030d50e1e06b1b30c7f6120874",
+        "bytes": 80386,
+        "digest": "sha256:c08f8c041033f3d108c30c817353514ddde695568f53527081255fe2fbe9f70a",
         "path": "gym_proposals.json"
       },
       {
@@ -30,12 +30,12 @@
       },
       {
         "bytes": 43412,
-        "digest": "sha256:f30e182fb388309384a1d098dc7d875484da5626622a82d4d4ca8a6f66a98b5e",
+        "digest": "sha256:6fc106c02a273fdb77bfbcd7db4efe65e53085e29cc813ceb7435892f3874069",
         "path": "edit_graph.signed.json"
       },
       {
         "bytes": 77,
-        "digest": "sha256:feb3a03a21352170067c18b9a4238524ceb0827a0ed37ef56b69debc3ee9ce1b",
+        "digest": "sha256:c439a028196cf9b2788456678d3f75fbfbba272b34b6ea015406b4ceb3602ae2",
         "path": "signing.pub"
       },
       {
@@ -47,6 +47,16 @@
         "bytes": 88602,
         "digest": "sha256:2c53eae88a2d7eccb28fae1dbad05927c973a5bf722ff3d3daa403b5537eca1a",
         "path": "report.json"
+      },
+      {
+        "bytes": 1562,
+        "digest": "sha256:43382528ecda9e9eac1292f732fd3743e7cd92f2ad3cabb8247e1cae348d702b",
+        "path": "selection.json"
+      },
+      {
+        "bytes": 5208,
+        "digest": "sha256:f91d8d7e7f60e7d56e58dede7ff9149b657551cdcc12971b0339a794716f8149",
+        "path": "promotion.json"
       }
     ],
     "checkpoint": {
@@ -87,13 +97,15 @@
       "--checkpoint",
       "/tmp/pythia-14m",
       "--out",
-      "/tmp/nf-m1-run",
+      "/tmp/nf-gate-qual",
       "--repo",
-      "/mnt/c/Users/NotAPC/Desktop/weightspaceprogramming/.claude/worktrees/milestone1"
+      "/tmp/nf-gate-repo",
+      "--candidate",
+      "branch_3_contrastive_prefix_nullspace_rank6"
     ],
     "commit": {
       "dirty": false,
-      "sha": "8cb4070522216bee931cc2ab5db22cde40022a27"
+      "sha": "6fa14b8a48058907d32940c56bd3e3fa5c9a416e"
     },
     "dependency_lock": {
       "environment_digest": "sha256:0d5f0a29cb06540460e940708a5b27412cdbcfab60d626e8704e41c27817bf84",
@@ -148,13 +160,13 @@
       ],
       "lock_files": [
         {
-          "bytes": 524,
-          "digest": "sha256:c38e674a1d8e6117f3e8466770fd32f6862482f2d9ad1b88d737fe2b270e90b8",
+          "bytes": 499,
+          "digest": "sha256:b09c75b427b789152b09f77b9dfb22b5d8e7ddca1e99cd8cf942f0de63cb1595",
           "path": "requirements-dev.lock"
         },
         {
-          "bytes": 20857,
-          "digest": "sha256:30d63bdbdfba83b728c25f1870201a7a28e577db31e31aa6ccc330cc5e18e905",
+          "bytes": 20049,
+          "digest": "sha256:6f6121155788655ec8b97f8b283d61540643a2c13c866f9c953c62adb0f7464c",
           "path": "Cargo.lock"
         }
       ]
@@ -183,10 +195,10 @@
       ]
     }
   },
-  "patch_digest": "sha256:93fb92dbcc29aded39d30301e4afafe60f3deb1a49aca55939e9e9e169fef65e",
-  "public_key": "ed25519_pub:0b1a8f04fb352357b64839ae9d4718acb9a795650453c1a41875b4f6d573747c",
+  "patch_digest": "sha256:abf4228209daff1c4e90565c9d87b5ede68840721210458bc3207d9286914bdb",
+  "public_key": "ed25519_pub:d85248f4eee357f209a65bea0c1c480308b75e751fda56c7da235c0749d4eb51",
   "schema_version": 1,
-  "signature": "ed25519_sig:4d4d24bae3875a1f5e45d10099506d8840fab1d27962f67ad6506346339e1049b9c2bacc287d457599288f13b2328ed120d792c09c87ff0b0216bb0637c0960a",
+  "signature": "ed25519_sig:7e6159152b59a22f3aafa86234d9ffb5ef6cfac04acfd15c4897f40b723742eab667db56aa9717d65e6bef5e65c11e9ed90824a6ba940585bc0ed386c11b6808",
   "signature_scheme": "ed25519_v1",
   "signer_id": "nf.run_record.v1"
 }

@@ -383,6 +383,8 @@ def compose_overlapping_patches_orthogonal(
         provenance_tag="studio.orthogonal_patch_compose.v1",
         engine_name="studio.orthogonal_patch_compose",
     )
+    from .ir import require_reload_parity
+    require_reload_parity(tx)
     w_composed = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
