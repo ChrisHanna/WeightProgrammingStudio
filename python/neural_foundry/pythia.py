@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,10 +155,79 @@ def _build_single_matrix_safetensors(weight_f64: torch.Tensor) -> tuple[bytes, s
     return st, raw_digest
 
 
+def _build_byte_to_unicode() -> dict[int, str]:
+    """GPT-2's reversible byte-to-printable-character table."""
+    printable = [*range(0x21, 0x7F), *range(0xA1, 0xAD), *range(0xAE, 0x100)]
+    table = {b: chr(b) for b in printable}
+    shifted = 0
+    for b in range(256):
+        if b not in table:
+            table[b] = chr(256 + shifted)
+            shifted += 1
+    return table
+
+
+_BYTE_TO_UNICODE = _build_byte_to_unicode()
+_GPT2_CONTRACTIONS = ("'re", "'ve", "'ll", "'s", "'t", "'m", "'d")
+
+
+def _gpt2_is_space(ch: str) -> bool:
+    # `str.isspace` also accepts the \x1c-\x1f separators, which Unicode White_Space does not.
+    return ch.isspace() and not "\x1c" <= ch <= "\x1f"
+
+
+def _gpt2_class(ch: str) -> str:
+    if _gpt2_is_space(ch):
+        return "space"
+    category = unicodedata.category(ch)[0]
+    return category if category in ("L", "N") else "other"
+
+
+def _gpt2_split(text: str) -> list[str]:
+    """Stdlib equivalent of the GPT-2 pattern, which needs `\\p{L}`/`\\p{N}`:
+    `'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+`.
+    """
+    pieces: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        contraction = next((c for c in _GPT2_CONTRACTIONS if text.startswith(c, i)), None)
+        if contraction:
+            pieces.append(contraction)
+            i += len(contraction)
+            continue
+        body = i + 1 if text[i] == " " and i + 1 < n and not _gpt2_is_space(text[i + 1]) else i
+        kind = _gpt2_class(text[body])
+        j = body + 1
+        while j < n and _gpt2_class(text[j]) == kind:
+            j += 1
+        # `\s+(?!\S)` gives back one whitespace character when the run precedes a non-space.
+        if kind == "space" and j < n and j - body > 1:
+            j -= 1
+        pieces.append(text[i:j])
+        i = j
+    return pieces
+
+
 class PythiaBPETokenizer:
     """Deterministic GPT-NeoX byte-level BPE tokenizer loaded from `tokenizer.json`."""
 
-    def __init__(self, vocab: Mapping[str, int], merges: Sequence[str]) -> None:
+    def __init__(
+        self,
+        vocab: Mapping[str, int],
+        merges: Sequence[str],
+        *,
+        byte_level: bool = False,
+        added_tokens: Mapping[str, int] | None = None,
+    ) -> None:
+        # `byte_level` selects the real GPT-2 pipeline declared by a checkpoint's tokenizer.json.
+        # Synthetic vocabularies (no merges, whole-word tokens) keep the whitespace split.
+        self.byte_level = byte_level
+        self.added_tokens: dict[str, int] = dict(added_tokens or {})
+        self._added_token_pattern = (
+            re.compile("|".join(re.escape(t) for t in sorted(self.added_tokens, key=len, reverse=True)))
+            if self.added_tokens
+            else None
+        )
         self.vocab: dict[str, int] = {str(k): int(v) for k, v in vocab.items()}
         self.id_to_token: dict[int, str] = {int(v): str(k) for k, v in vocab.items()}
         parsed_merges: list[tuple[str, str]] = []
@@ -172,7 +243,21 @@ class PythiaBPETokenizer:
     def from_file(cls, path: str | Path) -> PythiaBPETokenizer:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         model = data["model"]
-        return cls(vocab=model["vocab"], merges=model.get("merges", []))
+        pre = data.get("pre_tokenizer") or {}
+        normalizer = data.get("normalizer") or {}
+        byte_level = (
+            pre.get("type") == "ByteLevel"
+            and pre.get("use_regex") is True
+            and pre.get("add_prefix_space") is False
+            and normalizer.get("type") == "NFC"
+        )
+        added = {t["content"]: int(t["id"]) for t in data.get("added_tokens", [])} if byte_level else None
+        return cls(
+            vocab=model["vocab"],
+            merges=model.get("merges", []),
+            byte_level=byte_level,
+            added_tokens=added,
+        )
 
     def _bpe_word(self, token_str: str) -> list[int]:
         word = list(token_str)
@@ -194,7 +279,27 @@ class PythiaBPETokenizer:
             word = new_word
         return [self.vocab[w] for w in word if w in self.vocab]
 
+    def _encode_byte_level(self, text: str) -> list[int]:
+        text = unicodedata.normalize("NFC", text)
+        ids: list[int] = []
+        start = 0
+        pattern = self._added_token_pattern
+        for match in pattern.finditer(text) if pattern else ():
+            ids.extend(self._encode_ordinary(text[start : match.start()]))
+            ids.append(self.added_tokens[match.group()])
+            start = match.end()
+        ids.extend(self._encode_ordinary(text[start:]))
+        return ids
+
+    def _encode_ordinary(self, text: str) -> list[int]:
+        ids: list[int] = []
+        for piece in _gpt2_split(text):
+            ids.extend(self._bpe_word("".join(_BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))))
+        return ids
+
     def encode(self, text: str) -> list[int]:
+        if self.byte_level:
+            return self._encode_byte_level(text)
         parts = text.split(" ")
         ids: list[int] = []
         for idx, part in enumerate(parts):
