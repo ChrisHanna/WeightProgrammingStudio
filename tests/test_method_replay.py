@@ -515,8 +515,10 @@ def test_attention_head_surgery_cannot_be_a_plan() -> None:
     site = model.mlp_down_proj_site(0)
     head_dim = 2
     matrix = torch.ones((8, 8), dtype=torch.float64)
+    # Four Q heads share two KV heads, so Q heads 0 and 1 are the group that reads KV head 0.
+    kv_matrix = torch.ones((4, 8), dtype=torch.float64)
     result = m5_surgery.execute_attention_head_surgery(
-        q_proj=matrix, k_proj=matrix, v_proj=matrix, o_proj=matrix, keep_q_heads=[0, 1], keep_kv_heads=[0], head_dim=head_dim
+        q_proj=matrix, k_proj=kv_matrix, v_proj=kv_matrix, o_proj=matrix, keep_q_heads=[0, 1], keep_kv_heads=[0], head_dim=head_dim
     )
     # Pruning changes tensor shapes and the head-count config. A graph has neither a shape nor a config operand.
     assert result.q_proj.shape != matrix.shape and result.k_proj.shape != matrix.shape

@@ -122,6 +122,45 @@ class AttentionSurgeryResult:
     rope_dim_preserved: bool
 
 
+def _validated_head_ids(ids: list[int], count: int, label: str) -> None:
+    if any(type(h) is not int for h in ids):
+        raise M5SurgeryError("INVALID_HEAD_ID", f"{label} head ids must be integers: {ids}")
+    if len(set(ids)) != len(ids):
+        raise M5SurgeryError("DUPLICATE_HEAD_ID", f"{label} head ids contain duplicates: {ids}")
+    outside = [h for h in ids if not 0 <= h < count]
+    if outside:
+        raise M5SurgeryError("HEAD_ID_OUT_OF_RANGE", f"{label} head ids {outside} are outside the {count} heads present")
+
+
+def _head_counts(
+    q_proj: torch.Tensor, k_proj: torch.Tensor, v_proj: torch.Tensor, o_proj: torch.Tensor, head_dim: int
+) -> tuple[int, int]:
+    """Check the Q/K/V/O layout and return the original (Q heads, KV heads)."""
+    if type(head_dim) is not int or head_dim <= 0:
+        raise M5SurgeryError("INVALID_HEAD_DIM", f"head_dim must be a positive integer, not {head_dim!r}")
+    tensors = {"q_proj": q_proj, "k_proj": k_proj, "v_proj": v_proj, "o_proj": o_proj}
+    wrong_rank = [name for name, t in tensors.items() if t.ndim != 2]
+    if wrong_rank:
+        raise M5SurgeryError("INVALID_ATTENTION_SHAPE", f"{wrong_rank} must be matrices")
+    if k_proj.shape != v_proj.shape or q_proj.shape[1] != k_proj.shape[1]:
+        raise M5SurgeryError(
+            "INVALID_ATTENTION_SHAPE",
+            f"k_proj {tuple(k_proj.shape)} and v_proj {tuple(v_proj.shape)} must match, and share q_proj's input size {q_proj.shape[1]}",
+        )
+    if o_proj.shape[1] != q_proj.shape[0]:
+        raise M5SurgeryError("INVALID_ATTENTION_SHAPE", f"o_proj takes {o_proj.shape[1]} inputs but q_proj emits {q_proj.shape[0]}")
+    q_count, q_rest = divmod(q_proj.shape[0], head_dim)
+    kv_count, kv_rest = divmod(k_proj.shape[0], head_dim)
+    if q_rest or kv_rest or not q_count or not kv_count:
+        raise M5SurgeryError(
+            "INVALID_ATTENTION_SHAPE",
+            f"q_proj has {q_proj.shape[0]} rows and k_proj has {k_proj.shape[0]}; neither may be empty and both must be whole heads of {head_dim}",
+        )
+    if q_count % kv_count:
+        raise M5SurgeryError("INVALID_GQA_GROUPING", f"the model's {q_count} Q heads don't divide into {kv_count} KV groups")
+    return q_count, kv_count
+
+
 def execute_attention_head_surgery(
     *,
     q_proj: torch.Tensor,
@@ -144,6 +183,19 @@ def execute_attention_head_surgery(
             "INVALID_GQA_GROUPING",
             f"retained Q heads ({len(keep_q_heads)}) must be positive and divisible by retained KV heads ({len(keep_kv_heads)})",
         )
+    q_count, kv_count = _head_counts(q_proj, k_proj, v_proj, o_proj, head_dim)
+    _validated_head_ids(keep_q_heads, q_count, "Q")
+    _validated_head_ids(keep_kv_heads, kv_count, "KV")
+    # After pruning, Q head i reads KV head i // ratio, so each must still be the group it read before.
+    old_ratio = q_count // kv_count
+    new_ratio = len(keep_q_heads) // len(keep_kv_heads)
+    for position, head in enumerate(keep_q_heads):
+        expected = keep_kv_heads[position // new_ratio]
+        if head // old_ratio != expected:
+            raise M5SurgeryError(
+                "INVALID_GQA_GROUPING",
+                f"Q head {head} belongs to KV group {head // old_ratio}, but would read retained KV head {expected}",
+            )
     q_rows: list[int] = []
     for h in keep_q_heads:
         q_rows.extend(range(h * head_dim, (h + 1) * head_dim))

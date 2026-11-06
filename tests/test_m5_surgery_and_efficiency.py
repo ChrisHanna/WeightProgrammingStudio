@@ -61,7 +61,7 @@ def test_mlp_surgery_attention_surgery_layer_reorganization_and_structural_const
         k_proj=k,
         v_proj=v,
         o_proj=o,
-        keep_q_heads=[0, 2],
+        keep_q_heads=[0, 1],
         keep_kv_heads=[0],
         head_dim=4,
     )
@@ -79,6 +79,11 @@ def test_mlp_surgery_attention_surgery_layer_reorganization_and_structural_const
             keep_kv_heads=[0, 1],
             head_dim=4,
         )
+    assert exc_info.value.code == "INVALID_GQA_GROUPING"
+
+    # Q head 2 reads KV group 1 in this model, so it can't be moved onto KV head 0.
+    with pytest.raises(M5SurgeryError, match="belongs to KV group 1") as exc_info:
+        execute_attention_head_surgery(q_proj=q, k_proj=k, v_proj=v, o_proj=o, keep_q_heads=[0, 2], keep_kv_heads=[0], head_dim=4)
     assert exc_info.value.code == "INVALID_GQA_GROUPING"
 
     # T104: Layer reorganization
@@ -273,3 +278,74 @@ def test_quantization_gym_compression_gym_generation_gym_serving_protocol_vllm_a
     )
     assert skipped.m5_measured_improvement_status == "not_run_code_ready_only"
     assert skipped.measured_speedup_ratio is None
+
+
+def _attention(q_heads: int = 4, kv_heads: int = 2, head_dim: int = 4, hidden: int = 16) -> dict[str, torch.Tensor]:
+    return {
+        "q_proj": torch.randn(q_heads * head_dim, hidden, dtype=torch.float64),
+        "k_proj": torch.randn(kv_heads * head_dim, hidden, dtype=torch.float64),
+        "v_proj": torch.randn(kv_heads * head_dim, hidden, dtype=torch.float64),
+        "o_proj": torch.randn(hidden, q_heads * head_dim, dtype=torch.float64),
+    }
+
+
+def test_attention_surgery_keeps_the_rows_of_the_retained_group() -> None:
+    tensors = _attention()
+    result = execute_attention_head_surgery(**tensors, keep_q_heads=[2, 3], keep_kv_heads=[1], head_dim=4)
+    assert torch.equal(result.q_proj, tensors["q_proj"][8:16])
+    assert torch.equal(result.k_proj, tensors["k_proj"][4:8])
+    assert torch.equal(result.v_proj, tensors["v_proj"][4:8])
+    assert torch.equal(result.o_proj, tensors["o_proj"][:, 8:16])
+    assert result.num_attention_heads == 2 and result.num_key_value_heads == 1
+
+
+def test_attention_surgery_allows_reordering_that_keeps_each_group() -> None:
+    result = execute_attention_head_surgery(**_attention(), keep_q_heads=[2, 3, 0, 1], keep_kv_heads=[1, 0], head_dim=4)
+    assert result.kv_group_ratio == 2
+
+
+@pytest.mark.parametrize(
+    ("keep_q", "keep_kv", "code", "message"),
+    [
+        ([0, 0], [0], "DUPLICATE_HEAD_ID", "Q head ids contain duplicates"),
+        ([0, 1, 2, 3], [0, 0], "DUPLICATE_HEAD_ID", "KV head ids contain duplicates"),
+        ([0, 4], [0], "HEAD_ID_OUT_OF_RANGE", r"Q head ids \[4\]"),
+        ([-1, 0], [0], "HEAD_ID_OUT_OF_RANGE", r"Q head ids \[-1\]"),
+        ([0, 1], [2], "HEAD_ID_OUT_OF_RANGE", r"KV head ids \[2\]"),
+        ([0, 1], [-1], "HEAD_ID_OUT_OF_RANGE", r"KV head ids \[-1\]"),
+        ([0, True], [0], "INVALID_HEAD_ID", "must be integers"),
+        ([0.0, 1], [0], "INVALID_HEAD_ID", "must be integers"),
+        ([2, 3], [0], "INVALID_GQA_GROUPING", "Q head 2 belongs to KV group 1"),
+        ([0, 2], [0], "INVALID_GQA_GROUPING", "Q head 2 belongs to KV group 1"),
+        ([2, 3, 0, 1], [0, 1], "INVALID_GQA_GROUPING", "Q head 2 belongs to KV group 1"),
+        ([0, 2, 1, 3], [0, 1], "INVALID_GQA_GROUPING", "Q head 2 belongs to KV group 1"),
+    ],
+)
+def test_attention_surgery_refuses_bad_head_ids_and_broken_groups(keep_q: list[int], keep_kv: list[int], code: str, message: str) -> None:
+    with pytest.raises(M5SurgeryError, match=message) as exc_info:
+        execute_attention_head_surgery(**_attention(), keep_q_heads=keep_q, keep_kv_heads=keep_kv, head_dim=4)
+    assert exc_info.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("change", "head_dim", "code"),
+    [
+        ({"q_proj": torch.zeros(16)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"o_proj": torch.zeros(2, 2, 2)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"q_proj": torch.zeros(15, 16)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"k_proj": torch.zeros(7, 16), "v_proj": torch.zeros(7, 16)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"k_proj": torch.zeros(0, 16), "v_proj": torch.zeros(0, 16)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"v_proj": torch.zeros(4, 16)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"k_proj": torch.zeros(8, 12), "v_proj": torch.zeros(8, 12)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"o_proj": torch.zeros(16, 12)}, 4, "INVALID_ATTENTION_SHAPE"),
+        ({"k_proj": torch.zeros(12, 16), "v_proj": torch.zeros(12, 16)}, 4, "INVALID_GQA_GROUPING"),
+        ({}, 0, "INVALID_HEAD_DIM"),
+        ({}, -4, "INVALID_HEAD_DIM"),
+        ({}, 4.0, "INVALID_HEAD_DIM"),
+    ],
+)
+def test_attention_surgery_refuses_tensors_that_do_not_fit(change: dict[str, torch.Tensor], head_dim: int, code: str) -> None:
+    tensors = {**_attention(), **change}
+    with pytest.raises(M5SurgeryError) as exc_info:
+        execute_attention_head_surgery(**tensors, keep_q_heads=[0, 1], keep_kv_heads=[0], head_dim=head_dim)
+    assert exc_info.value.code == code
