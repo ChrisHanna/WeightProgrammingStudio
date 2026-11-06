@@ -27,7 +27,7 @@ These tests run the real guardian, model worker and Docker sandbox, so they need
 
 Requirements:
 
-- **Empty capability bounding set.** The fixture guardian (`fixture_supervisor/boundary.py`) refuses any process with a nonzero `CapBnd`, which includes an ordinary login shell. On such a host about 100 tests fail with `qualification failed; unsupported host/runtime/static ELF` or `supervised cleanup unknown; full reservation retained`. Run the test binary as a non-root user with the set emptied, as shown below.
+- **Empty capability bounding set.** The fixture guardian (`fixture_supervisor/boundary.py`) refuses any process with a nonzero `CapBnd`, which includes an ordinary login shell. On such a host dozens of tests fail with `qualification failed; unsupported host/runtime/static ELF` or `supervised cleanup unknown; full reservation retained`. Run the test binary as a non-root user with the set emptied, as shown below.
 - **`.venv/` at the workspace root**, with Torch in `.venv/lib/python3.12/site-packages`, and `/usr/bin/python3.12`. On WSL, keep the venv on the Linux filesystem: cold Torch imports through `/mnt/c` can exceed the 30-second qualification limit (`runtime probe failed: wall_limit`).
 - **`target/debug/lib_native.so`**, from `cargo build -p nf-python`. `cargo test -p nf-experiments` does not build it. Tests use the workspace `target/`, so don't set `CARGO_TARGET_DIR`.
 - **Docker** with cgroup v2, seccomp and the pinned Python image from `.github/workflows/m1.yml`.
@@ -42,7 +42,9 @@ unshare -U --map-current-user --keep-caps \
   ../../target/debug/deps/<test-binary> --test-threads=2
 ```
 
-The user namespace is only a way to empty the bounding set without root. Where unprivileged user namespaces are blocked, use a container or `sudo setpriv` that returns to a non-root user. A plain `cargo test --workspace` does not set this up.
+The user namespace is only a way to empty the bounding set without root. A plain `cargo test --workspace` does not set this up.
+
+On WSL2 with Docker Desktop (2-2.6 s per `docker run`), `unchanged_gym_runs_good_bad_constant_and_metadata_policies` and `complete_valid_audit_executes_all_six_controls_under_live_deadline` still fail with `insufficient remaining audit wall allowance before staging`. Container latency is the suspected cause, but this has not been confirmed on native Docker.
 
 ## Real PyTorch reference
 
