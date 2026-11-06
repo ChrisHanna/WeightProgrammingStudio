@@ -191,9 +191,8 @@ def test_unknown_tensor_is_refused(model: Toy) -> None:
     ],
     ids=["adopt_scalar_matrix", "adopt_row", "interpolate_row"],
 )
-@xfail("D5 edit_plan.py: adopt_weight and interpolate broadcast the operand, so a 1x1 matrix overwrites the whole tensor")
 def test_derived_edits_do_not_broadcast_a_wrong_shape_over_the_tensor(model: Toy, build: Callable[[EditPlan], Any]) -> None:
-    with pytest.raises(REFUSED):
+    with pytest.raises(REFUSED, match="shape"):
         build(EditPlan(model)).preview()
 
 

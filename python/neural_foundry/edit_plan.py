@@ -169,6 +169,13 @@ def _retie(model: Any, pairs: Sequence[tuple[str, str]]) -> Any:
     return model
 
 
+def _matching(operand: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Arithmetic with a wrong-shaped operand would broadcast it over the whole tensor."""
+    if tuple(operand.shape) != tuple(weight.shape):
+        raise ValueError(f"Operand has shape {tuple(operand.shape)}, but the tensor has shape {tuple(weight.shape)}")
+    return operand
+
+
 def _spectrum(matrix: torch.Tensor, limit: int = 16) -> tuple[float, ...]:
     return tuple(round(float(v), 6) for v in torch.linalg.svdvals(matrix)[:limit])
 
@@ -352,7 +359,7 @@ class EditPlan:
     def interpolate(self, tensor: str, other: torch.Tensor, weight: float) -> EditPlan:
         if not 0.0 <= weight <= 1.0:
             raise ValueError("weight must be in [0, 1]")
-        return self._derived(tensor, "interpolate", lambda w: (1.0 - weight) * w + weight * other.to(torch.float64))
+        return self._derived(tensor, "interpolate", lambda w: (1.0 - weight) * w + weight * _matching(other.to(torch.float64), w))
 
     # ---- Activation-guided edits.
     def _activation(self, prompts: Sequence[str], layer: int) -> torch.Tensor:
@@ -398,7 +405,7 @@ class EditPlan:
     def adopt_weight(self, tensor: str, edited_weight: torch.Tensor, *, method: str = "external_method") -> EditPlan:
         """Bring in a weight from ROME, MEMIT, AlphaEdit, a merge or anything else, as a verified step."""
         target = edited_weight.detach().to(torch.float64)
-        return self._derived(tensor, method, lambda w: target)
+        return self._derived(tensor, method, lambda w: _matching(target, w))
 
     def branch(self) -> EditPlan:
         """An independent copy of this plan. Steps added to either don't affect the other."""
