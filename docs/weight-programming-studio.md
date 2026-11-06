@@ -158,7 +158,7 @@ All 20 audit requirements are enforced across the Rust core, Python SDK, CLI, an
 
 ## 7. Checking Inference Against `transformers`
 
-`tests/test_inference_reference.py` compares tokenization, logits, hidden activations and edit deltas with `transformers` on real Pythia checkpoints. It skips when `transformers` or a checkpoint is missing, and it never downloads anything. Its docstring explains the tolerances.
+`tests/test_inference_reference.py` compares tokenization, logits, hidden activations and edit deltas with `transformers` on real Pythia checkpoints. It also compares attention weights and sweeps context length up to 2048 tokens, and it prints the precision, attention implementation, context lengths and tolerance for each level. It skips when `transformers` or a checkpoint is missing, and with `NF_QUALIFICATION=1` those same conditions fail instead. It never downloads anything. Its docstring explains the tolerances.
 
 ```bash
 NF_PYTHIA_14M_DIR=/path/to/pythia-14m NF_PYTHIA_31M_DIR=/path/to/pythia-31m python -m pytest tests/test_inference_reference.py -v -s

@@ -12,8 +12,12 @@ never downloads anything. To run it:
     python -m pytest tests/test_inference_reference.py -v -s
 
 The directories default to /tmp/pythia-14m and /tmp/pythia-31m. Each needs config.json,
-model.safetensors and tokenizer.json. `-s` prints the measured differences;
+model.safetensors and tokenizer.json. The last test always prints each level's precision,
+attention implementation, context lengths, tolerance and measured difference;
 NF_INFERENCE_REPORT=path.json also writes them to a file.
+
+Missing `transformers` or a checkpoint skips in normal CI. With NF_QUALIFICATION=1 the same
+conditions fail, because a skipped comparison is not a passed one.
 
 Why there are two sets of tolerances. In a float64 model, `transformers` (checked on 5.22.1)
 still does two steps in float32, both in `modeling_gpt_neox.py`:
@@ -39,30 +43,53 @@ from pathlib import Path
 import pytest
 import torch
 
-transformers = pytest.importorskip(
-    "transformers",
-    reason="optional reference comparison: `transformers` is not installed (see module docstring)",
-)
-modeling = pytest.importorskip("transformers.models.gpt_neox.modeling_gpt_neox")
+from neural_foundry import pythia as pythia_module
+from neural_foundry.pythia import PythiaModel
 
-from neural_foundry import pythia as pythia_module  # noqa: E402
-from neural_foundry.pythia import PythiaModel  # noqa: E402
+try:
+    import transformers
+    from transformers.models.gpt_neox import modeling_gpt_neox as modeling
+except ImportError:
+    transformers = None
+    modeling = None
+
+QUALIFICATION = os.environ.get("NF_QUALIFICATION") == "1"
+
+
+def _unavailable(reason: str) -> None:
+    """Skip visibly in normal runs. Under NF_QUALIFICATION=1 a skip is not a pass, so fail."""
+    if QUALIFICATION:
+        pytest.fail(f"NF_QUALIFICATION=1 requires this check to run: {reason}", pytrace=False)
+    pytest.skip(reason)
+
+
+@pytest.fixture(autouse=True)
+def _require_transformers() -> None:
+    if transformers is None:
+        _unavailable("optional reference comparison: `transformers` is not installed (see module docstring)")
+
 
 CHECKPOINTS = {
     "pythia-14m": ("NF_PYTHIA_14M_DIR", "/tmp/pythia-14m", 14_067_712),
     "pythia-31m": ("NF_PYTHIA_31M_DIR", "/tmp/pythia-31m", 30_494_720),
 }
 
-LEVELS = ("logits", "residual", "mlp", "edit_delta")
+LEVELS = ("logits", "residual", "mlp", "attention", "edit_delta")
+# Token counts for the sweep, up to the checkpoints' max_position_embeddings.
+CONTEXT_LENGTHS = (1, 2, 8, 64, 256, 1024, 2048)
+# Edits run four extra passes per reference, so they stop here to keep the sweep affordable.
+MAX_EDIT_CONTEXT = 256
 
 # Limits on the largest absolute difference, per level. Measured on 5.22.1, worst of both models:
-#   corrected: logits 2.5e-11, residual 1.9e-12, mlp 1.3e-12, edit delta 2.9e-11
-#   stock:     logits 3.4e-3,  residual 4.0e-4,  mlp 1.9e-4,  edit delta 3.8e-3
+# prompts plus context lengths 1 to 2048 (edit deltas to 256):
+#   corrected: logits 2.8e-11, residual 2.9e-12, mlp 4.4e-12, attention 1.4e-11, edit delta 4.7e-11
+#   stock:     logits 3.7e-3,  residual 4.0e-4,  mlp 5.9e-4,  attention 1.9e-3,  edit delta 5.4e-3
+# SDPA, which has a float64 softmax without any patch: stock logits 2.0e-4, RoPE fixed 2.6e-11.
 # The corrected limit rests on a noise floor: a random 1-ulp change to our own weights alone moved
 # logits by 1.8e-11 to 3.2e-11. Injected bugs, a 0.01% change to layer_norm_eps or to the RoPE base,
 # moved logits by 9e-5 and 1e-4, so 1e-10 separates rounding from error by about six orders.
 CORRECTED_TOLERANCE = dict.fromkeys(LEVELS, 1e-10)
-STOCK_TOLERANCE = {"logits": 1e-2, "residual": 1e-3, "mlp": 1e-3, "edit_delta": 1e-2}
+STOCK_TOLERANCE = {"logits": 1e-2, "residual": 1e-3, "mlp": 1e-3, "attention": 1e-2, "edit_delta": 1e-2}
 
 # An edit must move logits by at least this much, or the delta comparison proves nothing.
 MIN_EDIT_EFFECT = 1e-3
@@ -178,8 +205,15 @@ def _reference_trace(hf, ids: list[int]) -> dict[str, list[torch.Tensor] | torch
     """Logits, each layer's input plus the final-norm input, and each layer's GELU output."""
     residual: list[torch.Tensor] = []
     mlp: list[torch.Tensor] = []
+    attention: list[torch.Tensor] = []
     handles = []
     for layer in hf.gpt_neox.layers:
+        # SDPA returns no weights, so this list stays empty for that implementation.
+        handles.append(
+            layer.attention.register_forward_hook(
+                lambda _m, _a, out: attention.append(out[1][0].clone()) if out[1] is not None else None
+            )
+        )
         handles.append(
             layer.register_forward_pre_hook(
                 lambda _m, a, k: residual.append((a[0] if a else k["hidden_states"])[0].clone()),
@@ -194,7 +228,7 @@ def _reference_trace(hf, ids: list[int]) -> dict[str, list[torch.Tensor] | torch
     finally:
         for handle in handles:
             handle.remove()
-    return {"logits": logits, "residual": residual, "mlp": mlp}
+    return {"logits": logits, "residual": residual, "mlp": mlp, "attention": attention}
 
 
 def _our_trace(model: PythiaModel, ids: list[int], override=None) -> dict[str, list[torch.Tensor] | torch.Tensor]:
@@ -213,15 +247,25 @@ def _our_trace(model: PythiaModel, ids: list[int], override=None) -> dict[str, l
         mlp.append(out)
         return out
 
+    attention: list[torch.Tensor] = []
+    real_softmax = torch.softmax
+
+    def softmax(x, *args, **kwargs):
+        out = real_softmax(x, *args, **kwargs)
+        attention.append(out)
+        return out
+
     shim = types.SimpleNamespace(layer_norm=layer_norm, gelu=gelu, linear=real.linear)
     saved = pythia_module.F
     pythia_module.F = shim
+    torch.softmax = softmax  # only our pass runs here, and it calls softmax only for attention
     try:
         with torch.no_grad():
             logits, _ = model.forward_with_mlp_key(ids, layer_down_proj_override=override)
     finally:
         pythia_module.F = saved
-    return {"logits": logits, "residual": residual, "mlp": mlp}
+        torch.softmax = real_softmax
+    return {"logits": logits, "residual": residual, "mlp": mlp, "attention": attention}
 
 
 def _edits(model: PythiaModel) -> dict[str, dict[int, torch.Tensor]]:
@@ -244,18 +288,20 @@ def _max_abs(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a - b).abs().max().item())
 
 
-def _measure(model: PythiaModel, hf, tokenized: list[list[int]]) -> dict[str, float]:
+def _measure(model: PythiaModel, hf, tokenized: list[list[int]], *, with_edits: bool = True) -> dict[str, float]:
     """Largest difference per level over every prompt, against `hf` in its current state."""
     worst = dict.fromkeys(LEVELS, 0.0)
-    worst["min_edit_effect"] = float("inf")
-    edits = _edits(model)
+    if with_edits:
+        worst["min_edit_effect"] = float("inf")
+    edits = _edits(model) if with_edits else {}
     for ids in tokenized:
         ours = _our_trace(model, ids)
         ref = _reference_trace(hf, ids)
         assert len(ours["residual"]) == len(ref["residual"]) == len(hf.gpt_neox.layers) + 1
         assert len(ours["mlp"]) == len(ref["mlp"]) == len(hf.gpt_neox.layers)
         worst["logits"] = max(worst["logits"], _max_abs(ours["logits"], ref["logits"]))
-        for name in ("residual", "mlp"):
+        assert len(ours["attention"]) == len(ref["attention"]) == len(hf.gpt_neox.layers)
+        for name in ("residual", "mlp", "attention"):
             for a, b in zip(ours[name], ref[name], strict=True):
                 worst[name] = max(worst[name], _max_abs(a, b))
         for edit in edits.values():
@@ -274,17 +320,49 @@ def _measure(model: PythiaModel, hf, tokenized: list[list[int]]) -> dict[str, fl
     return worst
 
 
+def _context_ids(tokenized: list[list[int]], length: int) -> list[int]:
+    """Real prompt tokens, cycled to exactly `length`."""
+    pool = [token for ids in tokenized for token in ids]
+    return (pool * (length // len(pool) + 1))[:length]
+
+
+def _measure_contexts(model: PythiaModel, hf, tokenized: list[list[int]]) -> dict[int, dict[str, float]]:
+    return {
+        length: _measure(model, hf, [_context_ids(tokenized, length)], with_edits=length <= MAX_EDIT_CONTEXT)
+        for length in CONTEXT_LENGTHS
+    }
+
+
+def _measure_sdpa_logits(model: PythiaModel, sdpa, tokenized: list[list[int]]) -> dict[str, float]:
+    """SDPA does its softmax in float64 with no patch from us, so only RoPE should remain."""
+    inputs = tokenized + [_context_ids(tokenized, length) for length in CONTEXT_LENGTHS]
+
+    def worst() -> float:
+        return max(_max_abs(_our_trace(model, ids)["logits"], _reference_trace(sdpa, ids)["logits"]) for ids in inputs)
+
+    stock = worst()
+    rotary = modeling.GPTNeoXRotaryEmbedding.forward
+    modeling.GPTNeoXRotaryEmbedding.forward = _float64_rotary_forward
+    try:
+        return {"stock": stock, "rope_corrected": worst()}
+    finally:
+        modeling.GPTNeoXRotaryEmbedding.forward = rotary
+
+
 REPORT: dict[str, dict[str, object]] = {}
 
 
 @pytest.fixture(scope="module", params=sorted(CHECKPOINTS))
 def bundle(request: pytest.FixtureRequest) -> Iterator[types.SimpleNamespace]:
+    # Module-scoped fixtures run before the function-scoped guard, so check here too.
+    if transformers is None:
+        _unavailable("optional reference comparison: `transformers` is not installed (see module docstring)")
     name = request.param
     env, default, expected_parameters = CHECKPOINTS[name]
     root = Path(os.environ.get(env, default))
     for required in ("config.json", "model.safetensors", "tokenizer.json"):
         if not (root / required).is_file():
-            pytest.skip(f"{name} checkpoint not found: {root / required} is missing; set {env} (see module docstring)")
+            _unavailable(f"{name} checkpoint not found: {root / required} is missing; set {env} (see module docstring)")
     model = PythiaModel.from_pretrained_dir(root, model_name=f"EleutherAI/{name}")
     tokenizer = transformers.PreTrainedTokenizerFast(tokenizer_file=str(root / "tokenizer.json"))
     hf = transformers.GPTNeoXForCausalLM.from_pretrained(
@@ -296,8 +374,24 @@ def bundle(request: pytest.FixtureRequest) -> Iterator[types.SimpleNamespace]:
     stock = _measure(model, hf, tokenized)
     with _corrected_reference():
         corrected = _measure(model, hf, tokenized)
-    REPORT[name] = {"stock": stock, "corrected": corrected, "transformers": transformers.__version__}
+        context_corrected = _measure_contexts(model, hf, tokenized)
+    context_stock = _measure_contexts(model, hf, tokenized)
+    sdpa = transformers.GPTNeoXForCausalLM.from_pretrained(
+        root, attn_implementation="sdpa", dtype=torch.float64
+    ).eval()
+    sdpa_logits = _measure_sdpa_logits(model, sdpa, tokenized)
+    REPORT[name] = {
+        "stock": stock,
+        "corrected": corrected,
+        "context_stock": context_stock,
+        "context_corrected": context_corrected,
+        "sdpa_logits": sdpa_logits,
+        "transformers": transformers.__version__,
+    }
     yield types.SimpleNamespace(
+        context_stock=context_stock,
+        context_corrected=context_corrected,
+        sdpa_logits=sdpa_logits,
         name=name,
         model=model,
         hf=hf,
@@ -393,11 +487,57 @@ def test_attribution_of_each_float32_step(bundle: types.SimpleNamespace, label: 
     assert worst > CORRECTED_TOLERANCE["logits"], f"{label} alone explained everything; update the docstring"
 
 
-def test_report() -> None:
+def test_context_sweep_against_corrected_reference(bundle: types.SimpleNamespace) -> None:
+    for length, measured in bundle.context_corrected.items():
+        for level in LEVELS:
+            assert measured[level] <= CORRECTED_TOLERANCE[level], (length, level, measured)
+
+
+def test_context_sweep_against_stock_reference(bundle: types.SimpleNamespace) -> None:
+    for length, measured in bundle.context_stock.items():
+        for level in LEVELS:
+            assert measured[level] <= STOCK_TOLERANCE[level], (length, level, measured)
+
+
+def test_sdpa_reference_needs_only_the_rope_correction(bundle: types.SimpleNamespace) -> None:
+    assert bundle.sdpa_logits["stock"] <= STOCK_TOLERANCE["logits"], bundle.sdpa_logits
+    assert bundle.sdpa_logits["rope_corrected"] <= CORRECTED_TOLERANCE["logits"], bundle.sdpa_logits
+
+
+def _report_rows(name: str, result: dict) -> list[str]:
+    prompts = f"{len(PROMPTS)} prompts"
+    rows = []
+    for reference, tolerance, prompt_key, context_key in (
+        ("stock", STOCK_TOLERANCE, "stock", "context_stock"),
+        ("corrected", CORRECTED_TOLERANCE, "corrected", "context_corrected"),
+    ):
+        for level in LEVELS:
+            contexts = [c for c in CONTEXT_LENGTHS if level != "edit_delta" or c <= MAX_EDIT_CONTEXT]
+            measured = max(result[prompt_key][level], *(result[context_key][c][level] for c in contexts))
+            rows.append(
+                f"{name:<11} {reference:<10} {level:<11} float64 eager "
+                f"{prompts}, ctx {contexts[0]}-{contexts[-1]:<5} tol={tolerance[level]:.0e} measured={measured:.3e}"
+            )
+    for reference, tolerance, key in (
+        ("stock", STOCK_TOLERANCE, "stock"),
+        ("rope-fixed", CORRECTED_TOLERANCE, "rope_corrected"),
+    ):
+        rows.append(
+            f"{name:<11} {reference:<10} {'logits':<11} float64 sdpa  "
+            f"{prompts}, ctx {CONTEXT_LENGTHS[0]}-{CONTEXT_LENGTHS[-1]:<5} "
+            f"tol={tolerance['logits']:.0e} measured={result['sdpa_logits'][key]:.3e}"
+        )
+    return rows
+
+
+def test_report(capsys: pytest.CaptureFixture[str]) -> None:
     """Runs last in this file. Prints measurements, and writes them if NF_INFERENCE_REPORT is set."""
     if not REPORT:
-        pytest.skip("no checkpoint was measured")
-    print("\n" + json.dumps(REPORT, indent=2, sort_keys=True))
+        _unavailable("no checkpoint was measured")
+    with capsys.disabled():
+        print()
+        for name, result in sorted(REPORT.items()):
+            print("\n".join(_report_rows(name, result)))
     destination = os.environ.get("NF_INFERENCE_REPORT")
     if destination:
         Path(destination).write_text(json.dumps(REPORT, indent=2, sort_keys=True), encoding="utf-8")
