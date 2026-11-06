@@ -280,7 +280,7 @@ def _resolved(base, source: EditPlan) -> ResolvedGymWeightProposal:  # type: ign
         layer = int(step["tensor"].split(".layers.")[1].split(".")[0])
         arguments = dict(step["arguments"])
         operation = arguments.pop("operation_type")
-        planned.append(ProposedOperation(SemanticSite("mlp_down", layer), operation))
+        planned.append(ProposedOperation(SemanticSite("mlp_down", layer), operation, arguments))
         resolved.append(ResolvedOperation(step["tensor"], tuple(base.tensors[step["tensor"]].shape), operation, arguments, step["operands"]))
     spec = GymWeightProposalSpec("proposal.test", tuple(planned), {}, "scripted", "sha256:" + "a" * 64)
     return ResolvedGymWeightProposal(

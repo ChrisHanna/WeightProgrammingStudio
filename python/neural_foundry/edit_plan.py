@@ -25,7 +25,7 @@ from .export_formats import (
     _extract_model_state_tensors,
     export_huggingface_safetensors,
 )
-from .gym_proposal import GymProposalError, ProposedOperation, ResolvedGymWeightProposal, ResolvedOperation
+from .gym_proposal import GymProposalError, ProposedOperation, ResolvedGymWeightProposal, ResolvedOperation, proposal_digest
 from .ir import WeightIRTransactionBuilder, unpack_matrix_bytes
 from .records import NativeError, canonicalize, content_digest
 
@@ -168,6 +168,7 @@ class EditPlan:
             "evidence_source": proposal.spec.evidence_source,
             "synthesis_split_digest": proposal.spec.synthesis_split_digest,
             "schema_version": proposal.schema_version,
+            "proposal_digest": proposal_digest(proposal),
         }
         return plan
 
