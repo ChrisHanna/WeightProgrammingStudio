@@ -51,8 +51,8 @@ class EditConstraints:
             limit = getattr(self, label)
             if limit is not None and not limit >= 0:
                 raise ValueError(f"{label} must be a non-negative number, not {limit!r}")
-        if not 0.0 <= self.min_retention <= 1.0:
-            raise ValueError(f"min_retention must be in [0, 1], not {self.min_retention!r}")
+        if not self.min_retention >= 0:
+            raise ValueError(f"min_retention must be a non-negative number, not {self.min_retention!r}")
 
 
 @dataclass(frozen=True)

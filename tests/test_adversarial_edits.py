@@ -565,7 +565,7 @@ BUNDLE_TAMPERS: dict[str, tuple[Callable[[dict[str, Any]], Any], str]] = {
     "bundle_extra_field": (lambda b: b.update(trusted=True), "Malformed"),
     "signed_step_changed": (lambda b: b["envelope"]["patch"]["steps"][0]["arguments"].update(factor=2.0), "Tampered"),
     "signed_reference_swapped": (lambda b: b["envelope"]["patch"]["steps"][0]["operands"]["delta_matrix"].update(data_digest="sha256:" + "0" * 64), "Tampered"),
-    "signature_flipped": (lambda b: b["envelope"].update(signature=b["envelope"]["signature"][:-1] + ("0" if b["envelope"]["signature"][-1] != "0" else "1")), "Signature rejected"),
+    "signature_flipped": (lambda b: b["envelope"].update(signature=b["envelope"]["signature"][:-1] + ("0" if b["envelope"]["signature"][-1] != "0" else "1")), "signature verification failed"),
 }
 
 
@@ -583,7 +583,7 @@ def test_operand_bundle_survives_json_and_needs_the_trusted_key(keys: dict[str, 
     toy, plan = _real_sized()
     bundle = json.loads(json.dumps(sign_edit_graph(plan.to_graph(), signing_key=keys["private_key"])))
     assert apply_signed_edit_graph(toy, bundle, public_key=keys["public_key"]).state_digest == plan.execute().state_digest
-    with pytest.raises(ValueError, match="Signature rejected"):
+    with pytest.raises(ValueError, match="signature verification failed"):
         apply_signed_edit_graph(toy, bundle, public_key=other_keys["public_key"])
 
 
