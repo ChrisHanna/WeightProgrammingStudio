@@ -101,6 +101,24 @@ BUILTIN_ARCHITECTURE_PROFILES: dict[str, ArchitectureSiteProfile] = {
         unembed_out_tensor="model.embed_tokens.weight",
         final_norm_weight_tensor="model.norm.weight",
     ),
+    "gemma2": ArchitectureSiteProfile(
+        family_id="gemma2",
+        mlp_down_proj_template="model.layers.{layer}.mlp.down_proj.weight",
+        mlp_up_proj_template="model.layers.{layer}.mlp.up_proj.weight",
+        attn_out_template="model.layers.{layer}.self_attn.o_proj.weight",
+        embed_in_tensor="model.embed_tokens.weight",
+        unembed_out_tensor="model.embed_tokens.weight",
+        final_norm_weight_tensor="model.norm.weight",
+    ),
+    "qwen3": ArchitectureSiteProfile(
+        family_id="qwen3",
+        mlp_down_proj_template="model.layers.{layer}.mlp.down_proj.weight",
+        mlp_up_proj_template="model.layers.{layer}.mlp.up_proj.weight",
+        attn_out_template="model.layers.{layer}.self_attn.o_proj.weight",
+        embed_in_tensor="model.embed_tokens.weight",
+        unembed_out_tensor="lm_head.weight",
+        final_norm_weight_tensor="model.norm.weight",
+    ),
 }
 
 
@@ -252,17 +270,16 @@ class PythiaModel:
         model_dir: str | Path,
         *,
         model_name: str = "EleutherAI/pythia-14m",
+        max_checkpoint_bytes: int = 68_719_476_736,
     ) -> PythiaModel:
+        """Stream and map a single or sharded GPT-NeoX checkpoint directory via `ShardedMmapCheckpoint` (`mmap`)."""
+        from .export_formats import ShardedMmapCheckpoint
+
         root = Path(model_dir)
         cfg = json.loads((root / "config.json").read_text(encoding="utf-8"))
         if cfg.get("model_type") != "gpt_neox" or cfg.get("architectures") != ["GPTNeoXForCausalLM"]:
             raise ValueError("Directory is not a GPTNeoXForCausalLM (Pythia) checkpoint")
         tokenizer = PythiaBPETokenizer.from_file(root / "tokenizer.json")
-        raw = (root / "model.safetensors").read_bytes()
-        n = struct.unpack("<Q", raw[:8])[0]
-        hdr = json.loads(raw[8 : 8 + n].decode("utf-8"))
-        body = raw[8 + n :]
-
         dtype_map = {
             "F16": torch.float16,
             "BF16": torch.bfloat16,
@@ -270,14 +287,13 @@ class PythiaModel:
             "F64": torch.float64,
         }
         tensors: dict[str, torch.Tensor] = {}
-        for name, info in hdr.items():
-            if name == "__metadata__":
-                continue
-            start, end = int(info["data_offsets"][0]), int(info["data_offsets"][1])
-            tdtype = dtype_map[str(info["dtype"])]
-            shape = [int(d) for d in info["shape"]]
-            t = torch.frombuffer(bytearray(body[start:end]), dtype=tdtype).reshape(shape).to(torch.float64)
-            tensors[name] = t
+        with ShardedMmapCheckpoint(root, max_checkpoint_bytes=max_checkpoint_bytes) as sharded:
+            for name, slice_info in sharded.tensors.items():
+                view = sharded.read_tensor_view(name)
+                tdtype = dtype_map[str(slice_info.dtype).upper()]
+                shape = [int(d) for d in slice_info.shape]
+                t = torch.frombuffer(bytearray(view), dtype=tdtype).reshape(shape).to(torch.float64)
+                tensors[name] = t
         return cls(model_name=model_name, config=cfg, tokenizer=tokenizer, tensors=tensors)
 
     @property
@@ -618,7 +634,7 @@ def build_mini_pythia_model() -> PythiaModel:
 
 
 class Qwen2CausalLM:
-    """Selectable `Qwen2ForCausalLM` model (RMSNorm, GQA self-attention, SwiGLU MLP) implementing the same interface as `PythiaModel`."""
+    """Selectable `Qwen2ForCausalLM` / `Qwen3` / `Llama` / `Gemma` / `Mistral` model (RMSNorm, GQA self-attention, SwiGLU/GeGLU MLP) implementing the same interface as `PythiaModel`."""
 
     def __init__(
         self,
@@ -632,6 +648,52 @@ class Qwen2CausalLM:
         self.config = config
         self.tokenizer = tokenizer
         self.tensors = {k: v.detach().to(dtype=torch.float64) for k, v in tensors.items()}
+
+    @classmethod
+    def from_pretrained_dir(
+        cls,
+        model_dir: str | Path,
+        *,
+        model_name: str | None = None,
+        max_checkpoint_bytes: int = 68_719_476_736,
+    ) -> Qwen2CausalLM:
+        """Stream and map a single or sharded Qwen2/Qwen3/Llama/Gemma/Mistral checkpoint directory via `ShardedMmapCheckpoint` (`mmap`)."""
+        from .export_formats import ShardedMmapCheckpoint
+        from .pretrained import PRETRAINED_ARCHITECTURE_REGISTRY
+
+        root = Path(model_dir)
+        cfg = json.loads((root / "config.json").read_text(encoding="utf-8"))
+        mtype = str(cfg.get("model_type", "")).lower()
+        if mtype not in PRETRAINED_ARCHITECTURE_REGISTRY or mtype == "gpt_neox":
+            raise ValueError(f"Unsupported GQA/SwiGLU model_type {mtype!r} for Qwen2CausalLM")
+        tokenizer_path = root / "tokenizer.json"
+        if tokenizer_path.is_file():
+            tokenizer = PythiaBPETokenizer.from_file(tokenizer_path)
+        else:
+            vocab_size = int(cfg.get("vocab_size", 512))
+            tokenizer = PythiaBPETokenizer(vocab={f"<tok_{i}>": i for i in range(vocab_size)}, merges=[])
+        dtype_map = {
+            "F16": torch.float16,
+            "BF16": torch.bfloat16,
+            "F32": torch.float32,
+            "F64": torch.float64,
+        }
+        tensors: dict[str, torch.Tensor] = {}
+        with ShardedMmapCheckpoint(root, max_checkpoint_bytes=max_checkpoint_bytes) as sharded:
+            for name, slice_info in sharded.tensors.items():
+                view = sharded.read_tensor_view(name)
+                tdtype = dtype_map[str(slice_info.dtype).upper()]
+                shape = [int(d) for d in slice_info.shape]
+                t = torch.frombuffer(bytearray(view), dtype=tdtype).reshape(shape).to(torch.float64)
+                tensors[name] = t
+        if "lm_head.weight" not in tensors and "model.embed_tokens.weight" in tensors:
+            tensors["lm_head.weight"] = tensors["model.embed_tokens.weight"].clone()
+        return cls(
+            model_name=model_name or f"{mtype}/{root.name}",
+            config=cfg,
+            tokenizer=tokenizer,
+            tensors=tensors,
+        )
 
     @property
     def total_parameters(self) -> int:
@@ -2119,4 +2181,89 @@ class LogitLensTrajectoryInspector:
             markdown_table=md,
             report_digest=digest,
         )
+
+
+class TransformerLensHookAdapter:
+    """TransformerLens-compatible (`HookedTransformer`) plugin providing `run_with_cache` and `run_with_hooks` over any `PythiaModel` or `Qwen2CausalLM`."""
+
+    def __init__(
+        self,
+        model: PythiaModel | Qwen2CausalLM,
+        *,
+        layer_down_proj_override: Mapping[int, torch.Tensor] | None = None,
+    ) -> None:
+        self.model = model
+        self.layer_down_proj_override = dict(layer_down_proj_override or {})
+
+    def run_with_cache(
+        self,
+        prompt: str,
+        *,
+        names_filter: Any | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Execute a forward pass and return `(logits, activation_cache)` with standard TransformerLens hook names."""
+        ids = self.model.tokenizer.encode(prompt)
+        num_layers = int(self.model.config["num_hidden_layers"])
+        logits, mlp_keys = self.model.forward_with_multi_layer_keys(
+            ids,
+            capture_layers=tuple(range(num_layers)),
+            layer_down_proj_override=self.layer_down_proj_override,
+        )
+        embed_name = (
+            "gpt_neox.embed_in.weight"
+            if "gpt_neox.embed_in.weight" in self.model.tensors
+            else "model.embed_tokens.weight"
+        )
+        raw_cache: dict[str, torch.Tensor] = {
+            "hook_embed": self.model.tensors[embed_name][list(ids)].clone(),
+        }
+        cur_resid = raw_cache["hook_embed"][-1].clone()
+        for l_idx in range(num_layers):
+            site = self.model.mlp_down_proj_site(l_idx)
+            w_down = self.layer_down_proj_override.get(l_idx, self.model.tensors[site])
+            k_vec = mlp_keys[l_idx]
+            mlp_out = w_down @ k_vec
+            cur_resid = cur_resid + mlp_out
+            raw_cache[f"blocks.{l_idx}.mlp.hook_post"] = k_vec.clone()
+            raw_cache[f"blocks.{l_idx}.hook_mlp_out"] = mlp_out.clone()
+            raw_cache[f"blocks.{l_idx}.hook_resid_post"] = cur_resid.clone()
+        raw_cache["ln_final.hook_normalized"] = cur_resid.clone()
+
+        if names_filter is None:
+            filtered = raw_cache
+        elif callable(names_filter):
+            filtered = {k: v for k, v in raw_cache.items() if names_filter(k)}
+        elif isinstance(names_filter, (list, tuple, set, frozenset)):
+            filtered = {k: v for k, v in raw_cache.items() if k in names_filter}
+        else:
+            filtered = {k: v for k, v in raw_cache.items() if str(names_filter) in k}
+        return logits, filtered
+
+    def run_with_hooks(
+        self,
+        prompt: str,
+        *,
+        fwd_hooks: Sequence[tuple[str, Any]] = (),
+    ) -> torch.Tensor:
+        """Execute a forward pass while applying user-supplied `(hook_name, hook_fn)` interventions on MLP post-activations."""
+        ids = self.model.tokenizer.encode(prompt)
+        num_layers = int(self.model.config["num_hidden_layers"])
+        logits, mlp_keys = self.model.forward_with_multi_layer_keys(
+            ids,
+            capture_layers=tuple(range(num_layers)),
+            layer_down_proj_override=self.layer_down_proj_override,
+        )
+        w_eff = self.model.effective_unembedding()
+        delta_logits = torch.zeros_like(logits[-1])
+        for hook_name, hook_fn in fwd_hooks:
+            for l_idx in range(num_layers):
+                if hook_name == f"blocks.{l_idx}.mlp.hook_post":
+                    orig_k = mlp_keys[l_idx].clone()
+                    patched_k = hook_fn(orig_k, hook_name)
+                    site = self.model.mlp_down_proj_site(l_idx)
+                    w_down = self.layer_down_proj_override.get(l_idx, self.model.tensors[site])
+                    delta_logits = delta_logits + w_eff @ (w_down @ (patched_k - orig_k))
+        out = logits.clone()
+        out[-1] = out[-1] + delta_logits
+        return out
 

@@ -724,3 +724,177 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
     assert react_rep.held_out_accuracy_after == 1.0
     assert react_rep.rust_candidate_digest.startswith("sha256:")
 
+
+def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path) -> None:
+    """Verifies Sections 2, 3, and 4: Multi-arch mmap intake, FP8 & Q4_K_M + RoundingContract, one-command `nf repair` & `nf verify`, HF Hub Model Card export, TransformerLens plugin, Editor Tool API, and Backdoor Scanner."""
+    from neural_foundry import pretrained
+
+    st = studio.WeightProgrammingStudio()
+
+    # 1. Section 2a: Multi-architecture registry (Qwen2, Qwen3, Llama, Gemma, Gemma2, Mistral, GPTNeoX) + streaming mmap intake
+    for arch_key in ("qwen2", "qwen3", "llama", "gemma", "gemma2", "mistral", "gpt_neox"):
+        assert arch_key in pretrained.PRETRAINED_ARCHITECTURE_REGISTRY
+        assert arch_key in pythia.BUILTIN_ARCHITECTURE_PROFILES
+
+    for mtype, arch_cls, act in (
+        ("qwen3", "Qwen3ForCausalLM", "silu"),
+        ("llama", "LlamaForCausalLM", "silu"),
+        ("gemma2", "Gemma2ForCausalLM", "gelu"),
+        ("mistral", "MistralForCausalLM", "silu"),
+    ):
+        arch_dir = tmp_path / f"ckpt_{mtype}"
+        pretrained.write_mini_qwen2_checkpoint(arch_dir)
+        cfg = json.loads((arch_dir / "config.json").read_bytes())
+        cfg["model_type"] = mtype
+        cfg["architectures"] = [arch_cls]
+        cfg["hidden_act"] = act
+        (arch_dir / "config.json").write_bytes(canonicalize(cfg))
+        intake_res = pretrained.intake_pretrained_checkpoint(arch_dir)
+        assert intake_res["model_type"] == mtype
+        assert intake_res["mmap_streaming_used"] is True
+        loaded_arch_model = st.select_model(arch_dir)
+        assert loaded_arch_model.total_parameters > 0
+
+    # 2. Section 2b: FP8 (`fp8_e4m3fn`, `fp8_e5m2`) & GGUF `Q4_K_M` with stated RoundingContract in patch identity
+    mat_in = [[0.25 * ((r * 32 + c) % 11 - 5) for c in range(32)] for r in range(2)]
+    for fp8_fmt in ("fp8_e4m3fn", "fp8_e5m2"):
+        fp8_bytes, _, fp8_shape = export_formats.quantize_matrix_fp8(mat_in, fp8_format=fp8_fmt)
+        fp8_rec = export_formats.execute_fp8_matrix_edit(
+            fp8_bytes,
+            fp8_shape,
+            fp8_format=fp8_fmt,
+            operation_type="scale",
+            factor=1.5,
+        )
+        assert fp8_rec.changed_parameters > 0
+        assert fp8_rec.rounding_contract.source_dtype == fp8_fmt
+        assert fp8_rec.rounding_contract.accumulation_dtype == "f32"
+        assert fp8_rec.rounding_contract.contract_digest.startswith("sha256:")
+
+    q4km_bytes, q4km_shape = export_formats.quantize_matrix_q4_k_m(mat_in)
+    assert len(q4km_bytes) == 2 * 20
+    q4km_deq = export_formats.dequantize_matrix_q4_k_m(q4km_bytes, q4km_shape)
+    assert len(q4km_deq) == 2 and len(q4km_deq[0]) == 32
+
+    qwen_m = st.select_model("Qwen/qwen2-dense-mini")
+    gguf_q4km = tmp_path / "qwen_q4km.gguf"
+    export_formats.export_gguf_v3(qwen_m, gguf_q4km, quantization="q4_k_m")
+    _, q4km_ver = export_formats.reload_and_verify_gguf_v3(gguf_q4km, qwen_m, ["Hello world"])
+    assert q4km_ver.gain_preserved_after_rebuild is True
+
+    # 3. Section 3a & 4a: One-command `nf repair --model Qwen/... --failure looping` + `nf verify <patch>` in Rust CLI & Python SDK
+    cli_patch_file = tmp_path / "cli_repaired_patch.nf.json"
+    rep_cli = subprocess.run(
+        [
+            str(CLI),
+            "repair",
+            "--model",
+            "Qwen/Qwen2.5-0.5B",
+            "--failure",
+            "looping",
+            "--output",
+            str(cli_patch_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    rep_cli_res = json.loads(rep_cli.stdout)["result"]
+    assert rep_cli_res["kind"] == "nf_open_weight_patch_v1"
+    assert cli_patch_file.is_file()
+
+    ver_top_cli = subprocess.run(
+        [str(CLI), "verify", str(cli_patch_file), "--pubkey", rep_cli_res["public_key"]],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ver_top_res = json.loads(ver_top_cli.stdout)["result"]
+    assert ver_top_res["verified"] is True
+    assert ver_top_res["sbom_verified"] is True
+    assert ver_top_res["rounding_contract_verified"] is True
+    assert ver_top_res["backdoor_scan_verified"] is True
+
+    # SDK `studio.repair` + Hugging Face Hub bundle export (with Model Card README.md & weight_patch.nf.json)
+    hub_dir = tmp_path / "hf_hub_bundle"
+    sdk_rep = st.repair("Qwen/Qwen2.5-0.5B", failure="looping", output_dir=hub_dir)
+    assert sdk_rep["verification"]["verified"] is True
+    assert (hub_dir / "README.md").is_file()
+    assert (hub_dir / "weight_patch.nf.json").is_file()
+    assert "spdx-weight-patch-sbom-v1" in (hub_dir / "weight_patch.nf.json").read_text(encoding="utf-8")
+    assert "nf verify weight_patch.nf.json" in (hub_dir / "README.md").read_text(encoding="utf-8")
+
+    # 4. Section 3b: TransformerLens plugin (`run_with_cache` and `run_with_hooks`) + Editor Tool Interface
+    tl_adapter = st.plugins.transformer_lens(qwen_m)
+    logits_orig, act_cache = tl_adapter.run_with_cache("The capital of France is")
+    assert "hook_embed" in act_cache
+    assert "blocks.0.mlp.hook_post" in act_cache
+    assert "blocks.1.hook_resid_post" in act_cache
+    logits_hooked = tl_adapter.run_with_hooks(
+        "The capital of France is",
+        fwd_hooks=[("blocks.1.mlp.hook_post", lambda act, name: act * 0.0)],
+    )
+    assert not torch.allclose(logits_orig[-1], logits_hooked[-1])
+
+    tool_schemas = st.editor_tool.tool_schemas()
+    assert len(tool_schemas) == 4
+    insp_tool_res = st.editor_tool.call_tool("nf_inspect_model", {"model": "Qwen/qwen2-dense-mini"})
+    assert insp_tool_res["total_parameters"] == 51360
+    ver_tool_res = st.editor_tool.call_tool(
+        "nf_verify_patch",
+        {"patch": sdk_rep["open_patch"], "public_key": sdk_rep["public_key"]},
+    )
+    assert ver_tool_res["verified"] is True
+
+    # 5. Section 4b: Supply-Chain Backdoor / Trojan Patch Scanner + Independent Flagship Replication
+    import copy
+
+    trojan_model = copy.deepcopy(qwen_m)
+    # Inject an undeclared layer mutation + extreme rank-1 trojan spike (||Delta W||_2 > 2000)
+    trojan_site = trojan_model.mlp_down_proj_site(0)
+    trojan_model.tensors[trojan_site] = trojan_model.tensors[trojan_site] + 500.0 * torch.ones_like(
+        trojan_model.tensors[trojan_site]
+    )
+    bad_scan = patch_ux.scan_patch_for_backdoor_patterns(
+        qwen_m,
+        trojan_model,
+        declared_target_sites=[qwen_m.mlp_down_proj_site(1)],  # Layer 0 was undeclared!
+        max_spectral_norm=800.0,
+    )
+    assert bad_scan.backdoor_scan_passed is False
+    assert any("undeclared_layer_mutation" in r for r in bad_scan.flagged_reasons)
+    assert any("trojan_spectral_or_linf_spike" in r for r in bad_scan.flagged_reasons)
+
+    # A signed patch with a failed backdoor scan MUST be rejected by `verify_open_patch_v1` and `nf verify`!
+    bad_open_patch = patch_ux.build_open_patch_v1(
+        base_model_id=qwen_m.model_name,
+        diff_summary=patch_ux.diff_model_weights(qwen_m, trojan_model),
+        compiler_plan_digest="sha256:" + "3" * 64,
+        candidate_digest="sha256:" + "4" * 64,
+        security_scan=bad_scan,
+    )
+    with pytest.raises(ValueError, match="backdoor scan failed"):
+        patch_ux.verify_open_patch_v1(bad_open_patch)
+
+    bad_patch_file = tmp_path / "trojan_patch.nf.json"
+    bad_patch_file.write_bytes(canonicalize(bad_open_patch))
+    bad_cli_ver = subprocess.run(
+        [str(CLI), "verify", str(bad_patch_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_cli_ver.returncode != 0
+
+    # Independent third-party replication of the flagship bundle
+    flag_dir = tmp_path / "flagship_rep_bundle"
+    flagship.run_flagship_loop_repair_study_and_publish_bundle(
+        pythia.build_mini_pythia_model(),
+        output_dir=flag_dir,
+    )
+    rep_ver = flagship.replicate_published_flagship_bundle(flag_dir)
+    assert rep_ver["replicated"] is True
+    assert rep_ver["replicated_holdout_accuracy"] == 1.0
+    assert rep_ver["zero_holdout_leakage_verified"] is True
+
+

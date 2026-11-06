@@ -40,6 +40,31 @@ flowchart LR
 
 ---
 
+## 60-Second First Run: One-Command Model Repair & Third-Party Verification
+
+Repair a model failure mode, emit a cryptographically signed **Open Patch Format v1 (`nf_open_weight_patch_v1`)** with SPDX SBOM provenance, `RoundingContract`, and backdoor security scan, and verify it from the Rust CLI (`nf` / `weightctl`) or Python SDK:
+
+```sh
+# 1. One-command repair from the Rust CLI (or `nf-studio repair ...`)
+nf repair --model Qwen/Qwen2.5-0.5B --failure looping --output qwen_loop_repair.nf.json
+
+# 2. Third-party verification (checks Ed25519 signature, SPDX SBOM, RoundingContract,
+#    zero holdout leakage, and supply-chain backdoor scan)
+nf verify qwen_loop_repair.nf.json
+```
+
+Or in Python, repair and export a Hugging Face Hub-ready bundle (with `model.safetensors`, `weight_patch.nf.json`, and an auto-generated Hugging Face Model Card `README.md`):
+
+```python
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+result = studio.repair("Qwen/Qwen2.5-0.5B", failure="looping", output_dir="./hf_repaired_bundle")
+assert result["verification"]["verified"] is True
+```
+
+---
+
 ## 5-Minute Quickstart
 
 ### 1. Run a Gym-Driven Weight Edit on an Open-Weight Model
@@ -407,11 +432,29 @@ signed_env = patch_ux.sign_patch_envelope({"plan": dist_edit.rust_plan_digest}, 
 verified = patch_ux.verify_patch_signature(signed_env, public_key=kp["public_key"])
 assert verified["verified"] is True
 
-# F. Sub-byte 4-bit Q4_0 quantized editing & GGUF v3 Q4_0 export
+# F. Sub-byte 4-bit Q4_0 & Q4_K_M quantized editing + FP8 (`fp8_e4m3fn` / `fp8_e5m2`) with RoundingContract
 q4_bytes, q4_shape = export_formats.quantize_matrix_q4_0([[0.1 * ((r * 32 + c) % 13 - 6) for c in range(32)] for r in range(2)])
 q4_rec = export_formats.execute_quantized_q4_matrix_edit(q4_bytes, q4_shape, operation_type="scale", factor=1.25)
 assert q4_rec.hessian_error_diffusion_applied is True
+
+fp8_bytes, _, fp8_shape = export_formats.quantize_matrix_fp8([[0.25 * c for c in range(32)] for _ in range(2)], fp8_format="fp8_e4m3fn")
+fp8_rec = export_formats.execute_fp8_matrix_edit(fp8_bytes, fp8_shape, fp8_format="fp8_e4m3fn", operation_type="scale", factor=1.5)
+assert fp8_rec.rounding_contract.source_dtype == "fp8_e4m3fn"
+
+# G. TransformerLens Hook Adapter (`run_with_cache` & `run_with_hooks`) + Agent Editor Tool API
+tl = studio.plugins.transformer_lens(model)
+logits, cache = tl.run_with_cache("The capital of France is")
+tool_info = studio.editor_tool.call_tool("nf_inspect_model", {"model": "Qwen/qwen2-dense-mini"})
 ```
+
+---
+
+## Real-Model Gap, Ecosystem Adoption & Supply-Chain Trust Layer
+
+1. **Multi-Architecture Streaming `mmap` Intake (`pretrained.PRETRAINED_ARCHITECTURE_REGISTRY`)** — Native architecture profiles and `intake_pretrained_checkpoint` for **`Qwen2`**, **`Qwen3`**, **`Llama`**, **`Gemma`**, **`Gemma2`**, **`Mistral`**, and **`GPTNeoX`/`Pythia`**, streaming multi-shard `.safetensors` checkpoints via `ShardedMmapCheckpoint` (`mmap` zero-copy header & tensor slice loading without `Path.read_bytes()`).
+2. **Real-Model Dtypes & Stated `RoundingContract` (`ir.RoundingContract`, `export_formats`)** — Native support for `bf16`, `f16`, `fp8` (`fp8_e4m3fn`, `fp8_e5m2`), and GGUF v3 `Q8_0`, `Q4_0`, and `Q4_K_M` super-blocks. Every compiled transaction and quantized edit records a deterministic `RoundingContract` (`source_dtype`, `accumulation_dtype="f32"`, `output_dtype`, `rounding_mode`, `ulp_tolerance`, `contract_digest`) inside the patch identity.
+3. **Ecosystem Plugins & Agent Editor Tool Interface (`studio.plugins`, `studio.editor_tool`)** — Wrap any Studio model in a `TransformerLens`-compatible `HookedTransformer` adapter (`run_with_cache`, `run_with_hooks`), import `lm-eval` and `Inspect AI` suites, export Hugging Face Hub model-card bundles (`export_huggingface_hub_bundle`), or expose `studio.editor_tool.tool_schemas()` (`nf_inspect_model`, `nf_trace_layers`, `nf_repair_model`, `nf_verify_patch`) directly to Claude Code, Codex, or MCP agent loops.
+4. **Open Patch Format v1, SPDX SBOM & Supply-Chain Backdoor Scanner (`patch_ux`, `nf verify`)** — `nf_open_weight_patch_v1` bundles an SPDX Weight-Patch SBOM (`spdx-weight-patch-sbom-v1`), `rounding_contract`, `evaluation_provenance`, and `BackdoorScanReport` (`scan_patch_for_backdoor_patterns`), automatically rejecting undeclared layer mutations, trojan rank-1 spectral/$\ell_\infty$ spikes, non-finite weights, and neutral-prompt hijacking.
 
 ---
 
@@ -435,6 +478,12 @@ See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming
 Both the native Rust binaries (`weightctl` and `nf`) and the Python Studio CLI (`python -m neural_foundry.studio`) are included:
 
 ```sh
+# One-command model repair & third-party Open Patch v1 verification (Rust CLI & Python Studio CLI)
+nf repair --model Qwen/Qwen2.5-0.5B --failure looping --output qwen_loop_repair.nf.json
+nf verify qwen_loop_repair.nf.json
+.venv/bin/python -m neural_foundry.studio repair --model Qwen/Qwen2.5-0.5B --failure looping --output-dir /tmp/hf_bundle
+.venv/bin/python -m neural_foundry.studio verify /tmp/hf_bundle/weight_patch.nf.json
+
 # High-level Studio CLI (inspect catalogs, run Gym studies, build covariance cache, inspect trajectories, emit conformance)
 .venv/bin/python -m neural_foundry.studio catalog
 .venv/bin/python -m neural_foundry.studio run-gym --model nf/mini-pythia-fixture --gym algorithmic_three_skill

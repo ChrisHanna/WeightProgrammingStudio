@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin==1.16.0"]
+requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -11,6 +11,9 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "python/neural_foundry/data/THIRD_PARTY_NOTICES.txt"]
 readme = "README.md"
 dependencies = []
+
+[project.scripts]
+nf-studio = "neural_foundry.studio:main"
 
 [project.optional-dependencies]
 # Install with the explicit CPU index documented in protocols/core-testing-v1.md.

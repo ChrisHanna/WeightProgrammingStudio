@@ -674,8 +674,12 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         reload_and_verify_huggingface_safetensors,
     )
     from .patch_ux import (
+        build_open_patch_v1,
         diff_model_weights,
+         generate_ed25519_keypair,
+        scan_patch_for_backdoor_patterns,
         sign_patch_envelope,
+        verify_open_patch_v1,
         verify_patch_signature,
     )
     from .prd_adapters import FrontierAgentProgrammer
@@ -757,8 +761,47 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         attractor_token=loop_tok,
     )
 
-    # Compute patch diff & cryptographic signature (Audit Point 20)
+    # Compute patch diff, backdoor security scan, Open Patch v1 SBOM & cryptographic signature (Audit Point 20 & Section 4)
     diff_summary = diff_model_weights(base_model, repaired_model)
+    backdoor_scan = scan_patch_for_backdoor_patterns(
+        base_model,
+        repaired_model,
+        declared_target_sites=[site_name],
+    )
+    ed_kp = generate_ed25519_keypair("nf.flagship.study.v1.seed")
+    open_patch = build_open_patch_v1(
+        base_model_id=base_model.model_name,
+        diff_summary=diff_summary,
+        compiler_plan_digest=gym_rep.rust_plan_digest,
+        candidate_digest=gym_rep.rust_candidate_digest,
+        evaluation_provenance={
+            "suite_id": "pythia.gym_algorithmic_three_skills.v1",
+            "runtime": "pytorch_cpu",
+            "sampler": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0,
+                "max_tokens": 64,
+                "seed": 17,
+            },
+            "seed": 17,
+            "pre_registration_digest": gym_rep.pre_registration.pre_registration_digest if gym_rep.pre_registration else "",
+            "exposure_ledger_digest": gym_rep.exposure_ledger.ledger_chain_digest if gym_rep.exposure_ledger else "",
+            "controls": {
+                "noop_accuracy": round(gym_rep.noop_control_holdout_accuracy, 4),
+                "random_accuracy": round(gym_rep.random_control_holdout_accuracy, 4),
+                "candidate_accuracy": round(hold_after_acc, 4),
+                "retention_accuracy": round(ret_after_acc, 4),
+            },
+            "promote_eligible": True,
+        },
+        security_scan=backdoor_scan,
+        signer_id="nf.flagship.study.v1",
+        signing_key=ed_kp["private_key"],
+    )
+    verify_open_patch_v1(open_patch, public_key=ed_kp["public_key"])
+
     patch_payload = {
         "schema_version": 1,
         "kind": "nf_flagship_patch",
@@ -789,32 +832,32 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     pre_reg_path = out / "pre_registration.json"
     exposure_path = out / "exposure_ledger.json"
     signed_patch_path = out / "signed_patch_envelope.json"
+    open_patch_path = out / "open_patch_v1.json"
     diff_md_path = out / "patch_diff_report.md"
     transcript_path = out / "agent_transcript.json"
     verification_path = out / "verification_receipt.json"
     manifest_path = out / "flagship_study_manifest.json"
 
-    pre_reg_path.write_bytes(canonicalize(gym_rep.pre_registration.__dict__ if gym_rep.pre_registration else {}))
-    exposure_path.write_bytes(canonicalize(gym_rep.exposure_ledger.__dict__ if gym_rep.exposure_ledger else {}))
-    signed_patch_path.write_bytes(canonicalize(signed_envelope))
-    diff_md_path.write_text(diff_summary.human_summary_markdown, encoding="utf-8")
-    transcript_path.write_bytes(
-        canonicalize(
-            {
-                "agent_id": agent_rep.agent_id,
-                "total_prompt_tokens": agent_rep.total_prompt_tokens,
-                "total_completion_tokens": agent_rep.total_completion_tokens,
-                "total_cost_usd": agent_rep.total_cost_usd,
-                "turns": [t.__dict__ for t in agent_rep.transcript],
-            }
-        )
-    )
-    verification_path.write_bytes(canonicalize(gym_rep.promotion_verification))
+    import dataclasses
 
-    study_manifest = {
+    pre_reg_path.write_bytes(
+        canonicalize(dataclasses.asdict(gym_rep.pre_registration) if gym_rep.pre_registration else {})
+    )
+    exposure_path.write_bytes(
+        canonicalize(dataclasses.asdict(gym_rep.exposure_ledger) if gym_rep.exposure_ledger else {})
+    )
+    signed_patch_path.write_bytes(canonicalize(signed_envelope))
+    open_patch_path.write_bytes(canonicalize(open_patch))
+    diff_md_path.write_text(diff_summary.human_summary_markdown + "\n", encoding="utf-8")
+    transcript_path.write_bytes(canonicalize(dataclasses.asdict(agent_rep)))
+    verification_payload = {
         "schema_version": 1,
-        "kind": "nf_flagship_study_bundle",
-        "model_name": base_model.model_name,
+        "kind": "nf_flagship_verification_receipt",
+        "signature_verification": sig_ver,
+        "open_patch_digest": open_patch["patch_digest"],
+        "open_patch_public_key": ed_kp["public_key"],
+        "hf_safetensors_roundtrip": dataclasses.asdict(hf_receipt),
+        "gguf_v3_roundtrip": dataclasses.asdict(gguf_receipt),
         "repetition_loop_rate_before": round(loop_rate_before, 4),
         "repetition_loop_rate_after": round(loop_rate_after, 4),
         "holdout_accuracy_before": round(hold_before_acc, 4),
@@ -822,18 +865,37 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         "noop_control_holdout_accuracy": round(gym_rep.noop_control_holdout_accuracy, 4),
         "random_control_holdout_accuracy": round(gym_rep.random_control_holdout_accuracy, 4),
         "retention_accuracy_after": round(ret_after_acc, 4),
-        "signed_patch_digest": signed_envelope["patch_digest"],
-        "hf_export_digest": hf_receipt.file_digest,
-        "gguf_export_digest": gguf_receipt.file_digest,
     }
-    manifest_bytes = canonicalize(study_manifest)
-    manifest_path.write_bytes(manifest_bytes)
-    manifest_digest = str(content_digest(manifest_bytes))
+    verification_path.write_bytes(canonicalize(verification_payload))
+
+    manifest_payload = {
+        "schema_version": 1,
+        "kind": "nf_flagship_published_bundle_manifest",
+        "model_name": base_model.model_name,
+        "rust_plan_digest": gym_rep.rust_plan_digest,
+        "rust_candidate_digest": gym_rep.rust_candidate_digest,
+        "signed_patch_digest": signed_envelope["patch_digest"],
+        "open_patch_digest": open_patch["patch_digest"],
+        "repetition_loop_rate_before": round(loop_rate_before, 4),
+        "repetition_loop_rate_after": round(loop_rate_after, 4),
+        "holdout_accuracy_before": round(hold_before_acc, 4),
+        "holdout_accuracy_after": round(hold_after_acc, 4),
+        "noop_control_holdout_accuracy": round(gym_rep.noop_control_holdout_accuracy, 4),
+        "random_control_holdout_accuracy": round(gym_rep.random_control_holdout_accuracy, 4),
+        "retention_accuracy_after": round(ret_after_acc, 4),
+        "signature_verified": bool(sig_ver["verified"]),
+        "hf_roundtrip_verified": hf_receipt.gain_preserved_after_rebuild,
+        "gguf_roundtrip_verified": gguf_receipt.gain_preserved_after_rebuild,
+    }
+    manifest_digest = str(content_digest(canonicalize(manifest_payload)))
+    manifest_payload["manifest_digest"] = manifest_digest
+    manifest_path.write_bytes(canonicalize(manifest_payload))
 
     published_files = (
         str(pre_reg_path),
         str(exposure_path),
         str(signed_patch_path),
+        str(open_patch_path),
         str(diff_md_path),
         str(transcript_path),
         str(verification_path),
@@ -858,3 +920,48 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         gguf_roundtrip_verified=gguf_receipt.gain_preserved_after_rebuild,
         published_files=published_files,
     )
+
+
+def replicate_published_flagship_bundle(bundle_dir: str | Path) -> dict[str, Any]:
+    """Independent third-party replication verifier for a published flagship bundle directory."""
+    from .export_formats import (
+        reload_and_verify_gguf_v3,
+        reload_and_verify_huggingface_safetensors,
+    )
+    from .patch_ux import verify_open_patch_v1, verify_patch_signature
+    from .pythia import ALGORITHMIC_THREE_SKILL_GYM, build_mini_pythia_model
+
+    root = Path(bundle_dir).resolve()
+    open_patch_ver = verify_open_patch_v1(root / "open_patch_v1.json")
+    sig_ver = verify_patch_signature(json.loads((root / "signed_patch_envelope.json").read_bytes()))
+    exposure = json.loads((root / "exposure_ledger.json").read_bytes())
+    if int(exposure.get("holdout_exposure_count_during_synthesis", 1)) != 0:
+        raise ValueError("Replication failed: non-zero holdout exposure during synthesis")
+    if not bool(exposure.get("dev_and_holdout_expression_disjoint", False)):
+        raise ValueError("Replication failed: dev and holdout expressions are not disjoint")
+
+    base_ref = build_mini_pythia_model()
+    reloaded_hf, _ = reload_and_verify_huggingface_safetensors(
+        root / "huggingface_export",
+        base_ref,
+        [p for p, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]],
+    )
+    reloaded_gguf, _ = reload_and_verify_gguf_v3(
+        root / "repaired_model.gguf",
+        reloaded_hf,
+        [p for p, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]],
+    )
+    holdout_hits = sum(
+        1
+        for expr, target in ALGORITHMIC_THREE_SKILL_GYM.holdout_rules
+        if reloaded_gguf.evaluate_prompt(expr, target_token=target).matched_target
+    )
+    replicated_holdout_acc = holdout_hits / max(len(ALGORITHMIC_THREE_SKILL_GYM.holdout_rules), 1)
+    return {
+        "schema_version": 1,
+        "replicated": replicated_holdout_acc == 1.0 and bool(open_patch_ver["verified"]) and bool(sig_ver["verified"]),
+        "open_patch_verification": open_patch_ver,
+        "replicated_holdout_accuracy": round(replicated_holdout_acc, 4),
+        "zero_holdout_leakage_verified": True,
+    }
+

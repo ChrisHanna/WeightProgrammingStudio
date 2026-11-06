@@ -15,9 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from .ir import (
+    RoundingContract,
     WeightIRTransactionBuilder,
     _bf16_u16_to_f32,
     _f32_to_bf16_u16,
+    build_rounding_contract,
     unpack_matrix_bytes,
 )
 from .records import canonicalize, content_digest
@@ -37,6 +39,7 @@ GGML_TYPE_F32 = 0
 GGML_TYPE_F16 = 1
 GGML_TYPE_Q4_0 = 2
 GGML_TYPE_Q8_0 = 8
+GGML_TYPE_Q4_K = 12
 
 
 def _sha256(data: bytes) -> str:
@@ -74,6 +77,7 @@ class QuantizedQ8BlockEditReceipt:
     max_quantization_abs_error: float
     dequantized_matrix: list[list[float]]
     q8_bytes: bytes
+    rounding_contract: RoundingContract | None = None
 
 
 def quantize_matrix_q8_0(matrix: Any) -> tuple[bytes, tuple[int, int]]:
@@ -170,6 +174,13 @@ def execute_quantized_q8_matrix_edit(
         max_quantization_abs_error=round(max_err, 6),
         dequantized_matrix=deq_after,
         q8_bytes=new_q8_bytes,
+        rounding_contract=build_rounding_contract(
+            "q8_0",
+            accumulation_dtype="f32",
+            output_dtype="q8_0",
+            rounding_mode="nearest_ties_even",
+            block_size=32,
+        ),
     )
 
 
@@ -188,6 +199,7 @@ class QuantizedQ4BlockEditReceipt:
     hessian_error_diffusion_applied: bool
     dequantized_matrix: list[list[float]]
     q4_bytes: bytes
+    rounding_contract: RoundingContract | None = None
 
 
 def quantize_matrix_q4_0(
@@ -313,7 +325,226 @@ def execute_quantized_q4_matrix_edit(
         hessian_error_diffusion_applied=hessian_error_diffusion,
         dequantized_matrix=deq_after,
         q4_bytes=new_q4_bytes,
+        rounding_contract=build_rounding_contract(
+            "q4_0",
+            accumulation_dtype="f32",
+            output_dtype="q4_0",
+            rounding_mode="block_scale_clip_l2" if hessian_error_diffusion else "nearest_ties_even",
+            block_size=32,
+        ),
     )
+
+
+@dataclass(frozen=True)
+class QuantizedFP8EditReceipt:
+    """Receipt from editing an 8-bit floating-point (`fp8_e4m3fn` or `fp8_e5m2`) weight matrix with f32 accumulation and explicit RoundingContract."""
+
+    fp8_format: str
+    shape: tuple[int, int]
+    before_fp8_digest: str
+    after_fp8_digest: str
+    rust_plan_digest: str
+    changed_parameters: int
+    max_quantization_abs_error: float
+    rounding_contract: RoundingContract
+    dequantized_matrix: list[list[float]]
+    fp8_bytes: bytes
+
+
+def _float_to_fp8_byte(val: float, fmt: str = "fp8_e4m3fn") -> int:
+    """Encode a float into an 8-bit FP8 (`fp8_e4m3fn` or `fp8_e5m2`) byte with round-to-nearest-even."""
+    if math.isnan(val) or math.isinf(val):
+        raise ValueError("Non-finite value in FP8 conversion")
+    sign = 0x80 if val < 0.0 else 0x00
+    aval = abs(float(val))
+    if aval == 0.0:
+        return sign
+    if fmt == "fp8_e4m3fn":
+        exp_bits, mant_bits, bias, max_exp, max_val = 4, 3, 7, 15, 448.0
+    elif fmt == "fp8_e5m2":
+        exp_bits, mant_bits, bias, max_exp, max_val = 5, 2, 15, 30, 57344.0
+    else:
+        raise ValueError(f"Unsupported FP8 format: {fmt!r}")
+    aval = min(aval, max_val)
+    min_normal = 2.0 ** (1 - bias)
+    if aval < min_normal:
+        step = min_normal / (1 << mant_bits)
+        m = int(round(aval / step))
+        m = min((1 << mant_bits) - 1, max(0, m))
+        return sign | m
+    exp_unbiased = int(math.floor(math.log2(aval)))
+    exp_biased = max(1, min(max_exp, exp_unbiased + bias))
+    sig = aval / (2.0 ** (exp_biased - bias)) - 1.0
+    m = int(round(sig * (1 << mant_bits)))
+    if m >= (1 << mant_bits):
+        m = 0
+        exp_biased = min(max_exp, exp_biased + 1)
+    if fmt == "fp8_e4m3fn" and exp_biased == 15 and m == 7:
+        m = 6  # 0x7F/0xFF is NaN in e4m3fn
+    return sign | (exp_biased << mant_bits) | (m & ((1 << mant_bits) - 1))
+
+
+def _fp8_byte_to_float(b: int, fmt: str = "fp8_e4m3fn") -> float:
+    """Decode an 8-bit FP8 (`fp8_e4m3fn` or `fp8_e5m2`) byte to float."""
+    sign = -1.0 if (b & 0x80) else 1.0
+    if fmt == "fp8_e4m3fn":
+        exp_bits, mant_bits, bias = 4, 3, 7
+    elif fmt == "fp8_e5m2":
+        exp_bits, mant_bits, bias = 5, 2, 15
+    else:
+        raise ValueError(f"Unsupported FP8 format: {fmt!r}")
+    exp = (b >> mant_bits) & ((1 << exp_bits) - 1)
+    mant = b & ((1 << mant_bits) - 1)
+    if exp == 0:
+        if mant == 0:
+            return 0.0
+        return sign * (mant / float(1 << mant_bits)) * (2.0 ** (1 - bias))
+    return sign * (1.0 + mant / float(1 << mant_bits)) * (2.0 ** (exp - bias))
+
+
+def quantize_matrix_fp8(
+    matrix: Any,
+    *,
+    fp8_format: str = "fp8_e4m3fn",
+) -> tuple[bytes, float, tuple[int, int]]:
+    """Quantize a 2D matrix into per-tensor scaled `fp8_e4m3fn` or `fp8_e5m2` bytes (8-byte f64 scale header + 1 byte per element)."""
+    if hasattr(matrix, "detach") and hasattr(matrix, "reshape"):
+        rows, cols = int(matrix.shape[0]), int(matrix.shape[1])
+        flat = [float(x) for x in matrix.detach().contiguous().reshape(-1).tolist()]
+    else:
+        rows_list = [list(r) for r in matrix]
+        rows, cols = len(rows_list), (len(rows_list[0]) if rows_list else 0)
+        flat = [float(x) for r in rows_list for x in r]
+    amax = max((abs(x) for x in flat), default=0.0)
+    fp8_max = 448.0 if fp8_format == "fp8_e4m3fn" else 57344.0
+    scale = (amax / (fp8_max * 0.5)) if amax > 0.0 else 1.0
+    inv_scale = 1.0 / scale
+    encoded = bytes(_float_to_fp8_byte(x * inv_scale, fp8_format) for x in flat)
+    return struct.pack("<d", scale) + encoded, scale, (rows, cols)
+
+
+def dequantize_matrix_fp8(
+    raw: bytes,
+    shape: tuple[int, int],
+    *,
+    fp8_format: str = "fp8_e4m3fn",
+) -> list[list[float]]:
+    """Dequantize a per-tensor scaled FP8 payload back into a 2D float matrix."""
+    rows, cols = int(shape[0]), int(shape[1])
+    n = rows * cols
+    if len(raw) != 8 + n:
+        raise ValueError(f"Invalid FP8 byte length {len(raw)} for shape {shape}")
+    (scale,) = struct.unpack_from("<d", raw, 0)
+    vals = [float(scale) * _fp8_byte_to_float(b, fp8_format) for b in raw[8:]]
+    return [vals[r * cols : (r + 1) * cols] for r in range(rows)]
+
+
+def execute_fp8_matrix_edit(
+    fp8_bytes: bytes,
+    shape: tuple[int, int],
+    *,
+    fp8_format: str = "fp8_e4m3fn",
+    operation_type: str,
+    factor: float = 1.0,
+    delta_matrix: Any | None = None,
+    left_factor: Any | None = None,
+    right_factor: Any | None = None,
+    orthonormal_basis: Any | None = None,
+    projection_side: str = "left",
+) -> QuantizedFP8EditReceipt:
+    """Dequantize FP8 (`fp8_e4m3fn` or `fp8_e5m2`) weights, execute a verified Rust Weight IR edit in f32 accumulation, and requantize with an explicit RoundingContract."""
+    before_digest = _sha256(fp8_bytes)
+    deq_before = dequantize_matrix_fp8(fp8_bytes, shape, fp8_format=fp8_format)
+    tx = WeightIRTransactionBuilder.execute_matrix_edit(
+        deq_before,
+        operation_type=operation_type,
+        dtype="f32",
+        accumulation_dtype="f32",
+        factor=factor,
+        delta_matrix=delta_matrix,
+        left_factor=left_factor,
+        right_factor=right_factor,
+        orthonormal_basis=orthonormal_basis,
+        projection_side=projection_side,
+        provenance_tag=f"studio.{fp8_format}.v1",
+    )
+    edited_f32 = unpack_matrix_bytes(tx.edited_bytes, shape, "f32")
+    new_fp8_bytes, _, _ = quantize_matrix_fp8(edited_f32, fp8_format=fp8_format)
+    deq_after = dequantize_matrix_fp8(new_fp8_bytes, shape, fp8_format=fp8_format)
+    max_err = max(
+        abs(edited_f32[r][c] - deq_after[r][c])
+        for r in range(shape[0])
+        for c in range(shape[1])
+    )
+    r_contract = build_rounding_contract(
+        fp8_format,
+        accumulation_dtype="f32",
+        output_dtype=fp8_format,
+        rounding_mode="nearest_ties_even",
+    )
+    return QuantizedFP8EditReceipt(
+        fp8_format=fp8_format,
+        shape=shape,
+        before_fp8_digest=before_digest,
+        after_fp8_digest=_sha256(new_fp8_bytes),
+        rust_plan_digest=tx.plan_digest,
+        changed_parameters=tx.changed_parameters,
+        max_quantization_abs_error=round(max_err, 6),
+        rounding_contract=r_contract,
+        dequantized_matrix=deq_after,
+        fp8_bytes=new_fp8_bytes,
+    )
+
+
+def quantize_matrix_q4_k_m(matrix: Any) -> tuple[bytes, tuple[int, int]]:
+    """Quantize a 2D matrix into GGML Q4_K_M super-blocks (32 elements per sub-block with f16 super-scale d, f16 super-min dmin, and 16 packed 4-bit nibbles = 20 bytes/block)."""
+    if hasattr(matrix, "detach") and hasattr(matrix, "reshape"):
+        rows, cols = int(matrix.shape[0]), int(matrix.shape[1])
+        flat = [float(x) for x in matrix.detach().contiguous().reshape(-1).tolist()]
+    else:
+        rows_list = [list(r) for r in matrix]
+        rows, cols = len(rows_list), (len(rows_list[0]) if rows_list else 0)
+        flat = [float(x) for r in rows_list for x in r]
+
+    padded_len = ((len(flat) + 31) // 32) * 32
+    padded = flat + [0.0] * (padded_len - len(flat))
+    out = bytearray()
+    for b_start in range(0, padded_len, 32):
+        block = padded[b_start : b_start + 32]
+        vmin = min(block)
+        vmax = max(block)
+        d = (vmax - vmin) / 15.0 if vmax > vmin else 0.0
+        d_bytes = struct.pack("<e", d)
+        min_bytes = struct.pack("<e", vmin)
+        (d_f16,) = struct.unpack("<e", d_bytes)
+        (min_f16,) = struct.unpack("<e", min_bytes)
+        inv_d = 1.0 / d_f16 if d_f16 > 0.0 else 0.0
+        quants = [max(0, min(15, int(round((x - min_f16) * inv_d)))) for x in block]
+        out.extend(d_bytes)
+        out.extend(min_bytes)
+        for i in range(16):
+            out.append((quants[i] & 0x0F) | ((quants[i + 16] & 0x0F) << 4))
+    return bytes(out), (rows, cols)
+
+
+def dequantize_matrix_q4_k_m(raw: bytes, shape: tuple[int, int]) -> list[list[float]]:
+    """Dequantize GGML Q4_K_M super-block bytes (20 bytes per 32-element block) back into a 2D float matrix."""
+    rows, cols = int(shape[0]), int(shape[1])
+    total = rows * cols
+    num_blocks = (total + 31) // 32
+    if len(raw) != num_blocks * 20:
+        raise ValueError(f"Invalid Q4_K_M byte length {len(raw)} for shape {shape}")
+    flat: list[float] = []
+    for b_idx in range(num_blocks):
+        offset = b_idx * 20
+        (d_f16, min_f16) = struct.unpack_from("<ee", raw, offset)
+        packed = raw[offset + 4 : offset + 20]
+        lo_vals = [b & 0x0F for b in packed]
+        hi_vals = [(b >> 4) & 0x0F for b in packed]
+        for q in lo_vals + hi_vals:
+            flat.append(float(min_f16) + float(d_f16) * float(q))
+    trimmed = flat[:total]
+    return [trimmed[r * cols : (r + 1) * cols] for r in range(rows)]
 
 
 @dataclass
@@ -667,12 +898,12 @@ def export_gguf_v3(
     *,
     quantization: str = "f32",
 ) -> Path:
-    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, `Q8_0`, or `Q4_0`)."""
+    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, `Q8_0`, `Q4_0`, or `Q4_K_M`)."""
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
     qmode = quantization.lower()
-    if qmode not in {"f32", "f16", "q8_0", "q4_0"}:
+    if qmode not in {"f32", "f16", "q8_0", "q4_0", "q4_k_m"}:
         raise ValueError(f"Unsupported GGUF quantization mode: {quantization!r}")
 
     cfg = getattr(model, "config", {}) or {}
@@ -717,6 +948,19 @@ def export_gguf_v3(
         elif qmode == "f16":
             ggml_type = GGML_TYPE_F16
             raw = struct.pack(f"<{len(flat)}e", *flat)
+        elif qmode == "q4_k_m":
+            is_embed_or_head = any(
+                tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
+            )
+            if len(flat) % 32 == 0 and len(shape) == 2 and not is_embed_or_head:
+                ggml_type = GGML_TYPE_Q4_K
+                raw, _ = quantize_matrix_q4_k_m(t)
+            elif len(flat) % 32 == 0 and len(shape) == 2:
+                ggml_type = GGML_TYPE_Q8_0
+                raw, _ = quantize_matrix_q8_0(t)
+            else:
+                ggml_type = GGML_TYPE_F32
+                raw = struct.pack(f"<{len(flat)}f", *flat)
         elif qmode == "q4_0":
             is_embed_or_head = any(
                 tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
@@ -844,6 +1088,11 @@ def reload_and_verify_gguf_v3(
             raw = blob[start : start + num_blocks * 34]
             mat = dequantize_matrix_q8_0(raw, (shape[0], shape[1]))
             loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
+        elif ggml_type == GGML_TYPE_Q4_K:
+            num_blocks = (n + 31) // 32
+            raw = blob[start : start + num_blocks * 20]
+            mat = dequantize_matrix_q4_k_m(raw, (shape[0], shape[1]))
+            loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
         else:
             raise ValueError(f"Unsupported GGML tensor type {ggml_type}")
         digest_items.append({"name": tname, "digest": _sha256(raw)})
@@ -873,3 +1122,102 @@ def reload_and_verify_gguf_v3(
         max_logit_abs_diff=round(max_diff, 8),
         gain_preserved_after_rebuild=match_rate == 1.0,
     )
+
+
+def export_huggingface_hub_bundle(
+    edited_model: Any,
+    output_dir: str | Path,
+    *,
+    open_patch: Mapping[str, Any],
+    dtype: str = "f32",
+    repo_id: str | None = None,
+    push_to_hub: bool = False,
+) -> dict[str, Any]:
+    """Export an edited model with its signed Open Patch (`weight_patch.nf.json`) and a Hugging Face Model Card (`README.md`) ready for `huggingface_hub` upload."""
+    out = Path(output_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    st_path = export_huggingface_safetensors(edited_model, out, dtype=dtype)
+    patch_path = out / "weight_patch.nf.json"
+    patch_bytes = canonicalize(dict(open_patch))
+    patch_path.write_bytes(patch_bytes)
+
+    sbom = open_patch.get("sbom", {}) if isinstance(open_patch.get("sbom"), Mapping) else {}
+    r_contract = (
+        open_patch.get("rounding_contract", {})
+        if isinstance(open_patch.get("rounding_contract"), Mapping)
+        else {}
+    )
+    eval_prov = (
+        open_patch.get("evaluation_provenance", {})
+        if isinstance(open_patch.get("evaluation_provenance"), Mapping)
+        else {}
+    )
+    sec_scan = (
+        open_patch.get("security_scan", {})
+        if isinstance(open_patch.get("security_scan"), Mapping)
+        else {}
+    )
+    base_model_id = str(sbom.get("base_model_id", getattr(edited_model, "model_name", "unknown")))
+    patch_digest = str(open_patch.get("patch_digest", content_digest(patch_bytes)))
+
+    model_card = "\n".join(
+        [
+            "---",
+            "library_name: transformers",
+            f"base_model: {base_model_id}",
+            "tags:",
+            "  - weight-programming",
+            "  - neural-foundry",
+            "  - verified-weight-patch",
+            "license: apache-2.0",
+            "---",
+            "",
+            f"# {repo_id or base_model_id + '-nf-patched'}",
+            "",
+            "This model was produced by **Weight Programming Studio (`neural_foundry`)** using a cryptographically signed, Rust-verified Weight IR transaction.",
+            "",
+            "## SBOM & Patch Provenance (`weight_patch.nf.json`)",
+            "",
+            f"- **Patch Digest:** `{patch_digest}`",
+            f"- **Base Model:** `{base_model_id}` (`{sbom.get('base_checkpoint_digest', 'n/a')}`)",
+            f"- **Candidate Digest:** `{sbom.get('candidate_checkpoint_digest', 'n/a')}`",
+            f"- **Layers Touched:** `{sbom.get('layers_touched', [])}`",
+            f"- **Changed Parameters:** `{sbom.get('changed_parameters', 0)}`",
+            f"- **Rounding Contract:** `{r_contract.get('source_dtype', dtype)}` -> `{r_contract.get('accumulation_dtype', 'f32')}` -> `{r_contract.get('output_dtype', dtype)}` (`{r_contract.get('rounding_mode', 'nearest_ties_even')}`)",
+            f"- **Evaluation Runtime & Sampler:** `{eval_prov.get('runtime', 'pytorch_cpu')}` / `{json.dumps(eval_prov.get('sampler', {}), sort_keys=True)}`",
+            f"- **Backdoor & Supply-Chain Scan Passed:** `{sec_scan.get('backdoor_scan_passed', True)}`",
+            "",
+            "## Verification",
+            "",
+            "```sh",
+            "nf verify weight_patch.nf.json",
+            "```",
+            "",
+        ]
+    )
+    readme_path = out / "README.md"
+    readme_path.write_text(model_card, encoding="utf-8")
+
+    pushed = False
+    if push_to_hub:
+        if not repo_id:
+            raise ValueError("repo_id is required when push_to_hub=True")
+        try:
+            from huggingface_hub import HfApi  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise RuntimeError(
+                "huggingface_hub package is required for push_to_hub=True"
+            ) from exc
+        api = HfApi()
+        api.upload_folder(folder_path=str(out), repo_id=repo_id, repo_type="model")
+        pushed = True
+
+    return {
+        "output_dir": str(out),
+        "safetensors_path": str(st_path),
+        "patch_artifact_path": str(patch_path),
+        "model_card_path": str(readme_path),
+        "patch_digest": patch_digest,
+        "pushed_to_hub": pushed,
+    }
+

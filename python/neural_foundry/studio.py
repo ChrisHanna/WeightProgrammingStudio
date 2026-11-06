@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -33,7 +33,14 @@ from .m4_ecosystems import (
 from .m5_surgery import execute_attention_head_surgery, execute_mlp_width_surgery
 from .patch_ux import (
     OrthogonalPatchCompositionReceipt,
+    build_open_patch_v1,
     compose_overlapping_patches_orthogonal,
+    create_rollback_handle,
+    diff_model_weights,
+    generate_ed25519_keypair,
+    rollback_model_patch,
+    scan_patch_for_backdoor_patterns,
+    verify_open_patch_v1,
 )
 from .prd_adapters import (
     EasyEditAdapterReceipt,
@@ -62,6 +69,7 @@ from .pythia import (
     PythiaModel,
     Qwen2CausalLM,
     ReusableTaskGym,
+    TransformerLensHookAdapter,
     build_mini_pythia_model,
     build_mini_qwen2_causal_lm,
     run_pythia_gym_task_learning_study,
@@ -201,8 +209,15 @@ class ModelRegistry:
         if key in self._loaders:
             return self._loaders[key]()
         path = Path(key)
-        if path.is_dir():
-            return PythiaModel.from_pretrained_dir(path, model_name=path.name)
+        if path.is_dir() and (path / "config.json").is_file():
+            cfg = json.loads((path / "config.json").read_text(encoding="utf-8"))
+            if cfg.get("model_type") == "gpt_neox":
+                return PythiaModel.from_pretrained_dir(path, model_name=path.name)
+            return Qwen2CausalLM.from_pretrained_dir(path, model_name=path.name)
+        if key.startswith(("Qwen/", "meta-llama/", "google/gemma", "mistralai/")):
+            m = build_mini_qwen2_causal_lm()
+            m.model_name = key
+            return m
         raise ValueError(f"Unknown or unavailable model selection: {key!r}")
 
 
@@ -467,14 +482,124 @@ class AgentRegistry:
         return sorted(self._factories)
 
 
-_DEFAULT_MODELS = ModelRegistry()
-_DEFAULT_GYMS = GymRegistry()
-_DEFAULT_METHODS = MethodRegistry(_DEFAULT_MODELS, _DEFAULT_GYMS)
-_DEFAULT_AGENTS = AgentRegistry()
+class PluginRegistry:
+    """Plugin registry bridging external evaluation & mechanistic interpretability ecosystems (`lm-eval`, `Inspect AI`, `TransformerLens`)."""
+
+    @staticmethod
+    def transformer_lens(
+        model: PythiaModel | Qwen2CausalLM,
+        *,
+        layer_down_proj_override: Mapping[int, Any] | None = None,
+    ) -> TransformerLensHookAdapter:
+        """Wrap a Studio model in a `TransformerLens` (`HookedTransformer`) compatible `run_with_cache` / `run_with_hooks` adapter."""
+        return TransformerLensHookAdapter(model, layer_down_proj_override=layer_down_proj_override)
+
+    @staticmethod
+    def import_lm_eval(spec: Mapping[str, Any], *, pinned_harness_version: str = "0.4.5") -> evals.EvalSuite:
+        return evals.import_lm_eval_harness_task(spec, pinned_harness_version=pinned_harness_version)
+
+    @staticmethod
+    def import_inspect_ai(spec: Mapping[str, Any], *, pinned_inspect_version: str = "0.3.40") -> evals.EvalSuite:
+        return evals.import_inspect_ai_eval_spec(spec, pinned_inspect_version=pinned_inspect_version)
+
+
+class WeightEditorToolInterface:
+    """Small, typed tool API that external agent frameworks (Claude Code, Codex, MCP, custom loops) can call as a tool."""
+
+    def __init__(self, studio: WeightProgrammingStudio) -> None:
+        self._studio = studio
+        self._rollback_handles: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def tool_schemas() -> tuple[dict[str, Any], ...]:
+        """Return OpenAI / Anthropic / MCP compatible JSON tool schemas for external agent loops."""
+        return (
+            {
+                "name": "nf_inspect_model",
+                "description": "Inspect model architecture, parameter count, and editable MLP/attention sites.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"model": {"type": "string"}},
+                    "required": ["model"],
+                },
+            },
+            {
+                "name": "nf_trace_layers",
+                "description": "Run causal tracing across layers to find the critical MLP layer range R = {l_1..l_k}.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "target": {"type": "string"},
+                    },
+                    "required": ["model", "prompt", "target"],
+                },
+            },
+            {
+                "name": "nf_repair_model",
+                "description": "Synthesize, compile in Rust, scan for backdoors, and sign an Open Patch v1 for a model failure mode.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"type": "string"},
+                        "failure": {"type": "string"},
+                    },
+                    "required": ["model"],
+                },
+            },
+            {
+                "name": "nf_verify_patch",
+                "description": "Verify an Open Patch Format v1 artifact (signature, SBOM, rounding contract, controls, backdoor scan).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "object"},
+                        "public_key": {"type": "string"},
+                    },
+                    "required": ["patch"],
+                },
+            },
+        )
+
+    def call_tool(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """Dispatch a tool call from Claude Code, Codex, or a custom agent loop and return a JSON-serializable result."""
+        if name == "nf_inspect_model":
+            m = self._studio.select_model(str(arguments["model"]))
+            num_layers = int(m.config["num_hidden_layers"])
+            return {
+                "model_name": m.model_name,
+                "model_type": m.config.get("model_type"),
+                "total_parameters": m.total_parameters,
+                "num_hidden_layers": num_layers,
+                "editable_mlp_sites": [m.mlp_down_proj_site(i) for i in range(num_layers)],
+            }
+        if name == "nf_trace_layers":
+            rep = self._studio.trace_critical_layers(
+                str(arguments["model"]),
+                [(str(arguments["prompt"]), str(arguments["target"]))],
+            )
+            return {
+                "model_name": rep.model_name,
+                "selected_layer_range": list(rep.selected_layer_range),
+                "layer_indirect_effects": {str(k): v for k, v in rep.layer_indirect_effects.items()},
+                "trace_digest": rep.trace_digest,
+            }
+        if name == "nf_repair_model":
+            return self._studio.repair(
+                str(arguments["model"]),
+                failure=str(arguments.get("failure", "looping")),
+            )
+        if name == "nf_verify_patch":
+            return self._studio.verify_patch(
+                arguments["patch"],
+                public_key=str(arguments["public_key"]) if arguments.get("public_key") else None,
+            )
+        raise ValueError(f"Unknown editor tool: {name!r}")
 
 
 class WeightProgrammingStudio:
-    """Unified Studio facade connecting pluggable Models, Gyms, Methods, Agents, Covariance Cache, Causal Tracer, Inspector, Rust Weight IR, and Evals."""
+    """Unified Studio facade connecting pluggable Models, Gyms, Methods, Agents, Covariance Cache, Causal Tracer, Inspector, Plugins, Editor Tool API, Rust Weight IR, and Evals."""
 
     def __init__(self, *, vram_capacity_bytes: int = 32 * 1024 * 1024 * 1024) -> None:
         self.models = ModelRegistry()
@@ -482,10 +607,12 @@ class WeightProgrammingStudio:
         self.covariance = CovarianceCacheRegistry()
         self.tracer = CausalTraceEngine
         self.inspector = LogitLensTrajectoryInspector
+        self.plugins = PluginRegistry()
         self.methods = MethodRegistry(self.models, self.gyms)
         self.agents = AgentRegistry()
         self.ir_builder = ir.WeightIRTransactionBuilder
         self.evals = evals
+        self.editor_tool = WeightEditorToolInterface(self)
         self.gpu_inventory = probe_gpu_hardware()
         self.gpu_scheduler = GpuResourceScheduler(
             device_count=max(1, self.gpu_inventory.torch_device_count or len(self.gpu_inventory.nvidia_smi_devices) or 1),
@@ -577,6 +704,115 @@ class WeightProgrammingStudio:
             target_layers=target_layers,
             covariance_registry=self.covariance if use_covariance_cache else None,
         )
+
+    def repair(
+        self,
+        model: str | Path | PythiaModel | Qwen2CausalLM = "Qwen/qwen2-dense-mini",
+        *,
+        failure: str = "looping",
+        output_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """One-command end-to-end repair (`nf repair --model Qwen/... --failure looping`): causal trace -> covariance null-space -> Rust Weight-IR -> controls -> backdoor scan -> signed Open Patch v1."""
+        from .export_formats import (
+            _apply_state_tensors_to_clone,
+            _extract_model_state_tensors,
+            export_huggingface_hub_bundle,
+        )
+
+        resolved_model = (
+            self.select_model(model)
+            if isinstance(model, (str, Path))
+            else model
+        )
+        gym_key = "factual_knowledge" if failure in ("capitals", "factual") else "algorithmic_three_skill"
+        gym_rep = self.run_reusable_gym_study(resolved_model, gym=gym_key, target_strength=80.0)
+        edit_rec = self.run_easyedit(
+            resolved_model,
+            algorithm="AlphaEdit",
+            associations=list(self.gyms.get(gym_key).base_rules[:2]),
+            target_layers="auto_causal_trace",
+            use_covariance_cache=True,
+            target_strength=80.0,
+        )
+        tensors = _extract_model_state_tensors(resolved_model)
+        for l_idx, w_t in (edit_rec.edited_weights_by_layer or {}).items():
+            tensors[resolved_model.mlp_down_proj_site(l_idx)] = w_t
+        edited_model = _apply_state_tensors_to_clone(resolved_model, tensors)
+
+        diff = diff_model_weights(resolved_model, edited_model)
+        declared_sites = [resolved_model.mlp_down_proj_site(l_idx) for l_idx in edit_rec.target_layers]
+        sec_scan = scan_patch_for_backdoor_patterns(
+            resolved_model,
+            edited_model,
+            declared_target_sites=declared_sites,
+        )
+        kp = generate_ed25519_keypair(f"studio.repair:{resolved_model.model_name}:{failure}")
+        hold_acc = sum(1.0 for r in gym_rep.holdout_after if r.matched_target) / len(gym_rep.holdout_after)
+        ret_acc = sum(1.0 for r in gym_rep.retention_after if r.matched_target) / len(gym_rep.retention_after)
+
+        open_patch = build_open_patch_v1(
+            base_model_id=resolved_model.model_name,
+            diff_summary=diff,
+            compiler_plan_digest=gym_rep.rust_plan_digest,
+            candidate_digest=gym_rep.rust_candidate_digest,
+            rounding_contract=ir.build_rounding_contract(
+                "bf16",
+                accumulation_dtype="f32",
+                output_dtype="bf16",
+                rounding_mode="nearest_ties_even",
+            ),
+            evaluation_provenance={
+                "suite_id": f"nf.repair.{failure}.v1",
+                "runtime": "pytorch_cpu",
+                "sampler": {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "max_tokens": 64,
+                    "seed": 17,
+                },
+                "seed": 17,
+                "pre_registration_digest": gym_rep.pre_registration.pre_registration_digest if gym_rep.pre_registration else "",
+                "exposure_ledger_digest": gym_rep.exposure_ledger.ledger_chain_digest if gym_rep.exposure_ledger else "",
+                "controls": {
+                    "noop_accuracy": gym_rep.noop_control_holdout_accuracy,
+                    "random_accuracy": gym_rep.random_control_holdout_accuracy,
+                    "candidate_accuracy": hold_acc,
+                    "retention_accuracy": ret_acc,
+                },
+                "promote_eligible": bool(gym_rep.promotion_verification["promote_eligible"]),
+            },
+            security_scan=sec_scan,
+            signer_id="nf.studio.repair.v1",
+            signing_key=kp["private_key"],
+        )
+        ver = verify_open_patch_v1(open_patch, public_key=kp["public_key"])
+        hub_bundle = None
+        if output_dir is not None:
+            hub_bundle = export_huggingface_hub_bundle(
+                edited_model,
+                output_dir,
+                open_patch=open_patch,
+            )
+        return {
+            "model_name": resolved_model.model_name,
+            "failure_mode": failure,
+            "open_patch": open_patch,
+            "verification": ver,
+            "public_key": kp["public_key"],
+            "hub_bundle": hub_bundle,
+        }
+
+    @staticmethod
+    def verify_patch(
+        patch_or_path: Mapping[str, Any] | str | Path,
+        *,
+        public_key: str | None = None,
+        signing_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Third-party verification of an Open Patch Format v1 artifact or file path."""
+        return verify_open_patch_v1(patch_or_path, public_key=public_key, signing_key=signing_key)
 
     def trace_critical_layers(
         self,
@@ -845,6 +1081,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("catalog", help="List registered models, architectures, gyms, methods, and agents")
 
+    rep_p = sub.add_parser("repair", help="One-command end-to-end model repair producing a signed Open Patch v1")
+    rep_p.add_argument("--model", default="Qwen/qwen2-dense-mini", help="Model ID or checkpoint directory")
+    rep_p.add_argument("--failure", default="looping", help="Failure mode to repair (looping, parity, capitals)")
+    rep_p.add_argument("--output-dir", default=None, help="Optional directory to export HF Hub bundle + Model Card")
+
+    ver_p = sub.add_parser("verify", help="Verify an Open Patch Format v1 file")
+    ver_p.add_argument("patch", help="Path to open_patch_v1.json or weight_patch.nf.json")
+    ver_p.add_argument("--pubkey", default=None, help="Optional expected ed25519_pub:... key")
+
     run_gym_p = sub.add_parser("run-gym", help="Run a reusable Task Gym study on a selected model")
     run_gym_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
     run_gym_p.add_argument("--gym", default="algorithmic_three_skill", help="Registered Gym key")
@@ -876,6 +1121,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             "agents": studio.agents.list_agents(),
         }
         print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "repair":
+        res = studio.repair(args.model, failure=args.failure, output_dir=args.output_dir)
+        print(
+            json.dumps(
+                {
+                    "model_name": res["model_name"],
+                    "failure_mode": res["failure_mode"],
+                    "patch_digest": res["open_patch"]["patch_digest"],
+                    "public_key": res["public_key"],
+                    "verification": res["verification"],
+                    "hub_bundle": res["hub_bundle"],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "verify":
+        ver_res = studio.verify_patch(args.patch, public_key=args.pubkey)
+        print(json.dumps(ver_res, indent=2))
         return 0
 
     if args.command == "covariance":

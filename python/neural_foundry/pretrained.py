@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
 import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -23,6 +24,70 @@ from .records import canonicalize, content_digest
 QWEN2_FACTORY_ID = "hf.qwen2.dense"
 QWEN2_FACTORY_VERSION = "1"
 QWEN2_SMOKE_ADAPTER = "nf.qwen2_dense.v1"
+
+PRETRAINED_ARCHITECTURE_REGISTRY: dict[str, dict[str, Any]] = {
+    "qwen2": {
+        "model_type": "qwen2",
+        "architectures": ("Qwen2ForCausalLM",),
+        "factory_id": "hf.qwen2.dense",
+        "allowed_activations": ("silu",),
+    },
+    "qwen3": {
+        "model_type": "qwen3",
+        "architectures": ("Qwen3ForCausalLM",),
+        "factory_id": "hf.qwen3.dense",
+        "allowed_activations": ("silu",),
+    },
+    "llama": {
+        "model_type": "llama",
+        "architectures": ("LlamaForCausalLM",),
+        "factory_id": "hf.llama.dense",
+        "allowed_activations": ("silu",),
+    },
+    "mistral": {
+        "model_type": "mistral",
+        "architectures": ("MistralForCausalLM",),
+        "factory_id": "hf.mistral.dense",
+        "allowed_activations": ("silu",),
+    },
+    "gemma": {
+        "model_type": "gemma",
+        "architectures": ("GemmaForCausalLM", "Gemma2ForCausalLM"),
+        "factory_id": "hf.gemma.dense",
+        "allowed_activations": ("gelu", "gelu_pytorch_tanh", "silu"),
+    },
+    "gemma2": {
+        "model_type": "gemma2",
+        "architectures": ("Gemma2ForCausalLM", "GemmaForCausalLM"),
+        "factory_id": "hf.gemma2.dense",
+        "allowed_activations": ("gelu", "gelu_pytorch_tanh", "silu"),
+    },
+    "gpt_neox": {
+        "model_type": "gpt_neox",
+        "architectures": ("GPTNeoXForCausalLM",),
+        "factory_id": "hf.gpt_neox.dense",
+        "allowed_activations": ("gelu", "gelu_fast"),
+    },
+}
+
+
+def register_pretrained_architecture(
+    model_type: str,
+    *,
+    architectures: Sequence[str],
+    factory_id: str,
+    allowed_activations: Sequence[str] = ("silu", "gelu"),
+) -> None:
+    """Register a new open-weight model family in the pretrained intake registry."""
+    key = model_type.strip().lower()
+    if not key or not architectures:
+        raise ValueError("model_type and architectures must be non-empty")
+    PRETRAINED_ARCHITECTURE_REGISTRY[key] = {
+        "model_type": key,
+        "architectures": tuple(architectures),
+        "factory_id": factory_id,
+        "allowed_activations": tuple(allowed_activations),
+    }
 
 
 class PretrainedAdapterError(RuntimeError):
@@ -492,7 +557,10 @@ def intake_local_qwen2(
             "qualification_stratum must distinguish mini_config_offline_fixture from user_supplied_local_pretrained_checkpoint",
         )
 
-    checkpoint_bytes = checkpoint_path.read_bytes()
+    with checkpoint_path.open("rb") as fobj, mmap.mmap(
+        fobj.fileno(), 0, access=mmap.ACCESS_READ
+    ) as mm:
+        checkpoint_bytes = bytes(mm[:])
     parsed_tensors = _parse_safetensors(checkpoint_bytes)
     head_dim = h // heads
     kv_dim = kv_heads * head_dim
@@ -658,3 +726,91 @@ def intake_local_qwen2(
         tensors=tensor_map,
         qualification_stratum=stratum,
     )
+
+
+def intake_pretrained_checkpoint(
+    source: str | PathLike[str],
+    *,
+    allow_download: bool = False,
+    trust_remote_code: bool = False,
+    max_checkpoint_bytes: int = 68_719_476_736,
+) -> dict[str, Any]:
+    """Registry-driven, streaming `mmap` intake for Qwen2, Qwen3.x, Llama, Gemma, Mistral, and GPT-NeoX (single or sharded safetensors)."""
+    from .export_formats import ShardedMmapCheckpoint
+
+    if allow_download:
+        raise PretrainedAdapterError("DOWNLOAD_DISABLED", "Network downloads are disabled by default")
+    if trust_remote_code:
+        raise PretrainedAdapterError("REMOTE_CODE_FORBIDDEN", "trust_remote_code is forbidden")
+
+    root = Path(source).resolve()
+    if not root.is_dir():
+        raise PretrainedAdapterError("MISSING_DIRECTORY", f"Checkpoint directory not found: {root}")
+    for forbidden_ext in ("*.bin", "*.pt", "*.pth", "*.pkl", "*.py"):
+        if list(root.glob(forbidden_ext)):
+            raise PretrainedAdapterError(
+                "UNSAFE_ARTIFACT", f"Forbidden executable/pickle artifact matching {forbidden_ext}"
+            )
+
+    config_path = root / "config.json"
+    if not config_path.is_file():
+        raise PretrainedAdapterError("MISSING_ASSET", "Required asset missing: config.json")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if config.get("trust_remote_code") is True or "auto_map" in config:
+        raise PretrainedAdapterError("REMOTE_CODE_FORBIDDEN", "Config requests remote custom code")
+
+    mtype = str(config.get("model_type", "")).lower()
+    if mtype not in PRETRAINED_ARCHITECTURE_REGISTRY:
+        raise PretrainedAdapterError(
+            "UNSUPPORTED_ARCHITECTURE",
+            f"Unsupported model_type {mtype!r}; registered: {sorted(PRETRAINED_ARCHITECTURE_REGISTRY)}",
+        )
+    spec = PRETRAINED_ARCHITECTURE_REGISTRY[mtype]
+    archs = tuple(config.get("architectures", ()))
+    if not archs or any(a not in spec["architectures"] for a in archs):
+        raise PretrainedAdapterError(
+            "UNSUPPORTED_ARCHITECTURE",
+            f"Unsupported architectures {archs!r} for model_type={mtype!r}",
+        )
+    act = str(config.get("hidden_act", config.get("hidden_activation", spec["allowed_activations"][0]))).lower()
+    if act not in spec["allowed_activations"]:
+        raise PretrainedAdapterError("UNSUPPORTED_ARCHITECTURE", f"Unsupported activation {act!r}")
+
+    with ShardedMmapCheckpoint(root, max_checkpoint_bytes=max_checkpoint_bytes) as sharded:
+        tensor_digests: dict[str, str] = {}
+        tensor_shapes: dict[str, list[int]] = {}
+        tensor_dtypes: dict[str, str] = {}
+        for tname, slice_info in sorted(sharded.tensors.items()):
+            view = sharded.read_tensor_view(tname)
+            tensor_digests[tname] = "sha256:" + hashlib.sha256(view).hexdigest()
+            tensor_shapes[tname] = list(slice_info.shape)
+            tensor_dtypes[tname] = slice_info.dtype.lower()
+        total_mapped_bytes = sharded.total_mapped_bytes
+        shard_count = len({s.shard_filename for s in sharded.tensors.values()})
+
+    inventory_digest = str(
+        content_digest(
+            canonicalize(
+                {
+                    "factory_id": spec["factory_id"],
+                    "tensors": tensor_digests,
+                    "shapes": tensor_shapes,
+                }
+            )
+        )
+    )
+    return {
+        "schema_version": 1,
+        "kind": "nf_pretrained_mmap_intake",
+        "model_type": mtype,
+        "architectures": list(archs),
+        "factory_id": spec["factory_id"],
+        "root_dir": str(root),
+        "mmap_streaming_used": True,
+        "shard_count": shard_count,
+        "total_mapped_bytes": total_mapped_bytes,
+        "tensor_count": len(tensor_digests),
+        "tensor_shapes": tensor_shapes,
+        "tensor_dtypes": tensor_dtypes,
+        "inventory_digest": inventory_digest,
+    }

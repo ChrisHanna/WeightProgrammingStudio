@@ -335,6 +335,7 @@ SUPPORTED_RUNTIMES = frozenset(
     {
         "pytorch_cpu",
         "pytorch_cuda",
+        "transformers",
         "llama.cpp",
         "vllm",
         "rust_cpu",
@@ -502,10 +503,11 @@ def _load_model_descriptor_strict(model: Mapping[str, Any] | str | PathLike[str]
 
 
 def probe_external_serving_runtimes() -> dict[str, bool]:
-    """Detect whether external `llama-cli` (`llama.cpp`) or `vllm` serving runtimes are installed on the host."""
+    """Detect whether external `llama-cli` (`llama.cpp`), `vllm`, or `transformers` serving runtimes are installed on the host."""
     return {
         "llama.cpp": bool(shutil.which("llama-cli") or shutil.which("llama-completion")),
         "vllm": importlib.util.find_spec("vllm") is not None,
+        "transformers": importlib.util.find_spec("transformers") is not None,
     }
 
 
@@ -516,7 +518,7 @@ def _score_model_on_tasks(
     """Deterministically score a model descriptor or live callable/subprocess on suite tasks (fail-closed on missing scores)."""
     runtime = str(model_spec.get("runtime", "pytorch_cpu"))
     require_ext_rt = bool(model_spec.get("require_external_runtime", False))
-    if require_ext_rt and runtime in ("llama.cpp", "vllm"):
+    if require_ext_rt and runtime in ("llama.cpp", "vllm", "transformers"):
         avail = probe_external_serving_runtimes()
         if not avail.get(runtime, False) and not callable(model_spec.get("subprocess_runner")):
             raise EvaluationError(

@@ -151,6 +151,72 @@ def build_named_safetensors_f64(name: str, matrix: Any) -> tuple[bytes, str, int
 
 
 @dataclass(frozen=True)
+class RoundingContract:
+    """Stated numerical accumulation and output rounding contract bound into patch identity."""
+
+    source_dtype: str
+    accumulation_dtype: str
+    output_dtype: str
+    rounding_mode: str = "nearest_ties_even"
+    subnormal_policy: str = "preserve_ieee754"
+    non_finite_policy: str = "reject"
+    block_size: int | None = None
+    contract_digest: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "nf_rounding_contract",
+            "source_dtype": self.source_dtype,
+            "accumulation_dtype": self.accumulation_dtype,
+            "output_dtype": self.output_dtype,
+            "rounding_mode": self.rounding_mode,
+            "subnormal_policy": self.subnormal_policy,
+            "non_finite_policy": self.non_finite_policy,
+            "block_size": self.block_size,
+            "contract_digest": self.contract_digest,
+        }
+
+
+def build_rounding_contract(
+    source_dtype: str,
+    *,
+    accumulation_dtype: str = "f64",
+    output_dtype: str | None = None,
+    rounding_mode: str = "nearest_ties_even",
+    subnormal_policy: str = "preserve_ieee754",
+    non_finite_policy: str = "reject",
+    block_size: int | None = None,
+) -> RoundingContract:
+    """Create a canonical, content-addressed `RoundingContract`."""
+    src_dt = source_dtype.lower()
+    acc_dt = accumulation_dtype.lower()
+    out_dt = (output_dtype or src_dt).lower()
+    payload = {
+        "schema_version": 1,
+        "kind": "nf_rounding_contract",
+        "source_dtype": src_dt,
+        "accumulation_dtype": acc_dt,
+        "output_dtype": out_dt,
+        "rounding_mode": rounding_mode,
+        "subnormal_policy": subnormal_policy,
+        "non_finite_policy": non_finite_policy,
+        "block_size": block_size,
+    }
+    digest = str(content_digest(canonicalize(payload)))
+    return RoundingContract(
+        source_dtype=src_dt,
+        accumulation_dtype=acc_dt,
+        output_dtype=out_dt,
+        rounding_mode=rounding_mode,
+        subnormal_policy=subnormal_policy,
+        non_finite_policy=non_finite_policy,
+        block_size=block_size,
+        contract_digest=digest,
+    )
+
+
+@dataclass(frozen=True)
 class CompiledTransactionReceipt:
     """Verified result of compiling and executing a Weight IR operation in Rust."""
 
@@ -164,6 +230,7 @@ class CompiledTransactionReceipt:
     changed_parameters: int
     reload_parity_verified: bool
     receipt: dict[str, Any]
+    rounding_contract: RoundingContract | None = None
 
 
 class WeightIRTransactionBuilder:
@@ -617,6 +684,12 @@ class WeightIRTransactionBuilder:
         reloaded = candidate_handle.snapshot()
         reload_ok = reloaded.parameter_digest == candidate_handle.parameter_digest
         edited_bytes = candidate_handle.tensor_bytes("w")
+        r_contract = build_rounding_contract(
+            dt,
+            accumulation_dtype=accum_dt,
+            output_dtype=dt,
+            rounding_mode="nearest_ties_even",
+        )
 
         return CompiledTransactionReceipt(
             operation_type=operation_type,
@@ -629,5 +702,6 @@ class WeightIRTransactionBuilder:
             changed_parameters=int(receipt_dict.get("changed_parameters", out_dim * in_dim)),
             reload_parity_verified=reload_ok,
             receipt=receipt_dict,
+            rounding_contract=r_contract,
         )
 
