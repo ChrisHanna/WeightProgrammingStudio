@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 
 from . import evals, ir
+from .method_plans import VerifiedMethodSteps, low_rank_step, verify_method_steps
 from .provenance import evidence_grade_for_model
 from .records import canonicalize, content_digest
 
@@ -1232,6 +1233,8 @@ class PythiaGymTaskReport:
     net_gain_over_random: float = 0.0
     exposure_ledger: ExposureLedgerReceipt | None = None
     pre_registration: evals.PreRegisteredStudyPlan | None = None
+    edited_weight: torch.Tensor | None = None
+    edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
 
 def _compile_and_apply_rust_low_rank_update(
@@ -1816,7 +1819,12 @@ def run_pythia_gym_task_learning_study(
         caller_role="verifier",
     )
 
+    final_site = model.mlp_down_proj_site(final_layer)
     return PythiaGymTaskReport(
+        edited_weight=w_b3_rust,
+        edit_steps=verify_method_steps(
+            model, (low_rank_step(final_site, "gym_contrastive_prefix_nullspace", left_u3, right_v3),), {final_site: w_b3_rust}
+        ),
         model_name=model.model_name,
         gym_id=gym.gym_id,
         skills_taught=gym.skills_taught,

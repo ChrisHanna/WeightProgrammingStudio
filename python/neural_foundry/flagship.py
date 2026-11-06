@@ -678,6 +678,21 @@ def _measure_greedy_repetition_loop_rate(
     return loop_count / max(len(prompts), 1)
 
 
+FLAGSHIP_DEFECT_GRAPH = "edit_graph_injected_defect.json"
+FLAGSHIP_REPAIR_GRAPH = "edit_graph_repair.json"
+
+
+def replay_flagship_edit_graphs(clean_model: Any, bundle_dir: str | Path, *, public_key: str) -> Any:
+    """Rebuild the repaired candidate from the clean model and a bundle's signed graphs. Raises on any mismatch."""
+    import json
+
+    from .edit_plan import apply_signed_edit_graph
+
+    bundle = Path(bundle_dir)
+    defective = apply_signed_edit_graph(clean_model, json.loads((bundle / FLAGSHIP_DEFECT_GRAPH).read_bytes()), public_key=public_key)
+    return apply_signed_edit_graph(defective.model, json.loads((bundle / FLAGSHIP_REPAIR_GRAPH).read_bytes()), public_key=public_key)
+
+
 def run_flagship_loop_repair_study_and_publish_bundle(
     model: Any,
     *,
@@ -710,6 +725,8 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         verify_open_patch_v1,
         verify_patch_signature,
     )
+    from .edit_plan import sign_edit_graph
+    from .method_plans import add_delta_step, edit_plan_from_steps, verify_method_steps
     from .prd_adapters import FrontierAgentProgrammer
     from .provenance import evidence_grade_for_model, write_artifact_manifest
     from .pythia import (
@@ -746,11 +763,15 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         dim=1,
     ).mean(dim=1)
     k_loop_unit = k_loop / (torch.linalg.norm(k_loop) + 1e-8)
-    w_looping = (w_clean + 120.0 * torch.outer(loop_dir, k_loop_unit)).contiguous()
+    defect_delta = 120.0 * torch.outer(loop_dir, k_loop_unit)
+    w_looping = (w_clean + defect_delta).contiguous()
 
-    clean_state = _extract_model_state_tensors(base_model)
-    clean_state[site_name] = w_looping.detach().cpu()
-    defective_model = _apply_state_tensors_to_clone(base_model, clean_state)
+    # The defect is a graph too, so a reader can rebuild the defective checkpoint from the clean one.
+    defect_plan = edit_plan_from_steps(
+        base_model,
+        verify_method_steps(base_model, (add_delta_step(site_name, "injected_defect", defect_delta),), {site_name: w_looping}),
+    )
+    defective_model = defect_plan.execute().model
     loop_rate_before = _measure_greedy_repetition_loop_rate(
         defective_model,
         loop_prompts,
@@ -772,11 +793,13 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     )
     repaired_edit = repair_repetition_attractor(defective_model, development_prompts)
     selected = repaired_edit.selected
-    state_tensors = _extract_model_state_tensors(defective_model)
+    repair_plan = None
     if selected is not None and repaired_edit.edited_weight is not None:
         site_name = selected.site
-        state_tensors[site_name] = repaired_edit.edited_weight.detach().cpu()
-    repaired_model = _apply_state_tensors_to_clone(defective_model, state_tensors)
+        repair_plan = edit_plan_from_steps(defective_model, repaired_edit.edit_steps)
+        repaired_model = repair_plan.execute().model
+    else:
+        repaired_model = _apply_state_tensors_to_clone(defective_model, _extract_model_state_tensors(defective_model))
     loop_rate_after = _measure_greedy_repetition_loop_rate(
         repaired_model,
         loop_prompts,
@@ -922,7 +945,16 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     signed_patch_path.write_bytes(canonicalize(signed_envelope))
     open_patch_path.write_bytes(canonicalize(open_patch))
     diff_md_path.write_text(diff_summary.human_summary_markdown + "\n", encoding="utf-8")
-    transcript_path.write_bytes(canonicalize(dataclasses.asdict(agent_rep)))
+    # Tensors can't be canonicalized. The edit itself is published as a graph below.
+    transcript_path.write_bytes(
+        canonicalize(dataclasses.asdict(dataclasses.replace(agent_rep, submitted_edit_steps=(), submitted_weights_by_layer=None)))
+    )
+    defect_graph_path = out / FLAGSHIP_DEFECT_GRAPH
+    defect_graph_path.write_bytes(canonicalize(sign_edit_graph(defect_plan.to_graph(), signing_key=signing_key)))
+    repair_graph_paths: tuple[str, ...] = ()
+    if repair_plan is not None:
+        (out / FLAGSHIP_REPAIR_GRAPH).write_bytes(canonicalize(sign_edit_graph(repair_plan.to_graph(), signing_key=signing_key)))
+        repair_graph_paths = (str(out / FLAGSHIP_REPAIR_GRAPH),)
     verification_payload = {
         "schema_version": 1,
         "kind": "nf_flagship_verification_receipt",
@@ -995,6 +1027,8 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         str(open_patch_path),
         str(diff_md_path),
         str(transcript_path),
+        str(defect_graph_path),
+        *repair_graph_paths,
         str(verification_path),
         str(hf_dir / "model.safetensors"),
         str(gguf_path),

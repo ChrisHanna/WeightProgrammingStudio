@@ -844,7 +844,7 @@ class WeightProgrammingStudio:
         A rejected candidate is returned with its reason and is never packaged for publishing.
         """
         from .export_formats import export_huggingface_hub_bundle
-        from .method_plans import verified_method_plan
+        from .method_plans import edit_plan_from_steps
         from .prd_adapters import SEALED_RETENTION_PROMPTS
         from .provenance import evidence_grade_for_model
         from .repair import repair_repetition_attractor, sham_output_projection
@@ -887,7 +887,7 @@ class WeightProgrammingStudio:
             attractor = found.diagnosis.token_id
             layer, site = found.selected.layer, found.selected.site
             # The plan's candidate is the edited model, so the plan adds no model copy.
-            edit_plan = verified_method_plan(resolved_model, found.edit_steps, {site: found.edited_weight})
+            edit_plan = edit_plan_from_steps(resolved_model, found.edit_steps)
             edited_model = edit_plan.execute().model
             declared_sites = [site]
             plan_digest, candidate_digest = found.plan_digest, found.candidate_digest
@@ -914,11 +914,7 @@ class WeightProgrammingStudio:
                 use_covariance_cache=True,
                 target_strength=80.0,
             )
-            edit_plan = verified_method_plan(
-                resolved_model,
-                edit_rec.edit_steps,
-                {resolved_model.mlp_down_proj_site(l_idx): w_t for l_idx, w_t in (edit_rec.edited_weights_by_layer or {}).items()},
-            )
+            edit_plan = edit_plan_from_steps(resolved_model, edit_rec.edit_steps)
             edited_model = edit_plan.execute().model
             declared_sites = [resolved_model.mlp_down_proj_site(l_idx) for l_idx in edit_rec.target_layers]
             plan_digest, candidate_digest = edit_rec.rust_plan_digest, edit_rec.rust_candidate_digest

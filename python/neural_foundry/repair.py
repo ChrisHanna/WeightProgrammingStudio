@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-from .method_plans import MethodEditStep, low_rank_step
+from .method_plans import VerifiedMethodSteps, low_rank_step, verify_method_steps
 from .pythia import _compile_and_apply_rust_low_rank_update
 
 
@@ -43,7 +43,7 @@ class AttractorRepair:
     edited_weight: torch.Tensor | None
     plan_digest: str
     candidate_digest: str
-    edit_steps: tuple[MethodEditStep, ...] = ()
+    edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
 
 def diagnose_attractor(
@@ -158,8 +158,8 @@ def repair_repetition_attractor(
         return AttractorRepair(diagnosis, tuple(tried), None, None, "", "")
     chosen = best[1]
     left, right = output_projection_factors(model.tensors[chosen.site], direction, factor=chosen.factor)
-    step = low_rank_step(chosen.site, "attractor_projection", left, right)
-    return AttractorRepair(diagnosis, tuple(tried), chosen, best[2], best[3], best[4], (step,))
+    steps = verify_method_steps(model, (low_rank_step(chosen.site, "attractor_projection", left, right),), {chosen.site: best[2]})
+    return AttractorRepair(diagnosis, tuple(tried), chosen, best[2], best[3], best[4], steps)
 
 
 def sham_output_projection(

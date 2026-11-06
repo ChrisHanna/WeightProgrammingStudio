@@ -605,6 +605,43 @@ class GpuTransactionalExecutionReceipt:
     smoke_probes_passed: bool
     eval_probe_outputs: tuple[list[float], ...]
     output_tensor: torch.Tensor
+    # What can replay this edit. The edit graph runs only in f64 on the Rust CPU executor.
+    edit_steps: Any = ()
+    replay_precision: str = ""
+    replay_device: str = ""
+    replay_refused_reason: str = ""
+
+
+def _gpu_replay_steps(
+    source: torch.Tensor,
+    tensor_name: str,
+    operation: str,
+    output: torch.Tensor,
+    *,
+    requested_dtype: str,
+    accumulation_dtype: str,
+    factor: float,
+    delta: torch.Tensor | None,
+    left_basis: torch.Tensor | None,
+    right_basis: torch.Tensor | None,
+) -> tuple[Any, str]:
+    """Verified steps and no reason if the f64 Rust CPU executor reproduces this output bitwise, else a reason."""
+    from .edit_plan import EditGraphError
+    from .method_plans import MethodEditStep, verify_method_steps
+
+    if requested_dtype != "f64" or accumulation_dtype != "f64":
+        return (), f"The edit ran in {requested_dtype} with {accumulation_dtype} accumulation; the edit graph replays only f64"
+    if operation == "add_delta" and delta is not None:
+        operands = {"delta_matrix": delta.detach().cpu()}
+    elif operation == "low_rank_update" and left_basis is not None and right_basis is not None:
+        operands = {"left_factor": left_basis.detach().cpu(), "right_factor": right_basis.detach().cpu()}
+    else:
+        return (), f"Replay isn't wired for {operation}"
+    try:
+        step = MethodEditStep(tensor_name, f"gpu_{operation}", operation, operands, factor)
+        return verify_method_steps({tensor_name: source}, (step,), {tensor_name: output}), ""
+    except EditGraphError as exc:
+        return (), f"The device output isn't bitwise equal to the f64 Rust CPU result: {exc}"
 
 
 def execute_transactional_gpu_edit_and_eval(
@@ -703,7 +740,23 @@ def execute_transactional_gpu_edit_and_eval(
             "after_digest": gpu_res.after_digest,
         }
     )
+    replay_steps, replay_refused = _gpu_replay_steps(
+        source_tensor,
+        tensor_name,
+        operation,
+        gpu_mat,
+        requested_dtype=requested_dtype,
+        accumulation_dtype=accumulation_dtype,
+        factor=factor,
+        delta=delta,
+        left_basis=left_basis,
+        right_basis=right_basis,
+    )
     return GpuTransactionalExecutionReceipt(
+        edit_steps=replay_steps,
+        replay_precision="f64" if replay_steps else "",
+        replay_device="cpu_rust" if replay_steps else "",
+        replay_refused_reason=replay_refused,
         transaction_digest=tx_digest,
         rust_plan_digest=rust_tx.plan_digest,
         rust_candidate_digest=rust_tx.candidate_digest,

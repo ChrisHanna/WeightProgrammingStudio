@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import torch
 
-from .method_plans import MethodEditStep, add_delta_step, low_rank_step
+from .method_plans import MethodEditStep, VerifiedMethodSteps, add_delta_step, low_rank_step, verify_method_steps
 from . import ir
 from .m4_modalities import construct_algorithmic_relu_rule
 from .pythia import (
@@ -271,7 +271,7 @@ class EasyEditAdapterReceipt:
     target_layers: tuple[int, ...] = ()
     edited_weights_by_layer: dict[int, torch.Tensor] | None = None
     layer_plan_digests: tuple[str, ...] = ()
-    edit_steps: tuple[MethodEditStep, ...] = ()
+    edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
 
 def run_easyedit_adapter(
@@ -455,7 +455,11 @@ def run_easyedit_adapter(
         target_layers=resolved_layers,
         edited_weights_by_layer=dict(override),
         layer_plan_digests=tuple(plan_digests),
-        edit_steps=tuple(steps_by_layer.values()),
+        edit_steps=verify_method_steps(
+            model,
+            tuple(steps_by_layer.values()),
+            {model.mlp_down_proj_site(layer): weight for layer, weight in override.items()},
+        ),
     )
 
 
@@ -481,7 +485,7 @@ class MergekitAdapterReceipt:
     merged_weight: torch.Tensor
     implementation_source: ImplementationSource = "local_reimplementation_not_external_baseline"
     external_package_installed: bool = False
-    edit_steps: tuple[MethodEditStep, ...] = ()
+    edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
 
 def run_mergekit_adapter(
@@ -618,7 +622,9 @@ def run_mergekit_adapter(
             "external_package" if ext_installed else "local_reimplementation_not_external_baseline"
         ),
         external_package_installed=ext_installed,
-        edit_steps=(add_delta_step(site_name, f"mergekit_{algorithm}", merged_delta),),
+        edit_steps=verify_method_steps(
+            model, (add_delta_step(site_name, f"mergekit_{algorithm}", merged_delta),), {site_name: w_merged}
+        ),
     )
 
 
@@ -687,7 +693,7 @@ class FrontierAgentSessionReport:
     stop_reason: str = ""
     sealed_retention_accuracy: float | None = None
     submitted_practice_scores: dict[str, float] | None = None
-    submitted_edit_steps: tuple[MethodEditStep, ...] = ()
+    submitted_edit_steps: VerifiedMethodSteps | tuple[()] = ()
 
 
 @dataclass(frozen=True)
@@ -1096,6 +1102,10 @@ class FrontierAgentProgrammer:
                 budget_usd=self.budget_usd,
                 budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
                 feedback_tools_enabled=False,
+                submitted_weights_by_layer={final_layer: w_blind},
+                submitted_edit_steps=verify_method_steps(
+                    model, (low_rank_step(site, "agent_weight_reading_only", left_blind, right_blind),), {site: w_blind}
+                ),
             )
 
         # Turn 2: Feedback tool — live forward pass on practice prompts
@@ -1190,6 +1200,8 @@ class FrontierAgentProgrammer:
             budget_usd=self.budget_usd,
             budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
             feedback_tools_enabled=True,
+            submitted_weights_by_layer={final_layer: gym_rep.edited_weight},
+            submitted_edit_steps=gym_rep.edit_steps,
         )
 
     def run_autonomous_tool_loop(
@@ -1320,7 +1332,7 @@ class FrontierAgentProgrammer:
                     "weight": edited,
                     "plan_digest": plan,
                     "candidate_digest": cand,
-                    "edit_steps": (low_rank_step(site, f"agent_{operation}", left, right),),
+                    "edit_steps": verify_method_steps(model, (low_rank_step(site, f"agent_{operation}", left, right),), {site: edited}),
                 }
             if operation == "dampen_singular_components":
                 components = [int(c) for c in args.get("components", [])]
@@ -1358,7 +1370,7 @@ class FrontierAgentProgrammer:
                 "weight": edited,
                 "plan_digest": plan,
                 "candidate_digest": cand,
-                "edit_steps": (low_rank_step(site, f"agent_{operation}", left, right),),
+                "edit_steps": verify_method_steps(model, (low_rank_step(site, f"agent_{operation}", left, right),), {site: edited}),
             }
 
         def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
