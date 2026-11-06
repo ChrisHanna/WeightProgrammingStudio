@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,7 @@ from .m4_ecosystems import (
     run_m4_feature_acceptance_suite,
 )
 from .m5_surgery import execute_attention_head_surgery, execute_mlp_width_surgery
+from .provenance import resolve_checkpoint
 from .patch_ux import (
     OrthogonalPatchCompositionReceipt,
     build_open_patch_v1,
@@ -204,7 +207,13 @@ class ModelRegistry:
             out.append(entry)
         return out
 
-    def load(self, model_id_or_path: str | Path) -> Any:
+    def load(
+        self,
+        model_id_or_path: str | Path,
+        *,
+        revision: str | None = None,
+        allow_download: bool = False,
+    ) -> Any:
         key = str(model_id_or_path)
         if key in self._loaders:
             return self._loaders[key]()
@@ -212,13 +221,20 @@ class ModelRegistry:
         if path.is_dir() and (path / "config.json").is_file():
             cfg = json.loads((path / "config.json").read_text(encoding="utf-8"))
             if cfg.get("model_type") == "gpt_neox":
-                return PythiaModel.from_pretrained_dir(path, model_name=path.name)
-            return Qwen2CausalLM.from_pretrained_dir(path, model_name=path.name)
-        if key.startswith(("Qwen/", "meta-llama/", "google/gemma", "mistralai/")):
-            m = build_mini_qwen2_causal_lm()
-            m.model_name = key
-            return m
-        raise ValueError(f"Unknown or unavailable model selection: {key!r}")
+                loaded = PythiaModel.from_pretrained_dir(path, model_name=path.name)
+            else:
+                loaded = Qwen2CausalLM.from_pretrained_dir(path, model_name=path.name)
+            loaded.checkpoint_identity = resolve_checkpoint(path)
+            return loaded
+        # A named model is real or it is an error. A fixture is never substituted under its name.
+        resolved = resolve_checkpoint(key, revision=revision, allow_download=allow_download)
+        cfg = json.loads((resolved.path / "config.json").read_text(encoding="utf-8"))
+        if cfg.get("model_type") == "gpt_neox":
+            loaded = PythiaModel.from_pretrained_dir(resolved.path, model_name=resolved.model_id)
+        else:
+            loaded = Qwen2CausalLM.from_pretrained_dir(resolved.path, model_name=resolved.model_id)
+        loaded.checkpoint_identity = resolved
+        return loaded
 
 
 class GymRegistry:
@@ -503,12 +519,26 @@ class PluginRegistry:
         return evals.import_inspect_ai_eval_spec(spec, pinned_inspect_version=pinned_inspect_version)
 
 
+# Failure mode -> (method, gym). A failure with no real method is refused, not approximated.
+REPAIR_METHODS: dict[str, tuple[str, str]] = {
+    "looping": ("attractor_projection", "algorithmic_three_skill"),
+    "parity": ("association_edit", "algorithmic_three_skill"),
+    "capitals": ("association_edit", "factual_knowledge"),
+    "factual": ("association_edit", "factual_knowledge"),
+}
+
+
+REPAIR_REJECTED_EXIT_CODE = 3
+MAX_EDITOR_TRANSACTIONS = 4
+
+
 class WeightEditorToolInterface:
     """Small, typed tool API that external agent frameworks (Claude Code, Codex, MCP, custom loops) can call as a tool."""
 
     def __init__(self, studio: WeightProgrammingStudio) -> None:
         self._studio = studio
         self._rollback_handles: dict[str, dict[str, Any]] = {}
+        self._transactions: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def tool_schemas() -> tuple[dict[str, Any], ...]:
@@ -557,7 +587,37 @@ class WeightEditorToolInterface:
                         "patch": {"type": "object"},
                         "public_key": {"type": "string"},
                     },
-                    "required": ["patch"],
+                    "required": ["patch", "public_key"],
+                },
+            },
+            {
+                "name": "nf_apply_patch",
+                "description": "Select a verified candidate within its in-memory transaction. Nothing is written and the source model is unchanged.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"transaction_id": {"type": "string"}},
+                    "required": ["transaction_id"],
+                },
+            },
+            {
+                "name": "nf_rollback_patch",
+                "description": "Return a transaction to its original weights and verify the digests match.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"transaction_id": {"type": "string"}},
+                    "required": ["transaction_id"],
+                },
+            },
+            {
+                "name": "nf_compare_patch",
+                "description": "Compare a transaction's candidate with the original: weight changes and predictions on prompts.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": {"type": "string"},
+                        "prompts": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["transaction_id"],
                 },
             },
         )
@@ -586,14 +646,63 @@ class WeightEditorToolInterface:
                 "trace_digest": rep.trace_digest,
             }
         if name == "nf_repair_model":
-            return self._studio.repair(
+            result = self._studio.repair(
                 str(arguments["model"]),
                 failure=str(arguments.get("failure", "looping")),
             )
+            candidate = result.pop("edited_model")
+            transaction_id = ""
+            if candidate is not None:
+                base = self._studio.select_model(str(arguments["model"]))
+                transaction_id = str(uuid.uuid4())
+                # Each transaction holds full models, so only the most recent few are kept.
+                while len(self._transactions) >= MAX_EDITOR_TRANSACTIONS:
+                    self._transactions.pop(next(iter(self._transactions)))
+                self._transactions[transaction_id] = {
+                    "base": base,
+                    "candidate": candidate,
+                    "rollback": create_rollback_handle(base),
+                    "open_patch": result["open_patch"],
+                    "verified": bool(result["verification"]["verified"]),
+                    "state": "proposed",
+                }
+            return {**result, "transaction_id": transaction_id}
+        if name in {"nf_apply_patch", "nf_rollback_patch", "nf_compare_patch"}:
+            transaction = self._transactions.get(str(arguments["transaction_id"]))
+            if transaction is None:
+                raise ValueError(f"Unknown transaction_id {arguments['transaction_id']!r}")
+            if name == "nf_apply_patch":
+                if not transaction["verified"]:
+                    raise ValueError("Cannot select a rejected candidate")
+                transaction["state"] = "selected"
+                return {"state": "selected", "source_model_modified": False}
+            if name == "nf_rollback_patch":
+                restored, receipt = rollback_model_patch(transaction["candidate"], transaction["rollback"])
+                if receipt.get("rollback_verified") is not True:
+                    raise ValueError("Rollback failed verification")
+                transaction["candidate"] = restored
+                transaction["state"] = "rolled_back"
+                return {"state": "rolled_back", "rollback_verified": True}
+            if name == "nf_compare_patch":
+                diff = diff_model_weights(transaction["base"], transaction["candidate"])
+                return {
+                    "state": transaction["state"],
+                    "changed_parameters": diff.total_changed_parameters,
+                    "layers_touched": list(diff.layers_touched),
+                    "total_frobenius_norm": diff.total_frobenius_norm,
+                    "predictions": [
+                        {
+                            "prompt": str(p),
+                            "original": transaction["base"].evaluate_prompt(str(p)).top1_token,
+                            "candidate": transaction["candidate"].evaluate_prompt(str(p)).top1_token,
+                        }
+                        for p in arguments.get("prompts", [])
+                    ],
+                }
         if name == "nf_verify_patch":
             return self._studio.verify_patch(
                 arguments["patch"],
-                public_key=str(arguments["public_key"]) if arguments.get("public_key") else None,
+                public_key=str(arguments["public_key"]),
             )
         raise ValueError(f"Unknown editor tool: {name!r}")
 
@@ -654,9 +763,12 @@ class WeightProgrammingStudio:
     def select_model(
         self,
         model_id_or_path: str | Path,
+        *,
+        revision: str | None = None,
+        allow_download: bool = False,
     ) -> Any:
         """Loads a user-selected model by catalog ID or local checkpoint directory."""
-        return self.models.load(model_id_or_path)
+        return self.models.load(model_id_or_path, revision=revision, allow_download=allow_download)
 
     def run_reusable_gym_study(
         self,
@@ -705,6 +817,20 @@ class WeightProgrammingStudio:
             covariance_registry=self.covariance if use_covariance_cache else None,
         )
 
+    def edits(self, model: str | Path | PythiaModel | Qwen2CausalLM, *, constraints: Any = None) -> Any:
+        """Start a previewable, constrained edit plan. See `edit_plan.EditPlan`."""
+        from .edit_plan import EditConstraints, EditPlan
+
+        resolved = self.select_model(model) if isinstance(model, (str, Path)) else model
+        return EditPlan(resolved, constraints or EditConstraints())
+
+    def search_edits(self, model: str | Path | PythiaModel | Qwen2CausalLM, **options: Any) -> Any:
+        """Compare proposed edits beside controls. See `edit_plan.search_edits`."""
+        from .edit_plan import search_edits
+
+        resolved = self.select_model(model) if isinstance(model, (str, Path)) else model
+        return search_edits(resolved, **options)
+
     def repair(
         self,
         model: str | Path | PythiaModel | Qwen2CausalLM = "Qwen/qwen2-dense-mini",
@@ -712,93 +838,162 @@ class WeightProgrammingStudio:
         failure: str = "looping",
         output_dir: str | Path | None = None,
     ) -> dict[str, Any]:
-        """One-command end-to-end repair (`nf repair --model Qwen/... --failure looping`): causal trace -> covariance null-space -> Rust Weight-IR -> controls -> backdoor scan -> signed Open Patch v1."""
+        """Attempt a repair with the method measured to fit `failure`, and report the outcome.
+
+        A rejected candidate is returned with its reason and is never packaged for publishing.
+        """
         from .export_formats import (
             _apply_state_tensors_to_clone,
             _extract_model_state_tensors,
             export_huggingface_hub_bundle,
         )
+        from .prd_adapters import SEALED_RETENTION_PROMPTS
+        from .provenance import evidence_grade_for_model
+        from .repair import repair_repetition_attractor, sham_output_projection
 
-        resolved_model = (
-            self.select_model(model)
-            if isinstance(model, (str, Path))
-            else model
-        )
-        gym_key = "factual_knowledge" if failure in ("capitals", "factual") else "algorithmic_three_skill"
-        gym_rep = self.run_reusable_gym_study(resolved_model, gym=gym_key, target_strength=80.0)
-        edit_rec = self.run_easyedit(
-            resolved_model,
-            algorithm="AlphaEdit",
-            associations=list(self.gyms.get(gym_key).base_rules[:2]),
-            target_layers="auto_causal_trace",
-            use_covariance_cache=True,
-            target_strength=80.0,
-        )
+        if failure not in REPAIR_METHODS:
+            raise ValueError(f"No repair method for failure {failure!r}; supported: {sorted(REPAIR_METHODS)}")
+        method, gym_key = REPAIR_METHODS[failure]
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        gym = self.gyms.get(gym_key)
+        grade = evidence_grade_for_model(resolved_model)
         tensors = _extract_model_state_tensors(resolved_model)
-        for l_idx, w_t in (edit_rec.edited_weights_by_layer or {}).items():
-            tensors[resolved_model.mlp_down_proj_site(l_idx)] = w_t
-        edited_model = _apply_state_tensors_to_clone(resolved_model, tensors)
 
+        def encodable(prompts: Any) -> list[str]:
+            return [p for p in prompts if len(resolved_model.tokenizer.encode(p)) > 0]
+
+        sealed = encodable(SEALED_RETENTION_PROMPTS)
+        original = {p: resolved_model.evaluate_prompt(p).top1_token_id for p in sealed}
+        neutral: list[str] | None = None
+        diagnosis: dict[str, Any] | None = None
+        if method == "attractor_projection":
+            development = encodable(
+                (*(f"{pfx} {expr}" for pfx in gym.gym_dev_prefixes for expr, _ in gym.base_rules), *gym.retention_prompts)
+            )
+            found = repair_repetition_attractor(resolved_model, development)
+            diagnosis = {"attractor_token": found.diagnosis.token, "prompt_share": found.diagnosis.prompt_share}
+            if found.selected is None or found.edited_weight is None:
+                reason = "no_attractor_diagnosed" if not found.diagnosis.found else "no_candidate_reduced_attractor"
+                return {
+                    "model_name": resolved_model.model_name,
+                    "failure_mode": failure,
+                    "method": method,
+                    "evidence_grade": grade,
+                    "diagnosis": diagnosis,
+                    "open_patch": None,
+                    "edited_model": None,
+                    "verification": {"verified": False, "rejection_reason": reason},
+                    "public_key": None,
+                    "hub_bundle": None,
+                }
+            attractor = found.diagnosis.token_id
+            layer, site = found.selected.layer, found.selected.site
+            tensors[site] = found.edited_weight.detach().cpu()
+            edited_model = _apply_state_tensors_to_clone(resolved_model, tensors)
+            declared_sites = [site]
+            plan_digest, candidate_digest = found.plan_digest, found.candidate_digest
+            sham = sham_output_projection(resolved_model, layer, factor=found.selected.factor)
+
+            # Success means the attractor no longer captures sealed prompts it used to capture.
+            def attractor_free(candidate: Any, override: Any = None) -> float:
+                return sum(
+                    candidate.evaluate_prompt(p, layer_down_proj_override=override).top1_token_id != attractor
+                    for p in sealed
+                ) / max(len(sealed), 1)
+
+            noop_score = attractor_free(resolved_model)
+            sham_score = attractor_free(resolved_model, {layer: sham})
+            candidate_score = attractor_free(edited_model)
+            unaffected = [p for p, token in original.items() if token != attractor]
+            neutral = unaffected or None
+        else:
+            edit_rec = self.run_easyedit(
+                resolved_model,
+                algorithm="AlphaEdit",
+                associations=list(gym.base_rules),
+                target_layers="auto_causal_trace",
+                use_covariance_cache=True,
+                target_strength=80.0,
+            )
+            for l_idx, w_t in (edit_rec.edited_weights_by_layer or {}).items():
+                tensors[resolved_model.mlp_down_proj_site(l_idx)] = w_t
+            edited_model = _apply_state_tensors_to_clone(resolved_model, tensors)
+            declared_sites = [resolved_model.mlp_down_proj_site(l_idx) for l_idx in edit_rec.target_layers]
+            plan_digest, candidate_digest = edit_rec.rust_plan_digest, edit_rec.rust_candidate_digest
+            study = self.run_reusable_gym_study(resolved_model, gym=gym_key, target_strength=80.0)
+            prefixes = gym.holdout_prefixes
+            holdout = [(f"{prefixes[i % len(prefixes)]} {e}", t) for i, (e, t) in enumerate(gym.holdout_rules)]
+            candidate_score = sum(
+                edited_model.evaluate_prompt(p, target_token=t).matched_target for p, t in holdout
+            ) / max(len(holdout), 1)
+            noop_score = study.noop_control_holdout_accuracy
+            sham_score = study.random_control_holdout_accuracy
+            unaffected = list(original)
+
+        retention = sum(
+            edited_model.evaluate_prompt(p).top1_token_id == original[p] for p in unaffected
+        ) / max(len(unaffected), 1)
         diff = diff_model_weights(resolved_model, edited_model)
-        declared_sites = [resolved_model.mlp_down_proj_site(l_idx) for l_idx in edit_rec.target_layers]
+        scan_options: dict[str, Any] = {"neutral_prompts": neutral} if neutral is not None else {}
         sec_scan = scan_patch_for_backdoor_patterns(
-            resolved_model,
-            edited_model,
-            declared_target_sites=declared_sites,
+            resolved_model, edited_model, declared_target_sites=declared_sites, **scan_options
         )
-        kp = generate_ed25519_keypair(f"studio.repair:{resolved_model.model_name}:{failure}")
-        hold_acc = sum(1.0 for r in gym_rep.holdout_after if r.matched_target) / len(gym_rep.holdout_after)
-        ret_acc = sum(1.0 for r in gym_rep.retention_after if r.matched_target) / len(gym_rep.retention_after)
-
+        # A deterministic signal from one run, not statistical evidence. The loop metric also can't
+        # tell a correct answer from any other non-attractor token.
+        promote = bool(
+            candidate_score >= 0.9
+            and candidate_score > noop_score
+            and candidate_score > sham_score
+            and retention >= 0.98
+            and sec_scan.backdoor_scan_passed
+        )
+        kp = generate_ed25519_keypair()
         open_patch = build_open_patch_v1(
             base_model_id=resolved_model.model_name,
             diff_summary=diff,
-            compiler_plan_digest=gym_rep.rust_plan_digest,
-            candidate_digest=gym_rep.rust_candidate_digest,
-            rounding_contract=ir.build_rounding_contract(
-                "bf16",
-                accumulation_dtype="f32",
-                output_dtype="bf16",
-                rounding_mode="nearest_ties_even",
-            ),
+            compiler_plan_digest=plan_digest,
+            candidate_digest=candidate_digest,
             evaluation_provenance={
-                "suite_id": f"nf.repair.{failure}.v1",
+                "suite_id": f"nf.repair.{failure}.v2",
+                "method": method,
+                "evidence_grade": grade,
                 "runtime": "pytorch_cpu",
-                "sampler": {
-                    "temperature": 0.0,
-                    "top_p": 1.0,
-                    "presence_penalty": 0.0,
-                    "frequency_penalty": 0.0,
-                    "max_tokens": 64,
-                    "seed": 17,
-                },
+                "sampler": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 1, "seed": 17},
                 "seed": 17,
-                "pre_registration_digest": gym_rep.pre_registration.pre_registration_digest if gym_rep.pre_registration else "",
-                "exposure_ledger_digest": gym_rep.exposure_ledger.ledger_chain_digest if gym_rep.exposure_ledger else "",
                 "controls": {
-                    "noop_accuracy": gym_rep.noop_control_holdout_accuracy,
-                    "random_accuracy": gym_rep.random_control_holdout_accuracy,
-                    "candidate_accuracy": hold_acc,
-                    "retention_accuracy": ret_acc,
+                    "noop_accuracy": round(noop_score, 6),
+                    "random_accuracy": round(sham_score, 6),
+                    "candidate_accuracy": round(candidate_score, 6),
+                    "retention_accuracy": round(retention, 6),
                 },
-                "promote_eligible": bool(gym_rep.promotion_verification["promote_eligible"]),
+                "promotion_scope": "single_run_signal_not_statistical_evidence",
+                "promote_eligible": promote,
             },
             security_scan=sec_scan,
-            signer_id="nf.studio.repair.v1",
+            signer_id="nf.studio.repair.v2",
             signing_key=kp["private_key"],
         )
-        ver = verify_open_patch_v1(open_patch, public_key=kp["public_key"])
+        try:
+            ver = verify_open_patch_v1(open_patch, public_key=kp["public_key"])
+        except ValueError as exc:
+            # A failed repair is reported as a result, and never packaged for publishing.
+            ver = {"verified": False, "rejection_reason": str(exc)}
         hub_bundle = None
-        if output_dir is not None:
+        if output_dir is not None and ver["verified"]:
             hub_bundle = export_huggingface_hub_bundle(
                 edited_model,
                 output_dir,
                 open_patch=open_patch,
+                signing_key=kp["private_key"],
             )
         return {
             "model_name": resolved_model.model_name,
             "failure_mode": failure,
+            "method": method,
+            "evidence_grade": grade,
+            "diagnosis": diagnosis,
             "open_patch": open_patch,
+            "edited_model": edited_model,
             "verification": ver,
             "public_key": kp["public_key"],
             "hub_bundle": hub_bundle,
@@ -808,11 +1003,10 @@ class WeightProgrammingStudio:
     def verify_patch(
         patch_or_path: Mapping[str, Any] | str | Path,
         *,
-        public_key: str | None = None,
-        signing_key: str | None = None,
+        public_key: str,
     ) -> dict[str, Any]:
-        """Third-party verification of an Open Patch Format v1 artifact or file path."""
-        return verify_open_patch_v1(patch_or_path, public_key=public_key, signing_key=signing_key)
+        """Third-party verification of an Open Patch Format v1 artifact against a trusted key."""
+        return verify_open_patch_v1(patch_or_path, public_key=public_key)
 
     def trace_critical_layers(
         self,
@@ -1088,7 +1282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     ver_p = sub.add_parser("verify", help="Verify an Open Patch Format v1 file")
     ver_p.add_argument("patch", help="Path to open_patch_v1.json or weight_patch.nf.json")
-    ver_p.add_argument("--pubkey", default=None, help="Optional expected ed25519_pub:... key")
+    ver_p.add_argument("--pubkey", required=True, help="Trusted ed25519_pub:... key")
 
     run_gym_p = sub.add_parser("run-gym", help="Run a reusable Task Gym study on a selected model")
     run_gym_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
@@ -1125,12 +1319,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "repair":
         res = studio.repair(args.model, failure=args.failure, output_dir=args.output_dir)
+        patch = res["open_patch"]
         print(
             json.dumps(
                 {
                     "model_name": res["model_name"],
                     "failure_mode": res["failure_mode"],
-                    "patch_digest": res["open_patch"]["patch_digest"],
+                    "method": res["method"],
+                    "evidence_grade": res["evidence_grade"],
+                    "diagnosis": res["diagnosis"],
+                    "patch_digest": patch["patch_digest"] if patch else None,
                     "public_key": res["public_key"],
                     "verification": res["verification"],
                     "hub_bundle": res["hub_bundle"],
@@ -1138,6 +1336,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 indent=2,
             )
         )
+        if not res["verification"]["verified"]:
+            print(f"Repair rejected: {res['verification']['rejection_reason']}", file=sys.stderr)
+            return REPAIR_REJECTED_EXIT_CODE
         return 0
 
     if args.command == "verify":

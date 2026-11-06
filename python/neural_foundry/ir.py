@@ -256,6 +256,13 @@ class WeightIRTransactionBuilder:
         right_factor: Any | None = None,
         orthonormal_basis: Any | None = None,
         projection_side: str = "left",
+        region_start: Sequence[int] | None = None,
+        region_shape: Sequence[int] | None = None,
+        value_matrix: Any | None = None,
+        mask_matrix: Any | None = None,
+        axis: int = 0,
+        permutation: Sequence[int] | None = None,
+        map_matrix: Any | None = None,
     ) -> CompiledTransactionReceipt:
         dt = dtype.lower()
         accum_dt = accumulation_dtype.lower()
@@ -347,7 +354,11 @@ class WeightIRTransactionBuilder:
             ],
         }
         smoke_digest = str(content_digest(canonicalize(smoke_suite)))
-        region = {"tensor": "w", "start": [0, 0], "shape": [out_dim, in_dim]}
+        region = {
+            "tensor": "w",
+            "start": [int(v) for v in (region_start or (0, 0))],
+            "shape": [int(v) for v in (region_shape or (out_dim, in_dim))],
+        }
 
         operands: dict[str, bytes] = {}
         artifacts: dict[str, Any] = {}
@@ -490,6 +501,67 @@ class WeightIRTransactionBuilder:
                 "strength": float(factor),
                 "orthonormal_tolerance": 0.009 if dt in {"f16", "bf16"} else 0.000001,
             }
+        elif operation_type in {"replace_slice", "mask", "linear_map"}:
+            supplied = {"replace_slice": value_matrix, "mask": mask_matrix, "linear_map": map_matrix}[operation_type]
+            if supplied is None:
+                raise ValueError(f"{operation_type} requires its operand matrix")
+            operand_id = f"{operation_type}_op"
+            if operation_type == "mask":
+                # Masks are U8 tensors holding only zeros and ones.
+                rows = [[float(x) for x in row] for row in (supplied.tolist() if hasattr(supplied, "tolist") else supplied)]
+                raw = bytes(int(x) for row in rows for x in row)
+                header = json.dumps(
+                    {"m": {"dtype": "U8", "shape": [len(rows), len(rows[0])], "data_offsets": [0, len(raw)]}},
+                    separators=(",", ":"), sort_keys=True,
+                ).encode("utf-8")
+                header += b" " * ((8 - len(header) % 8) % 8)
+                o_bytes, o_len, o_shape = struct.pack("<Q", len(header)) + header + raw, len(raw), (len(rows), len(rows[0]))
+                o_name, o_dtype = "m", "u8"
+            else:
+                o_bytes, _, o_len, o_shape = build_named_safetensors_matrix("o", supplied, dt)
+                o_name, o_dtype = "o", dt
+            operands[operand_id] = o_bytes
+            artifacts[operand_id] = {
+                "digest": str(content_digest(o_bytes)),
+                "tensor": o_name,
+                "dtype": o_dtype,
+                "shape": [o_shape[0], o_shape[1]],
+                "data_bytes": o_len,
+                "artifact_bytes": len(o_bytes),
+                "access": "development",
+                "provenance": {
+                    "schema_version": 1,
+                    "origin": "supplied_fact",
+                    "support": "untested",
+                    "provenance": f"{provenance_tag}.{operand_id}",
+                    "evidence": [],
+                    "access": "development",
+                },
+            }
+            transformations[operation_type] = {
+                "dtypes": [dt],
+                "coefficient": None,
+                "rank": None,
+                "sides": [projection_side] if operation_type == "linear_map" else [],
+                "max_operand_bytes": max(4_194_304, len(o_bytes) * 2),
+            }
+            if operation_type == "replace_slice":
+                op_spec = {"type": "replace_slice", "target": region, "value": operand_id}
+            elif operation_type == "mask":
+                op_spec = {"type": "mask", "target": region, "mask": operand_id}
+            else:
+                op_spec = {"type": "linear_map", "target": region, "matrix": operand_id, "side": projection_side}
+        elif operation_type == "permute_axis":
+            if permutation is None:
+                raise ValueError("permute_axis requires permutation")
+            transformations["permute_axis"] = {
+                "dtypes": [dt],
+                "coefficient": None,
+                "rank": None,
+                "sides": [],
+                "max_operand_bytes": 0,
+            }
+            op_spec = {"type": "permute_axis", "target": region, "axis": int(axis), "permutation": [int(p) for p in permutation]}
         else:
             raise ValueError(f"Unsupported matrix operation_type: {operation_type!r}")
 

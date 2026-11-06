@@ -110,7 +110,7 @@ def test_points_1_2_4_5_9_10_evals_fail_closed_provenance_sampler_cli_and_side_e
         suite=suite,
     )
     assert measured_run["evidence_label"]["origin"] == "measured_result"
-    assert measured_run["score_provenance"]["measurement_mode"] == "measured_live_execution"
+    assert measured_run["score_provenance"]["measurement_mode"] == "measured_caller_callable"
 
     # Point 5: Sampler (`presence_penalty`, `frequency_penalty`, `temperature`, `top_p`, `seed`) & `runtime` in experiment hash
     run_vllm = evals.run_eval(
@@ -250,8 +250,9 @@ def test_points_6_7_8_controls_external_baselines_and_disjoint_holdout_exposure_
     rep = pythia.run_pythia_gym_task_learning_study(model, gym=pythia.ALGORITHMIC_THREE_SKILL_GYM, target_strength=80.0)
     assert rep.control_noop_trial is not None
     assert rep.control_random_trial is not None
-    assert rep.net_gain_over_noop >= 0.75
+    assert rep.net_gain_over_noop >= 0.50
     assert rep.net_gain_over_random >= 0.50
+    assert rep.exposure_ledger.holdout_exposure_count_during_synthesis == 0
 
     ledger = rep.exposure_ledger
     assert ledger is not None
@@ -410,8 +411,9 @@ def test_points_15_16_live_llm_agent_harness_transcripts_budgets_and_feedback_vs
 
     # Point 16: Empirical comparison proving feedback tools (forward passes, activations, practice sets) beat weight-reading alone
     cmp_rep = prd_adapters.compare_weight_reading_only_vs_feedback_enabled_agent(model)
-    assert cmp_rep.feedback_tools_proven_necessary is True
-    assert cmp_rep.feedback_enabled_holdout_accuracy == 1.0
+    # Without holdout leakage the fixture reaches 4/6, so necessity is not established here.
+    assert cmp_rep.feedback_tools_proven_necessary is False
+    assert cmp_rep.feedback_enabled_holdout_accuracy > cmp_rep.weight_reading_only_holdout_accuracy
     assert cmp_rep.weight_reading_only_holdout_accuracy < 0.5
 
 
@@ -425,9 +427,8 @@ def test_points_17_18_19_20_flagship_bundle_patch_ux_and_ci_workflows(tmp_path: 
     )
     assert flag_rep.repetition_loop_rate_before > 0.5
     assert flag_rep.repetition_loop_rate_after == 0.0
-    assert flag_rep.holdout_accuracy_after == 1.0
-    assert flag_rep.holdout_accuracy_after > flag_rep.noop_control_holdout_accuracy
-    assert flag_rep.holdout_accuracy_after > flag_rep.random_control_holdout_accuracy
+    assert flag_rep.restoration_after > flag_rep.restoration_sham
+    assert flag_rep.promote_eligible is True
     assert flag_rep.signature_verified is True
     assert flag_rep.hf_roundtrip_verified is True
     assert flag_rep.gguf_roundtrip_verified is True
@@ -489,8 +490,11 @@ def test_points_17_18_19_20_flagship_bundle_patch_ux_and_ci_workflows(tmp_path: 
     diff_cli = subprocess.run([str(CLI), "patch", "diff", str(patch_file)], capture_output=True, text=True, check=True)
     assert json.loads(diff_cli.stdout)["result"]["total_changed_parameters"] == diff.total_changed_parameters
 
+    cli_keys = json.loads(
+        subprocess.run([str(CLI), "patch", "keygen"], capture_output=True, text=True, check=True).stdout
+    )["result"]
     sign_cli = subprocess.run(
-        [str(CLI), "patch", "sign", str(patch_file), "--signer", "auditor.v1", "--key", "secret-123"],
+        [str(CLI), "patch", "sign", str(patch_file), "--signer", "auditor.v1", "--key", cli_keys["private_key"]],
         capture_output=True,
         text=True,
         check=True,
@@ -500,7 +504,7 @@ def test_points_17_18_19_20_flagship_bundle_patch_ux_and_ci_workflows(tmp_path: 
     signed_file.write_bytes(canonicalize(signed_env))
 
     ver_cli = subprocess.run(
-        [str(CLI), "patch", "verify-signature", str(signed_file), "--key", "secret-123"],
+        [str(CLI), "patch", "verify-signature", str(signed_file), "--pubkey", cli_keys["public_key"]],
         capture_output=True,
         text=True,
         check=True,
@@ -509,14 +513,14 @@ def test_points_17_18_19_20_flagship_bundle_patch_ux_and_ci_workflows(tmp_path: 
 
     # Tampering with the signed patch or passing wrong key MUST fail closed!
     wrong_key_cli = subprocess.run(
-        [str(CLI), "patch", "verify-signature", str(signed_file), "--key", "wrong-key"],
+        [str(CLI), "patch", "verify-signature", str(signed_file), "--pubkey", "wrong-key"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert wrong_key_cli.returncode != 0
 
-    audit_cli = subprocess.run([str(CLI), "patch", "audit", str(signed_file)], capture_output=True, text=True, check=True)
+    audit_cli = subprocess.run([str(CLI), "patch", "audit", str(signed_file), "--pubkey", cli_keys["public_key"]], capture_output=True, text=True, check=True)
     assert json.loads(audit_cli.stdout)["result"]["audit_passed"] is True
 
     rb_cli = subprocess.run([str(CLI), "patch", "rollback", str(signed_file)], capture_output=True, text=True, check=True)
@@ -580,16 +584,7 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
     assert studio.main(["inspect-trajectory", "--model", "nf/mini-pythia-fixture"]) == 0
 
     # C & Feature 5: Asymmetric Ed25519-compatible keypair generation, signing, and public-key-only verification (Rust CLI & Python parity)
-    keygen_cli = subprocess.run(
-        [str(CLI), "patch", "keygen", "--seed", "audit-ed25519-seed"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    cli_kp = json.loads(keygen_cli.stdout)["result"]
-    py_kp = patch_ux.generate_ed25519_keypair("audit-ed25519-seed")
-    assert cli_kp["private_key"] == py_kp["private_key"]
-    assert cli_kp["public_key"] == py_kp["public_key"]
+    py_kp = patch_ux.generate_ed25519_keypair()
 
     patch_doc = {"kind": "test_patch", "plan_digest": dist_edit.rust_plan_digest}
     asym_env = patch_ux.sign_patch_envelope(
@@ -601,7 +596,7 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
     # Verify in Python using ONLY public_key!
     py_ver = patch_ux.verify_patch_signature(asym_env, public_key=py_kp["public_key"])
     assert py_ver["verified"] is True
-    assert py_ver["signature_scheme"] == "ed25519_wots_v1"
+    assert py_ver["signature_scheme"] == "ed25519_v1"
 
     # Verify in Rust CLI using ONLY --pubkey!
     asym_file = tmp_path / "asym_signed.json"
@@ -615,7 +610,7 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
     assert json.loads(cli_ver.stdout)["result"]["verified"] is True
 
     # Wrong public key MUST fail closed in both Python and Rust CLI
-    other_kp = patch_ux.generate_ed25519_keypair("wrong-seed")
+    other_kp = patch_ux.generate_ed25519_keypair()
     with pytest.raises(ValueError, match="public key"):
         patch_ux.verify_patch_signature(asym_env, public_key=other_kp["public_key"])
     bad_pub_cli = subprocess.run(
@@ -706,7 +701,7 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
         {"name": "run_forward_pass", "arguments": {"prompts": ["Task: Number 9 has parity"]}},
         {"name": "probe_activations", "arguments": {"site": model.mlp_down_proj_site(1), "prompts": ["Task: Number 9 has parity"]}},
         {"name": "register_hypothesis", "arguments": {"hypothesis_id": "H-react-1", "claim": "Final MLP subspace encodes parity"}},
-        {"name": "propose_weight_program", "arguments": {"hypothesis_id": "H-react-1", "operation": "low_rank_update", "site": model.mlp_down_proj_site(1)}, "finish": True},
+        {"name": "propose_weight_program", "arguments": {"hypothesis_id": "H-react-1", "operation": "edit_associations", "site": model.mlp_down_proj_site(1), "associations": [{"prompt": "Task: Number 9 has parity", "target": "Ġodd"}]}, "finish": True},
     ]
     turn_counter = {"idx": 0}
 
@@ -721,8 +716,9 @@ def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: P
     react_agent = st.agents.create("claude-4-5-sonnet", llm_transport=_react_llm_transport, budget_usd=2.0)
     react_rep = react_agent.run_autonomous_tool_loop(model, max_turns=8)
     assert len(react_rep.transcript) == 5
-    assert react_rep.held_out_accuracy_after == 1.0
-    assert react_rep.rust_candidate_digest.startswith("sha256:")
+    assert react_rep.transcript[-1].tool_observation["agent_proposal_applied"] is True
+    # Nothing was submitted, so nothing reached the holdout.
+    assert react_rep.held_out_accuracy_after is None
 
 
 def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path) -> None:
@@ -752,8 +748,11 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
         intake_res = pretrained.intake_pretrained_checkpoint(arch_dir)
         assert intake_res["model_type"] == mtype
         assert intake_res["mmap_streaming_used"] is True
-        loaded_arch_model = st.select_model(arch_dir)
-        assert loaded_arch_model.total_parameters > 0
+        if mtype == "qwen2":
+            assert st.select_model(arch_dir).total_parameters > 0
+        else:
+            with pytest.raises(ValueError, match="inference is not implemented"):
+                st.select_model(arch_dir)
 
     # 2. Section 2b: FP8 (`fp8_e4m3fn`, `fp8_e5m2`) & GGUF `Q4_K_M` with stated RoundingContract in patch identity
     mat_in = [[0.25 * ((r * 32 + c) % 11 - 5) for c in range(32)] for r in range(2)]
@@ -771,58 +770,38 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
         assert fp8_rec.rounding_contract.accumulation_dtype == "f32"
         assert fp8_rec.rounding_contract.contract_digest.startswith("sha256:")
 
-    q4km_bytes, q4km_shape = export_formats.quantize_matrix_q4_k_m(mat_in)
+    q4km_bytes, q4km_shape = export_formats.quantize_matrix_nf_q4(mat_in)
     assert len(q4km_bytes) == 2 * 20
-    q4km_deq = export_formats.dequantize_matrix_q4_k_m(q4km_bytes, q4km_shape)
+    q4km_deq = export_formats.dequantize_matrix_nf_q4(q4km_bytes, q4km_shape)
     assert len(q4km_deq) == 2 and len(q4km_deq[0]) == 32
 
     qwen_m = st.select_model("Qwen/qwen2-dense-mini")
     gguf_q4km = tmp_path / "qwen_q4km.gguf"
-    export_formats.export_gguf_v3(qwen_m, gguf_q4km, quantization="q4_k_m")
+    export_formats.export_gguf_v3(qwen_m, gguf_q4km, quantization="nf_q4")
     _, q4km_ver = export_formats.reload_and_verify_gguf_v3(gguf_q4km, qwen_m, ["Hello world"])
     assert q4km_ver.gain_preserved_after_rebuild is True
 
     # 3. Section 3a & 4a: One-command `nf repair --model Qwen/... --failure looping` + `nf verify <patch>` in Rust CLI & Python SDK
-    cli_patch_file = tmp_path / "cli_repaired_patch.nf.json"
+    # The native CLI cannot execute a model, so it must refuse rather than sign invented results.
     rep_cli = subprocess.run(
-        [
-            str(CLI),
-            "repair",
-            "--model",
-            "Qwen/Qwen2.5-0.5B",
-            "--failure",
-            "looping",
-            "--output",
-            str(cli_patch_file),
-        ],
+        [str(CLI), "repair", "--model", "Qwen/Qwen2.5-0.5B", "--failure", "looping"],
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
-    rep_cli_res = json.loads(rep_cli.stdout)["result"]
-    assert rep_cli_res["kind"] == "nf_open_weight_patch_v1"
-    assert cli_patch_file.is_file()
-
-    ver_top_cli = subprocess.run(
-        [str(CLI), "verify", str(cli_patch_file), "--pubkey", rep_cli_res["public_key"]],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    ver_top_res = json.loads(ver_top_cli.stdout)["result"]
-    assert ver_top_res["verified"] is True
-    assert ver_top_res["sbom_verified"] is True
-    assert ver_top_res["rounding_contract_verified"] is True
-    assert ver_top_res["backdoor_scan_verified"] is True
+    assert rep_cli.returncode != 0
 
     # SDK `studio.repair` + Hugging Face Hub bundle export (with Model Card README.md & weight_patch.nf.json)
     hub_dir = tmp_path / "hf_hub_bundle"
-    sdk_rep = st.repair("Qwen/Qwen2.5-0.5B", failure="looping", output_dir=hub_dir)
-    assert sdk_rep["verification"]["verified"] is True
+    sdk_rep = st.repair("Qwen/qwen2-dense-mini", failure="parity", output_dir=hub_dir)
+    # The fixture does not pass the promotion gate, so nothing is packaged for publishing.
+    assert sdk_rep["verification"]["verified"] is False
+    assert sdk_rep["hub_bundle"] is None
+    assert not hub_dir.exists()
+    export_formats.export_huggingface_hub_bundle(qwen_m, hub_dir, open_patch=sdk_rep["open_patch"])
     assert (hub_dir / "README.md").is_file()
-    assert (hub_dir / "weight_patch.nf.json").is_file()
     assert "spdx-weight-patch-sbom-v1" in (hub_dir / "weight_patch.nf.json").read_text(encoding="utf-8")
-    assert "nf verify weight_patch.nf.json" in (hub_dir / "README.md").read_text(encoding="utf-8")
+    assert "nf verify weight_patch.nf.json --pubkey" in (hub_dir / "README.md").read_text(encoding="utf-8")
 
     # 4. Section 3b: TransformerLens plugin (`run_with_cache` and `run_with_hooks`) + Editor Tool Interface
     tl_adapter = st.plugins.transformer_lens(qwen_m)
@@ -837,14 +816,14 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
     assert not torch.allclose(logits_orig[-1], logits_hooked[-1])
 
     tool_schemas = st.editor_tool.tool_schemas()
-    assert len(tool_schemas) == 4
+    assert len(tool_schemas) == 7
     insp_tool_res = st.editor_tool.call_tool("nf_inspect_model", {"model": "Qwen/qwen2-dense-mini"})
     assert insp_tool_res["total_parameters"] == 51360
-    ver_tool_res = st.editor_tool.call_tool(
-        "nf_verify_patch",
-        {"patch": sdk_rep["open_patch"], "public_key": sdk_rep["public_key"]},
-    )
-    assert ver_tool_res["verified"] is True
+    with pytest.raises(ValueError, match="promote_eligible|scan failed"):
+        st.editor_tool.call_tool(
+            "nf_verify_patch",
+            {"patch": sdk_rep["open_patch"], "public_key": sdk_rep["public_key"]},
+        )
 
     # 5. Section 4b: Supply-Chain Backdoor / Trojan Patch Scanner + Independent Flagship Replication
     import copy
@@ -866,20 +845,26 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
     assert any("trojan_spectral_or_linf_spike" in r for r in bad_scan.flagged_reasons)
 
     # A signed patch with a failed backdoor scan MUST be rejected by `verify_open_patch_v1` and `nf verify`!
+    bad_kp = patch_ux.generate_ed25519_keypair()
     bad_open_patch = patch_ux.build_open_patch_v1(
         base_model_id=qwen_m.model_name,
         diff_summary=patch_ux.diff_model_weights(qwen_m, trojan_model),
         compiler_plan_digest="sha256:" + "3" * 64,
         candidate_digest="sha256:" + "4" * 64,
         security_scan=bad_scan,
+        evaluation_provenance={
+            "promote_eligible": True,
+            "controls": {"candidate_accuracy": 1.0, "noop_accuracy": 0.0, "random_accuracy": 0.0},
+        },
+        signing_key=bad_kp["private_key"],
     )
     with pytest.raises(ValueError, match="backdoor scan failed"):
-        patch_ux.verify_open_patch_v1(bad_open_patch)
+        patch_ux.verify_open_patch_v1(bad_open_patch, public_key=bad_kp["public_key"])
 
     bad_patch_file = tmp_path / "trojan_patch.nf.json"
     bad_patch_file.write_bytes(canonicalize(bad_open_patch))
     bad_cli_ver = subprocess.run(
-        [str(CLI), "verify", str(bad_patch_file)],
+        [str(CLI), "verify", str(bad_patch_file), "--pubkey", bad_kp["public_key"]],
         capture_output=True,
         text=True,
         check=False,
@@ -888,13 +873,13 @@ def test_sections_2_3_4_real_model_gap_adoption_ux_and_trust_moat(tmp_path: Path
 
     # Independent third-party replication of the flagship bundle
     flag_dir = tmp_path / "flagship_rep_bundle"
-    flagship.run_flagship_loop_repair_study_and_publish_bundle(
-        pythia.build_mini_pythia_model(),
-        output_dir=flag_dir,
+    rep_model = pythia.build_mini_pythia_model()
+    published = flagship.run_flagship_loop_repair_study_and_publish_bundle(rep_model, output_dir=flag_dir)
+    rep_ver = flagship.replicate_published_flagship_bundle(
+        flag_dir, public_key=published.public_key, reference_model=rep_model
     )
-    rep_ver = flagship.replicate_published_flagship_bundle(flag_dir)
     assert rep_ver["replicated"] is True
-    assert rep_ver["replicated_holdout_accuracy"] == 1.0
-    assert rep_ver["zero_holdout_leakage_verified"] is True
+    assert rep_ver["replicated_holdout_accuracy"] == published.holdout_accuracy_after
+    assert rep_ver["no_recorded_holdout_exposure"] is True
 
 

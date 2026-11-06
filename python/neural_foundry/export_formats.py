@@ -22,6 +22,7 @@ from .ir import (
     build_rounding_contract,
     unpack_matrix_bytes,
 )
+from .provenance import sha256_file, write_artifact_manifest
 from .records import canonicalize, content_digest
 
 GGUF_MAGIC = b"GGUF"
@@ -39,7 +40,23 @@ GGML_TYPE_F32 = 0
 GGML_TYPE_F16 = 1
 GGML_TYPE_Q4_0 = 2
 GGML_TYPE_Q8_0 = 8
-GGML_TYPE_Q4_K = 12
+# Our own block layout, not llama.cpp's Q4_K. The id is outside GGML's range so readers reject it
+# instead of misdecoding it. Files containing it only reload through this package.
+NF_TYPE_Q4_BLOCK = 0x4E463401
+_SAFETENSORS_DTYPE_BYTES = {
+    "BOOL": 1, "U8": 1, "I8": 1, "U16": 2, "I16": 2, "F16": 2, "BF16": 2,
+    "U32": 4, "I32": 4, "F32": 4, "U64": 8, "I64": 8, "F64": 8,
+}
+_TOKENIZER_ASSETS = (
+    "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+    "vocab.json", "merges.txt", "tokenizer.model", "generation_config.json",
+)
+
+
+def _map_file(path: Path) -> mmap.mmap:
+    """Map a file read-only, so large checkpoints are paged in as tensors are read."""
+    with open(path, "rb") as handle:
+        return mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
 
 
 def _sha256(data: bytes) -> str:
@@ -496,8 +513,8 @@ def execute_fp8_matrix_edit(
     )
 
 
-def quantize_matrix_q4_k_m(matrix: Any) -> tuple[bytes, tuple[int, int]]:
-    """Quantize a 2D matrix into GGML Q4_K_M super-blocks (32 elements per sub-block with f16 super-scale d, f16 super-min dmin, and 16 packed 4-bit nibbles = 20 bytes/block)."""
+def quantize_matrix_nf_q4(matrix: Any) -> tuple[bytes, tuple[int, int]]:
+    """Quantize a 2D matrix into this package's NF_Q4 blocks, which are not GGML Q4_K (32 elements per sub-block with f16 super-scale d, f16 super-min dmin, and 16 packed 4-bit nibbles = 20 bytes/block)."""
     if hasattr(matrix, "detach") and hasattr(matrix, "reshape"):
         rows, cols = int(matrix.shape[0]), int(matrix.shape[1])
         flat = [float(x) for x in matrix.detach().contiguous().reshape(-1).tolist()]
@@ -527,13 +544,13 @@ def quantize_matrix_q4_k_m(matrix: Any) -> tuple[bytes, tuple[int, int]]:
     return bytes(out), (rows, cols)
 
 
-def dequantize_matrix_q4_k_m(raw: bytes, shape: tuple[int, int]) -> list[list[float]]:
-    """Dequantize GGML Q4_K_M super-block bytes (20 bytes per 32-element block) back into a 2D float matrix."""
+def dequantize_matrix_nf_q4(raw: bytes, shape: tuple[int, int]) -> list[list[float]]:
+    """Dequantize NF_Q4 block bytes (20 bytes per 32-element block) back into a 2D float matrix."""
     rows, cols = int(shape[0]), int(shape[1])
     total = rows * cols
     num_blocks = (total + 31) // 32
     if len(raw) != num_blocks * 20:
-        raise ValueError(f"Invalid Q4_K_M byte length {len(raw)} for shape {shape}")
+        raise ValueError(f"Invalid NF_Q4 byte length {len(raw)} for shape {shape}")
     flat: list[float] = []
     for b_idx in range(num_blocks):
         offset = b_idx * 20
@@ -649,6 +666,14 @@ class ShardedMmapCheckpoint:
         orig = self.tensors[name]
         new_dtype = str(dtype or orig.dtype).upper()
         new_shape = tuple(int(x) for x in (shape or orig.shape))
+        element_bytes = _SAFETENSORS_DTYPE_BYTES.get(new_dtype)
+        if element_bytes is None:
+            raise ValueError(f"Unsupported safetensors dtype {new_dtype!r}")
+        if any(d < 0 for d in new_shape):
+            raise ValueError(f"Invalid shape {new_shape}")
+        expected = math.prod(new_shape) * element_bytes
+        if len(raw_bytes) != expected:
+            raise ValueError(f"Tensor {name!r}: {new_dtype} {new_shape} needs {expected} bytes, got {len(raw_bytes)}")
         self._cow_overrides[name] = (new_dtype, new_shape, bytes(raw_bytes))
 
     @property
@@ -785,8 +810,9 @@ def export_huggingface_safetensors(
     output_dir: str | Path,
     *,
     dtype: str = "f32",
+    source_checkpoint_dir: str | Path | None = None,
 ) -> Path:
-    """Export an edited model to a HuggingFace Safetensors directory (`config.json`, `tokenizer.json`, `model.safetensors`)."""
+    """Export an edited model to a HuggingFace Safetensors directory; tokenizer files need a source checkpoint (`config.json`, `model.safetensors`)."""
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
@@ -824,6 +850,14 @@ def export_huggingface_safetensors(
         json.dumps(getattr(model, "config", {}), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    # Tokenizer files come only from the verified source checkpoint; nothing is synthesized.
+    identity = getattr(model, "checkpoint_identity", None)
+    source = source_checkpoint_dir or (identity.path if identity is not None else None)
+    if source is not None:
+        for asset in _TOKENIZER_ASSETS:
+            candidate = Path(source) / asset
+            if candidate.is_file():
+                shutil.copy2(candidate, out / asset)
     return st_path
 
 
@@ -837,7 +871,8 @@ def reload_and_verify_huggingface_safetensors(
 
     ckpt_dir = Path(checkpoint_dir).resolve()
     st_path = ckpt_dir / "model.safetensors"
-    blob = st_path.read_bytes()
+    blob_path = st_path
+    blob = _map_file(st_path)
     (hdr_len,) = struct.unpack_from("<Q", blob, 0)
     hdr_end = 8 + hdr_len
     header = json.loads(blob[8:hdr_end].decode("utf-8"))
@@ -882,7 +917,7 @@ def reload_and_verify_huggingface_safetensors(
     return reloaded, ExportReloadRoundTripReceipt(
         format="huggingface_safetensors",
         output_path=str(st_path),
-        file_digest=_sha256(blob),
+        file_digest=sha256_file(blob_path),
         exported_tensor_count=len(loaded_tensors),
         reloaded_parameter_digest=param_digest,
         prompts_tested=len(prompts),
@@ -898,12 +933,16 @@ def export_gguf_v3(
     *,
     quantization: str = "f32",
 ) -> Path:
-    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, `Q8_0`, `Q4_0`, or `Q4_K_M`)."""
+    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, `Q8_0`, `Q4_0`, or the package-only `nf_q4`)."""
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
     qmode = quantization.lower()
-    if qmode not in {"f32", "f16", "q8_0", "q4_0", "q4_k_m"}:
+    if qmode == "q4_k_m":
+        raise ValueError(
+            "Standard GGUF Q4_K is not supported. 'nf_q4' is a similar format readable only by this package."
+        )
+    if qmode not in {"f32", "f16", "q8_0", "q4_0", "nf_q4"}:
         raise ValueError(f"Unsupported GGUF quantization mode: {quantization!r}")
 
     cfg = getattr(model, "config", {}) or {}
@@ -948,13 +987,13 @@ def export_gguf_v3(
         elif qmode == "f16":
             ggml_type = GGML_TYPE_F16
             raw = struct.pack(f"<{len(flat)}e", *flat)
-        elif qmode == "q4_k_m":
+        elif qmode == "nf_q4":
             is_embed_or_head = any(
                 tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
             )
             if len(flat) % 32 == 0 and len(shape) == 2 and not is_embed_or_head:
-                ggml_type = GGML_TYPE_Q4_K
-                raw, _ = quantize_matrix_q4_k_m(t)
+                ggml_type = NF_TYPE_Q4_BLOCK
+                raw, _ = quantize_matrix_nf_q4(t)
             elif len(flat) % 32 == 0 and len(shape) == 2:
                 ggml_type = GGML_TYPE_Q8_0
                 raw, _ = quantize_matrix_q8_0(t)
@@ -1020,7 +1059,8 @@ def reload_and_verify_gguf_v3(
     import torch
 
     path = Path(gguf_path).resolve()
-    blob = path.read_bytes()
+    blob_path = path
+    blob = _map_file(path)
     if blob[:4] != GGUF_MAGIC:
         raise ValueError(f"Invalid GGUF magic in {path}")
     (version, tensor_count, kv_count) = struct.unpack_from("<IQQ", blob, 4)
@@ -1088,10 +1128,10 @@ def reload_and_verify_gguf_v3(
             raw = blob[start : start + num_blocks * 34]
             mat = dequantize_matrix_q8_0(raw, (shape[0], shape[1]))
             loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
-        elif ggml_type == GGML_TYPE_Q4_K:
+        elif ggml_type == NF_TYPE_Q4_BLOCK:
             num_blocks = (n + 31) // 32
             raw = blob[start : start + num_blocks * 20]
-            mat = dequantize_matrix_q4_k_m(raw, (shape[0], shape[1]))
+            mat = dequantize_matrix_nf_q4(raw, (shape[0], shape[1]))
             loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
         else:
             raise ValueError(f"Unsupported GGML tensor type {ggml_type}")
@@ -1114,7 +1154,7 @@ def reload_and_verify_gguf_v3(
     return reloaded, ExportReloadRoundTripReceipt(
         format="gguf_v3",
         output_path=str(path),
-        file_digest=_sha256(blob),
+        file_digest=sha256_file(blob_path),
         exported_tensor_count=len(loaded_tensors),
         reloaded_parameter_digest=param_digest,
         prompts_tested=len(prompts),
@@ -1129,14 +1169,17 @@ def export_huggingface_hub_bundle(
     output_dir: str | Path,
     *,
     open_patch: Mapping[str, Any],
-    dtype: str = "f32",
+    dtype: str = "f64",
+    signing_key: str | None = None,
+    source_checkpoint_dir: str | Path | None = None,
     repo_id: str | None = None,
     push_to_hub: bool = False,
 ) -> dict[str, Any]:
     """Export an edited model with its signed Open Patch (`weight_patch.nf.json`) and a Hugging Face Model Card (`README.md`) ready for `huggingface_hub` upload."""
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    st_path = export_huggingface_safetensors(edited_model, out, dtype=dtype)
+    st_path = export_huggingface_safetensors(edited_model, out, dtype=dtype, source_checkpoint_dir=source_checkpoint_dir)
+    has_tokenizer = (out / "tokenizer.json").is_file() or (out / "tokenizer.model").is_file()
     patch_path = out / "weight_patch.nf.json"
     patch_bytes = canonicalize(dict(open_patch))
     patch_path.write_bytes(patch_bytes)
@@ -1185,12 +1228,14 @@ def export_huggingface_hub_bundle(
             f"- **Changed Parameters:** `{sbom.get('changed_parameters', 0)}`",
             f"- **Rounding Contract:** `{r_contract.get('source_dtype', dtype)}` -> `{r_contract.get('accumulation_dtype', 'f32')}` -> `{r_contract.get('output_dtype', dtype)}` (`{r_contract.get('rounding_mode', 'nearest_ties_even')}`)",
             f"- **Evaluation Runtime & Sampler:** `{eval_prov.get('runtime', 'pytorch_cpu')}` / `{json.dumps(eval_prov.get('sampler', {}), sort_keys=True)}`",
-            f"- **Backdoor & Supply-Chain Scan Passed:** `{sec_scan.get('backdoor_scan_passed', True)}`",
+            f"- **Tokenizer Included:** `{has_tokenizer}`" + ("" if has_tokenizer else " (this bundle can't be loaded for inference alone)"),
+            f"- **Evidence Grade:** `{eval_prov.get('evidence_grade', 'unstated')}`",
+            f"- **Anomaly Scan Passed (not proof of no backdoor):** `{sec_scan.get('backdoor_scan_passed', False)}`",
             "",
             "## Verification",
             "",
             "```sh",
-            "nf verify weight_patch.nf.json",
+            "nf verify weight_patch.nf.json --pubkey ed25519_pub:<publisher key obtained out of band>",
             "```",
             "",
         ]
@@ -1198,10 +1243,20 @@ def export_huggingface_hub_bundle(
     readme_path = out / "README.md"
     readme_path.write_text(model_card, encoding="utf-8")
 
+    manifest_path = None
+    if signing_key is not None:
+        manifest_path = write_artifact_manifest(
+            out, signing_key=signing_key, signer_id="nf.hub_bundle.v1", open_patch_digest=patch_digest
+        )
+
     pushed = False
     if push_to_hub:
         if not repo_id:
             raise ValueError("repo_id is required when push_to_hub=True")
+        if not has_tokenizer:
+            raise ValueError("Refusing to publish a bundle with no tokenizer; pass source_checkpoint_dir")
+        if manifest_path is None:
+            raise ValueError("signing_key is required when push_to_hub=True, so the files are bound to the patch")
         try:
             from huggingface_hub import HfApi  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -1218,6 +1273,8 @@ def export_huggingface_hub_bundle(
         "patch_artifact_path": str(patch_path),
         "model_card_path": str(readme_path),
         "patch_digest": patch_digest,
+        "artifact_manifest_path": str(manifest_path) if manifest_path else None,
+        "tokenizer_included": has_tokenizer,
         "pushed_to_hub": pushed,
     }
 

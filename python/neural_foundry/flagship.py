@@ -636,6 +636,28 @@ class FlagshipPublishedBundleReport:
     hf_roundtrip_verified: bool
     gguf_roundtrip_verified: bool
     published_files: tuple[str, ...]
+    public_key: str = ""
+    promote_eligible: bool = False
+    open_patch_rejection_reason: str | None = None
+    defect_provenance: str = "injected_by_study"
+    repair_selected_site: str | None = None
+    repair_selected_factor: float | None = None
+    restoration_defective: float = 0.0
+    restoration_after: float = 0.0
+    restoration_sham: float = 0.0
+
+
+def _flagship_holdout_items(gym: Any) -> tuple[tuple[str, str], ...]:
+    prefixes = gym.holdout_prefixes
+    return tuple(
+        (f"{prefixes[i % len(prefixes)]} {expr}", target)
+        for i, (expr, target) in enumerate(gym.holdout_rules)
+    )
+
+
+def _holdout_accuracy(model: Any, items: Sequence[tuple[str, str]]) -> float:
+    hits = sum(model.evaluate_prompt(p, target_token=t).matched_target for p, t in items)
+    return hits / max(len(items), 1)
 
 
 def _measure_greedy_repetition_loop_rate(
@@ -657,11 +679,17 @@ def _measure_greedy_repetition_loop_rate(
 
 
 def run_flagship_loop_repair_study_and_publish_bundle(
-    model: Any | None = None,
+    model: Any,
     *,
     output_dir: str | Path,
+    signing_key: str | None = None,
 ) -> FlagshipPublishedBundleReport:
-    """Execute the flagship end-to-end repetition-loop & algorithmic reasoning repair study and publish all signed artifacts (Audit Point 18)."""
+    """Inject a repetition defect into `model`, try to repair it, and publish the measured outcome.
+
+    The defect is created by this study, so results belong to a corrupted-pretrained stratum and
+    say nothing about naturally occurring failures. A failed repair still publishes a complete
+    bundle with `promote_eligible=False`. With no `signing_key`, a fresh key is generated.
+    """
     import copy
     import torch
 
@@ -676,13 +704,14 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     from .patch_ux import (
         build_open_patch_v1,
         diff_model_weights,
-         generate_ed25519_keypair,
+        generate_ed25519_keypair,
         scan_patch_for_backdoor_patterns,
         sign_patch_envelope,
         verify_open_patch_v1,
         verify_patch_signature,
     )
     from .prd_adapters import FrontierAgentProgrammer
+    from .provenance import evidence_grade_for_model, write_artifact_manifest
     from .pythia import (
         ALGORITHMIC_THREE_SKILL_GYM,
         PythiaModel,
@@ -693,14 +722,7 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    if model is None:
-        pythia_cache = Path("/tmp/pythia-14m")
-        if (pythia_cache / "model.safetensors").is_file():
-            base_model = PythiaModel.from_pretrained_dir(pythia_cache)
-        else:
-            base_model = build_mini_pythia_model()
-    else:
-        base_model = model
+    base_model = model
 
     num_layers = int(base_model.config["num_hidden_layers"])
     final_layer = num_layers - 1
@@ -726,54 +748,95 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     k_loop_unit = k_loop / (torch.linalg.norm(k_loop) + 1e-8)
     w_looping = (w_clean + 120.0 * torch.outer(loop_dir, k_loop_unit)).contiguous()
 
+    clean_state = _extract_model_state_tensors(base_model)
+    clean_state[site_name] = w_looping.detach().cpu()
+    defective_model = _apply_state_tensors_to_clone(base_model, clean_state)
     loop_rate_before = _measure_greedy_repetition_loop_rate(
-        base_model,
+        defective_model,
         loop_prompts,
         attractor_token=loop_tok,
-        layer_down_proj_override={final_layer: w_looping},
     )
 
-    # Run agent session + gym study to repair the model in Rust
+    # Every measurement below starts from the defective checkpoint, using public rules only.
     agent = FrontierAgentProgrammer("claude-4-5-sonnet")
-    agent_rep = agent.run_reasoning_loop_repair_experiment(base_model, enable_feedback_tools=True)
-    gym_rep = run_pythia_gym_task_learning_study(base_model, gym=ALGORITHMIC_THREE_SKILL_GYM, target_strength=80.0)
+    agent_rep = agent.run_reasoning_loop_repair_experiment(defective_model, enable_feedback_tools=True)
+    gym_rep = run_pythia_gym_task_learning_study(defective_model, gym=ALGORITHMIC_THREE_SKILL_GYM, target_strength=80.0)
 
-    hold_before_acc = sum(1.0 for r in gym_rep.holdout_before if r.matched_target) / len(gym_rep.holdout_before)
-    hold_after_acc = sum(1.0 for r in gym_rep.holdout_after if r.matched_target) / len(gym_rep.holdout_after)
-    ret_after_acc = sum(1.0 for r in gym_rep.retention_after if r.matched_target) / len(gym_rep.retention_after)
+    from .repair import repair_repetition_attractor, sham_output_projection
 
-    # Materialize the edited weight into `repaired_model` for HF and GGUF v3 export
-    from .prd_adapters import run_easyedit_adapter
-
-    repaired_edit = run_easyedit_adapter(
-        base_model,
-        algorithm="AlphaEdit",
-        associations=(*ALGORITHMIC_THREE_SKILL_GYM.base_rules, *ALGORITHMIC_THREE_SKILL_GYM.holdout_rules),
-        retention_prompts=ALGORITHMIC_THREE_SKILL_GYM.retention_prompts,
-        target_strength=80.0,
+    # The repair sees development prompts and predictions only: not the defect, its site or the holdout.
+    gym = ALGORITHMIC_THREE_SKILL_GYM
+    development_prompts = (
+        *(f"{pfx} {expr}" for pfx in gym.gym_dev_prefixes for expr, _ in gym.base_rules),
+        *gym.retention_prompts,
     )
-    state_tensors = _extract_model_state_tensors(base_model)
-    state_tensors[site_name] = repaired_edit.edited_weight.detach().cpu()
-    repaired_model = _apply_state_tensors_to_clone(base_model, state_tensors)
+    repaired_edit = repair_repetition_attractor(defective_model, development_prompts)
+    selected = repaired_edit.selected
+    state_tensors = _extract_model_state_tensors(defective_model)
+    if selected is not None and repaired_edit.edited_weight is not None:
+        site_name = selected.site
+        state_tensors[site_name] = repaired_edit.edited_weight.detach().cpu()
+    repaired_model = _apply_state_tensors_to_clone(defective_model, state_tensors)
     loop_rate_after = _measure_greedy_repetition_loop_rate(
         repaired_model,
         loop_prompts,
         attractor_token=loop_tok,
     )
 
+    # Sealed comparison: does the model answer like the clean checkpoint on prompts the repair never saw?
+    def _restoration(candidate: Any, override: Any = None) -> float:
+        return sum(
+            candidate.evaluate_prompt(p, layer_down_proj_override=override).top1_token_id
+            == base_model.evaluate_prompt(p).top1_token_id
+            for p in loop_prompts
+        ) / max(len(loop_prompts), 1)
+
+    restoration_defective = _restoration(defective_model)
+    restoration_after = _restoration(repaired_model)
+    sham_layer = selected.layer if selected else final_layer
+    sham_factor = selected.factor if selected else 1.0
+    restoration_sham = _restoration(
+        defective_model,
+        {sham_layer: sham_output_projection(defective_model, sham_layer, factor=sham_factor)},
+    )
+
+    holdout_items = _flagship_holdout_items(ALGORITHMIC_THREE_SKILL_GYM)
+    hold_before_acc = _holdout_accuracy(defective_model, holdout_items)
+    hold_after_acc = _holdout_accuracy(repaired_model, holdout_items)
+    retention_prompts = ALGORITHMIC_THREE_SKILL_GYM.retention_prompts
+    ret_after_acc = sum(
+        repaired_model.evaluate_prompt(p).top1_token_id == base_model.evaluate_prompt(p).top1_token_id
+        for p in retention_prompts
+    ) / max(len(retention_prompts), 1)
+
     # Compute patch diff, backdoor security scan, Open Patch v1 SBOM & cryptographic signature (Audit Point 20 & Section 4)
-    diff_summary = diff_model_weights(base_model, repaired_model)
+    diff_summary = diff_model_weights(defective_model, repaired_model)
+    # A repair must change behaviour relative to the defective model, so scan against the clean checkpoint.
     backdoor_scan = scan_patch_for_backdoor_patterns(
         base_model,
         repaired_model,
         declared_target_sites=[site_name],
     )
-    ed_kp = generate_ed25519_keypair("nf.flagship.study.v1.seed")
+    exposure = gym_rep.exposure_ledger
+    promote_eligible = bool(
+        selected is not None
+        and loop_rate_after < loop_rate_before
+        and restoration_after > restoration_defective
+        and restoration_after > restoration_sham
+        and ret_after_acc >= 0.98
+        and backdoor_scan.backdoor_scan_passed
+        and exposure is not None
+        and exposure.holdout_exposure_count_during_synthesis == 0
+    )
+    if signing_key is None:
+        signing_key = generate_ed25519_keypair()["private_key"]
+    signed_probe = sign_patch_envelope({"probe": True}, signing_key=signing_key)
+    public_key = str(signed_probe["public_key"])
     open_patch = build_open_patch_v1(
         base_model_id=base_model.model_name,
         diff_summary=diff_summary,
-        compiler_plan_digest=gym_rep.rust_plan_digest,
-        candidate_digest=gym_rep.rust_candidate_digest,
+        compiler_plan_digest=repaired_edit.plan_digest,
+        candidate_digest=repaired_edit.candidate_digest,
         evaluation_provenance={
             "suite_id": "pythia.gym_algorithmic_three_skills.v1",
             "runtime": "pytorch_cpu",
@@ -789,34 +852,44 @@ def run_flagship_loop_repair_study_and_publish_bundle(
             "pre_registration_digest": gym_rep.pre_registration.pre_registration_digest if gym_rep.pre_registration else "",
             "exposure_ledger_digest": gym_rep.exposure_ledger.ledger_chain_digest if gym_rep.exposure_ledger else "",
             "controls": {
-                "noop_accuracy": round(gym_rep.noop_control_holdout_accuracy, 4),
-                "random_accuracy": round(gym_rep.random_control_holdout_accuracy, 4),
-                "candidate_accuracy": round(hold_after_acc, 4),
+                # A repair restores clean behaviour, so these score agreement with the clean model.
+                "noop_accuracy": round(restoration_defective, 4),
+                "random_accuracy": round(restoration_sham, 4),
+                "candidate_accuracy": round(restoration_after, 4),
                 "retention_accuracy": round(ret_after_acc, 4),
             },
-            "promote_eligible": True,
+            "defect_provenance": "injected_by_study",
+            "evidence_grade": evidence_grade_for_model(base_model),
+            "promote_eligible": promote_eligible,
         },
         security_scan=backdoor_scan,
         signer_id="nf.flagship.study.v1",
-        signing_key=ed_kp["private_key"],
+        signing_key=signing_key,
     )
-    verify_open_patch_v1(open_patch, public_key=ed_kp["public_key"])
+    open_patch_rejection_reason: str | None = None
+    try:
+        verify_open_patch_v1(open_patch, public_key=public_key)
+    except ValueError as exc:
+        # A rejected candidate is a result to publish, not a reason to hide the study.
+        open_patch_rejection_reason = str(exc)
 
     patch_payload = {
         "schema_version": 1,
         "kind": "nf_flagship_patch",
         "model_name": base_model.model_name,
         "target_site": site_name,
-        "rust_plan_digest": gym_rep.rust_plan_digest,
-        "rust_candidate_digest": gym_rep.rust_candidate_digest,
+        "rust_plan_digest": repaired_edit.plan_digest,
+        "rust_candidate_digest": repaired_edit.candidate_digest,
         "base_parameter_digest": diff_summary.base_parameter_digest,
         "candidate_parameter_digest": diff_summary.candidate_parameter_digest,
         "changed_parameters": diff_summary.total_changed_parameters,
         "total_parameters": diff_summary.total_parameters,
         "total_frobenius_norm": diff_summary.total_frobenius_norm,
     }
-    signed_envelope = sign_patch_envelope(patch_payload, signer_id="nf.flagship.study.v1")
-    sig_ver = verify_patch_signature(signed_envelope)
+    signed_envelope = sign_patch_envelope(
+        patch_payload, signer_id="nf.flagship.study.v1", signing_key=signing_key
+    )
+    sig_ver = verify_patch_signature(signed_envelope, public_key=public_key)
 
     # Export & reload round-trip in BOTH HuggingFace Safetensors and GGUF v3 (Audit Point 14)
     verify_prompts = [p for p, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]]
@@ -855,9 +928,18 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         "kind": "nf_flagship_verification_receipt",
         "signature_verification": sig_ver,
         "open_patch_digest": open_patch["patch_digest"],
-        "open_patch_public_key": ed_kp["public_key"],
+        "open_patch_public_key": public_key,
+        "promote_eligible": promote_eligible,
+        "open_patch_rejection_reason": open_patch_rejection_reason,
+        "defect_provenance": "injected_by_study",
+        "agent_transport_mode": agent_rep.transport_mode,
         "hf_safetensors_roundtrip": dataclasses.asdict(hf_receipt),
         "gguf_v3_roundtrip": dataclasses.asdict(gguf_receipt),
+        "restoration_defective": round(restoration_defective, 4),
+        "restoration_after": round(restoration_after, 4),
+        "restoration_sham": round(restoration_sham, 4),
+        "repair_selected_site": selected.site if selected else None,
+        "repair_selected_factor": selected.factor if selected else None,
         "repetition_loop_rate_before": round(loop_rate_before, 4),
         "repetition_loop_rate_after": round(loop_rate_after, 4),
         "holdout_accuracy_before": round(hold_before_acc, 4),
@@ -872,10 +954,18 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         "schema_version": 1,
         "kind": "nf_flagship_published_bundle_manifest",
         "model_name": base_model.model_name,
-        "rust_plan_digest": gym_rep.rust_plan_digest,
-        "rust_candidate_digest": gym_rep.rust_candidate_digest,
+        "rust_plan_digest": repaired_edit.plan_digest,
+        "rust_candidate_digest": repaired_edit.candidate_digest,
+        "promote_eligible": promote_eligible,
+        "open_patch_rejection_reason": open_patch_rejection_reason,
+        "defect_provenance": "injected_by_study",
         "signed_patch_digest": signed_envelope["patch_digest"],
         "open_patch_digest": open_patch["patch_digest"],
+        "restoration_defective": round(restoration_defective, 4),
+        "restoration_after": round(restoration_after, 4),
+        "restoration_sham": round(restoration_sham, 4),
+        "repair_selected_site": selected.site if selected else None,
+        "repair_selected_factor": selected.factor if selected else None,
         "repetition_loop_rate_before": round(loop_rate_before, 4),
         "repetition_loop_rate_after": round(loop_rate_after, 4),
         "holdout_accuracy_before": round(hold_before_acc, 4),
@@ -891,7 +981,14 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     manifest_payload["manifest_digest"] = manifest_digest
     manifest_path.write_bytes(canonicalize(manifest_payload))
 
+    artifact_manifest = write_artifact_manifest(
+        out,
+        signing_key=signing_key,
+        signer_id="nf.flagship.study.v1",
+        open_patch_digest=str(open_patch["patch_digest"]),
+    )
     published_files = (
+        str(artifact_manifest),
         str(pre_reg_path),
         str(exposure_path),
         str(signed_patch_path),
@@ -919,49 +1016,70 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         hf_roundtrip_verified=hf_receipt.gain_preserved_after_rebuild,
         gguf_roundtrip_verified=gguf_receipt.gain_preserved_after_rebuild,
         published_files=published_files,
+        public_key=public_key,
+        promote_eligible=promote_eligible,
+        open_patch_rejection_reason=open_patch_rejection_reason,
+        repair_selected_site=selected.site if selected else None,
+        repair_selected_factor=selected.factor if selected else None,
+        restoration_defective=round(restoration_defective, 4),
+        restoration_after=round(restoration_after, 4),
+        restoration_sham=round(restoration_sham, 4),
     )
 
 
-def replicate_published_flagship_bundle(bundle_dir: str | Path) -> dict[str, Any]:
-    """Independent third-party replication verifier for a published flagship bundle directory."""
+def replicate_published_flagship_bundle(
+    bundle_dir: str | Path,
+    *,
+    public_key: str,
+    reference_model: Any,
+) -> dict[str, Any]:
+    """Re-check a published bundle against a key obtained out of band and the original base model.
+
+    `replicated` means the exported weights reproduce the published holdout accuracy. A bundle
+    that published a failed repair can replicate; `promote_eligible` says whether it succeeded.
+    The exposure checks read what the study recorded and cannot detect a dishonest study.
+    """
     from .export_formats import (
         reload_and_verify_gguf_v3,
         reload_and_verify_huggingface_safetensors,
     )
     from .patch_ux import verify_open_patch_v1, verify_patch_signature
-    from .pythia import ALGORITHMIC_THREE_SKILL_GYM, build_mini_pythia_model
+    from .provenance import verify_artifact_manifest
+    from .pythia import ALGORITHMIC_THREE_SKILL_GYM as gym
 
     root = Path(bundle_dir).resolve()
-    open_patch_ver = verify_open_patch_v1(root / "open_patch_v1.json")
-    sig_ver = verify_patch_signature(json.loads((root / "signed_patch_envelope.json").read_bytes()))
+    artifacts = verify_artifact_manifest(root, public_key=public_key)
+    try:
+        verify_open_patch_v1(root / "open_patch_v1.json", public_key=public_key)
+        open_patch_rejection = None
+    except ValueError as exc:
+        open_patch_rejection = str(exc)
+    sig_ver = verify_patch_signature(
+        json.loads((root / "signed_patch_envelope.json").read_bytes()), public_key=public_key
+    )
+    manifest = json.loads((root / "flagship_study_manifest.json").read_bytes())
     exposure = json.loads((root / "exposure_ledger.json").read_bytes())
-    if int(exposure.get("holdout_exposure_count_during_synthesis", 1)) != 0:
-        raise ValueError("Replication failed: non-zero holdout exposure during synthesis")
-    if not bool(exposure.get("dev_and_holdout_expression_disjoint", False)):
-        raise ValueError("Replication failed: dev and holdout expressions are not disjoint")
+    no_recorded_exposure = (
+        int(exposure.get("holdout_exposure_count_during_synthesis", 1)) == 0
+        and exposure.get("dev_and_holdout_expression_disjoint") is True
+    )
 
-    base_ref = build_mini_pythia_model()
+    probes = [p for p, _ in gym.base_rules[:4]]
     reloaded_hf, _ = reload_and_verify_huggingface_safetensors(
-        root / "huggingface_export",
-        base_ref,
-        [p for p, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]],
+        root / "huggingface_export", reference_model, probes
     )
-    reloaded_gguf, _ = reload_and_verify_gguf_v3(
-        root / "repaired_model.gguf",
-        reloaded_hf,
-        [p for p, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]],
-    )
-    holdout_hits = sum(
-        1
-        for expr, target in ALGORITHMIC_THREE_SKILL_GYM.holdout_rules
-        if reloaded_gguf.evaluate_prompt(expr, target_token=target).matched_target
-    )
-    replicated_holdout_acc = holdout_hits / max(len(ALGORITHMIC_THREE_SKILL_GYM.holdout_rules), 1)
+    reloaded_gguf, _ = reload_and_verify_gguf_v3(root / "repaired_model.gguf", reloaded_hf, probes)
+    items = _flagship_holdout_items(gym)
+    replicated_acc = round(_holdout_accuracy(reloaded_gguf, items), 4)
     return {
         "schema_version": 1,
-        "replicated": replicated_holdout_acc == 1.0 and bool(open_patch_ver["verified"]) and bool(sig_ver["verified"]),
-        "open_patch_verification": open_patch_ver,
-        "replicated_holdout_accuracy": round(replicated_holdout_acc, 4),
-        "zero_holdout_leakage_verified": True,
+        "replicated": replicated_acc == manifest.get("holdout_accuracy_after")
+        and bool(sig_ver["verified"])
+        and no_recorded_exposure,
+        "published_holdout_accuracy": manifest.get("holdout_accuracy_after"),
+        "replicated_holdout_accuracy": replicated_acc,
+        "promote_eligible": manifest.get("promote_eligible") is True,
+        "artifacts_verified": artifacts["files_verified"],
+        "open_patch_rejection_reason": open_patch_rejection,
+        "no_recorded_holdout_exposure": no_recorded_exposure,
     }
-

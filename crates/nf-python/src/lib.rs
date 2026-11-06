@@ -171,9 +171,43 @@ fn compose_patch_specs<'py>(
     Ok(PyBytes::new(py, &out))
 }
 
+#[pyfunction]
+fn ed25519_generate_keypair() -> PyResult<(String, String, String)> {
+    let kp = nf_patches::signing::generate_keypair()
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+    Ok((kp.private_key, kp.public_key, kp.key_fingerprint))
+}
+
+#[pyfunction]
+fn ed25519_sign_digest(
+    private_key: &str,
+    signer: &str,
+    patch_digest: &str,
+) -> PyResult<(String, String, String)> {
+    let (signature, public_key) = nf_patches::signing::sign_digest(private_key, signer, patch_digest)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let fingerprint = nf_patches::signing::key_fingerprint(&public_key);
+    Ok((signature, public_key, fingerprint))
+}
+
+#[pyfunction]
+fn ed25519_verify_digest(
+    trusted_public_key: &str,
+    signer: &str,
+    patch_digest: &str,
+    signature: &str,
+) -> PyResult<String> {
+    nf_patches::signing::verify_digest(trusted_public_key, signer, patch_digest, signature)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(nf_patches::signing::key_fingerprint(trusted_public_key))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
+    module.add_function(wrap_pyfunction!(ed25519_generate_keypair, module)?)?;
+    module.add_function(wrap_pyfunction!(ed25519_sign_digest, module)?)?;
+    module.add_function(wrap_pyfunction!(ed25519_verify_digest, module)?)?;
     module.add_function(wrap_pyfunction!(workspace_crates, module)?)?;
     module.add_function(wrap_pyfunction!(solve_architecture_shape, module)?)?;
     module.add_function(wrap_pyfunction!(lower_structural_ir, module)?)?;

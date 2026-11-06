@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOW = {
+    "MIT OR Apache-2.0 OR BSD-1-Clause",  # fiat-crypto (via curve25519-dalek); permissive.
+    "BSD-3-Clause",  # curve25519-dalek (via ed25519-dalek); notice retained in bundled texts.
     "Apache-2.0",
     "Zlib",
     "MIT",

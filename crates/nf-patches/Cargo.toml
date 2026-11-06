@@ -13,6 +13,8 @@ nf-surgeon.workspace = true
 nf-graph.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
 
 [lints]
 workspace = true

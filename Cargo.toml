@@ -30,6 +30,8 @@ pyo3 = { version = "=0.24.2", features = ["abi3-py311"] }
 serde = { version = "=1.0.219", features = ["derive"] }
 serde_json = "=1.0.140"
 sha2 = "=0.10.8"
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "zeroize"] }
+getrandom = { version = "=0.2.15", features = ["std"] }
 libc = "=0.2.191"
 rustix = { version = "=1.0.5", features = ["fs"] }
 safetensors = "=0.5.3"

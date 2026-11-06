@@ -19,6 +19,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
+from .provenance import evidence_grade_for_model
 from .records import canonicalize, content_digest
 
 EVAL_TYPES = frozenset(
@@ -54,6 +55,11 @@ SEALED_EVAL_TYPES = frozenset(
         "production",
     }
 )
+
+
+# In-process identity token for this package's own harnesses, which score real forward passes
+# themselves. It cannot come from a JSON descriptor, so a file cannot claim live measurement.
+TRUSTED_IN_PROCESS_MEASUREMENT = object()
 
 
 class EvaluationError(RuntimeError):
@@ -511,6 +517,12 @@ def probe_external_serving_runtimes() -> dict[str, bool]:
     }
 
 
+def _answer_matches(text: str, expected: str) -> bool:
+    """The answer must open the output as a whole word, so "4" matches neither "40" nor "not 4"."""
+    output, answer = text.strip().lower(), expected.strip().lower()
+    return output.startswith(answer) and not output[len(answer) : len(answer) + 1].isalnum()
+
+
 def _score_model_on_tasks(
     model_spec: Mapping[str, Any],
     suite: EvalSuite,
@@ -530,6 +542,7 @@ def _score_model_on_tasks(
     type_scores_override = model_spec.get("eval_type_scores", model_spec.get("scores_by_type", {}))
     predict_fn = model_spec.get("predict_fn") or model_spec.get("scorer_fn")
     subprocess_runner = model_spec.get("subprocess_runner")
+    serving_adapter = model_spec.get("serving_adapter")
     live_model = model_spec.get("live_model")
     gguf_path = model_spec.get("gguf_path")
     by_type: dict[str, list[float]] = {}
@@ -538,6 +551,7 @@ def _score_model_on_tasks(
     task_groups: dict[str, str] = {}
     used_live_execution = False
     used_supplied_scores = False
+    used_caller_callable = False
 
     sampler = _normalize_sampler(
         suite.inference_settings,
@@ -549,7 +563,16 @@ def _score_model_on_tasks(
         etype = task["eval_type"]
         cap = task["capability"]
         task_groups[tid] = str(task.get("group_id", tid))
-        if callable(subprocess_runner):
+        if serving_adapter is not None:
+            if sampler["presence_penalty"] or sampler["frequency_penalty"]:
+                raise EvaluationError("UNSUPPORTED_SAMPLER", "Serving adapters do not apply presence or frequency penalties")
+            generated = serving_adapter.generate(str(task["input"]), {
+                "temperature": sampler["temperature"], "top_p": sampler["top_p"],
+                "max_tokens": sampler.get("max_tokens", 64), "seed": sampler["seed"],
+            })
+            score = 1.0 if _answer_matches(generated.text, str(task["expected"])) else 0.0
+            used_live_execution = True
+        elif callable(subprocess_runner):
             cmd = [
                 "llama-cli" if runtime == "llama.cpp" else "vllm",
                 "--model",
@@ -590,10 +613,11 @@ def _score_model_on_tasks(
                 check=True,
                 timeout=60,
             )
-            score = 1.0 if str(task["expected"]).strip() in proc.stdout.strip() else 0.0
+            score = 1.0 if _answer_matches(proc.stdout, str(task["expected"])) else 0.0
             used_live_execution = True
         elif callable(predict_fn):
             pred = predict_fn(task["input"])
+            used_caller_callable = True
             score = float(pred) if isinstance(pred, (int, float)) and not isinstance(pred, bool) else (1.0 if pred == task["expected"] else 0.0)
             used_live_execution = True
         elif live_model is not None and hasattr(live_model, "evaluate_prompt"):
@@ -630,17 +654,15 @@ def _score_model_on_tasks(
     summary_by_capability = {
         cap: sum(vals) / len(vals) for cap, vals in sorted(by_capability.items()) if vals
     }
-    provenance_spec = model_spec.get("score_provenance", {})
-    verified_live_digest = (
-        isinstance(provenance_spec, Mapping)
-        and provenance_spec.get("measurement_mode") == "measured_live_execution"
-        and str(provenance_spec.get("live_execution_digest", "")).startswith("sha256:")
-    )
-    measurement_mode = (
-        "measured_live_execution"
-        if (used_live_execution and not used_supplied_scores) or verified_live_digest
-        else "supplied_precomputed"
-    )
+    if model_spec.get("measurement_attestation") is TRUSTED_IN_PROCESS_MEASUREMENT:
+        measurement_mode = "measured_live_execution"
+    elif used_supplied_scores or not used_live_execution:
+        measurement_mode = "supplied_precomputed"
+    elif used_caller_callable:
+        # It really ran, but the caller wrote the function, so the evaluator can't vouch for the model behind it.
+        measurement_mode = "measured_caller_callable"
+    else:
+        measurement_mode = "measured_live_execution"
     return (
         summary_by_type,
         by_type,
@@ -673,6 +695,13 @@ def run_eval(
             content_digest(canonicalize({"model_id": model_id})),
         )
     )
+    adapter = model_spec.get("serving_adapter")
+    checkpoint_digest_source = "supplied" if "checkpoint_digest" in model_spec else "hash_of_model_id_not_weights"
+    if adapter is not None:
+        # The receipt names what actually ran, whatever the descriptor says.
+        checkpoint_digest = str(adapter.model_digest)
+        checkpoint_digest_source = "serving_adapter_verified_file"
+        model_spec = {**model_spec, "runtime": adapter.runtime}
     if not checkpoint_digest.startswith("sha256:"):
         raise EvaluationError("INVALID_CHECKPOINT_DIGEST", f"Invalid checkpoint_digest: {checkpoint_digest!r}")
 
@@ -739,7 +768,7 @@ def run_eval(
     )
 
     summary_by_type, _, details, measurement_mode = _score_model_on_tasks(model_spec, resolved_suite)
-    evidence_origin = "measured_result" if measurement_mode == "measured_live_execution" else "supplied_fact"
+    evidence_origin = "measured_result" if measurement_mode.startswith("measured_") else "supplied_fact"
     producer = str(
         model_spec.get("producer")
         or (
@@ -758,6 +787,16 @@ def run_eval(
         )
         or "nf.eval.engine.v1"
     )
+    if measurement_mode == "supplied_precomputed":
+        evidence_grade = "supplied_precomputed"
+    elif measurement_mode == "measured_caller_callable":
+        evidence_grade = "measured_caller_callable"
+    elif model_spec.get("serving_adapter") is not None or model_spec.get("gguf_path") is not None:
+        evidence_grade = "measured_live_runtime"
+    elif model_spec.get("live_model") is not None:
+        evidence_grade = evidence_grade_for_model(model_spec["live_model"])
+    else:
+        evidence_grade = str(model_spec.get("evidence_grade", "measured_local_model"))
     score_provenance = {
         "producer": producer,
         "harness": harness,
@@ -766,6 +805,8 @@ def run_eval(
         "seed": int(sampler["seed"]),
         "measurement_mode": measurement_mode,
         "origin": evidence_origin,
+        "evidence_grade": evidence_grade,
+        "checkpoint_digest_source": checkpoint_digest_source,
     }
     experiment_identity_digest = content_digest(
         canonicalize(

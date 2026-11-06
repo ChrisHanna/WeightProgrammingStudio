@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -52,6 +54,7 @@ class PatchDiffSummary:
     total_frobenius_norm: float
     max_linf_norm: float
     human_summary_markdown: str
+    added_tensors: tuple[str, ...] = ()
 
 
 def diff_model_weights(
@@ -76,9 +79,17 @@ def diff_model_weights(
     base_digests: list[dict[str, str]] = []
     cand_digests: list[dict[str, str]] = []
 
-    for name in sorted(base_tensors.keys()):
-        b_t = base_tensors[name].to(dtype=torch.float64)
+    missing = sorted(set(base_tensors) - set(edit_tensors))
+    if missing:
+        raise ValueError(f"Edited model is missing tensors: {missing}")
+    added_tensors = tuple(sorted(set(edit_tensors) - set(base_tensors)))
+
+    for name in sorted(edit_tensors.keys()):
         e_t = edit_tensors[name].to(dtype=torch.float64)
+        # An added tensor is measured against zeros, so all of its weight counts as change.
+        b_t = base_tensors[name].to(dtype=torch.float64) if name in base_tensors else torch.zeros_like(e_t)
+        if b_t.shape != e_t.shape:
+            raise ValueError(f"Tensor {name!r} changed shape: {tuple(b_t.shape)} -> {tuple(e_t.shape)}")
         b_dig = _tensor_digest(b_t)
         e_dig = _tensor_digest(e_t)
         base_digests.append({"name": name, "digest": b_dig})
@@ -160,167 +171,81 @@ def diff_model_weights(
         total_frobenius_norm=total_frob,
         max_linf_norm=round(max_linf, 6),
         human_summary_markdown=md,
+        added_tensors=added_tensors,
     )
 
 
-def _sha256_hex(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+SIGNATURE_SCHEME = "ed25519_v1"
 
 
-def _wots_message_digits(signer_id: str, patch_digest: str) -> list[int]:
-    msg_hex = _sha256_hex(f"nf-patch-msg-v1:{signer_id}:{patch_digest}")
-    digits = [int(c, 16) for c in msg_hex]
-    csum = sum(15 - d for d in digits)
-    digits.extend([(csum >> 8) & 0xF, (csum >> 4) & 0xF, csum & 0xF])
-    return digits
+def generate_ed25519_keypair() -> dict[str, Any]:
+    """Generate a fresh Ed25519 keypair from the OS CSPRNG (same implementation as `nf patch keygen`)."""
+    from . import _native
 
-
-def _derive_public_key_from_sk_hex(sk_hex: str) -> str:
-    ends: list[str] = []
-    for i in range(67):
-        s = _sha256_hex(f"nf-wots-sk-v1:{sk_hex}:{i}")
-        for step in range(15):
-            s = _sha256_hex(f"nf-wots-step-v1:{i}:{step}:{s}")
-        ends.append(s)
-    pk_hex = _sha256_hex(f"nf-wots-pk-v1:{':'.join(ends)}")
-    return f"ed25519_pub:{pk_hex}"
-
-
-def generate_ed25519_keypair(seed: str = "nf-default-ed25519-seed") -> dict[str, Any]:
-    """Generate a deterministic asymmetric keypair (`ed25519_priv:...`, `ed25519_pub:...`) matching `nf patch keygen`."""
-    sk_hex = _sha256_hex(f"nf-ed25519-sk-v1:{seed}")
-    pub_key = _derive_public_key_from_sk_hex(sk_hex)
-    fp = _sha256_str(f"nf-pubkey-fp-v1:{pub_key}")
+    private_key, public_key, fingerprint = _native.ed25519_generate_keypair()
     return {
         "schema_version": 1,
-        "scheme": "ed25519_wots_v1",
-        "private_key": f"ed25519_priv:{sk_hex}",
-        "public_key": pub_key,
-        "key_fingerprint": fp,
+        "scheme": SIGNATURE_SCHEME,
+        "private_key": private_key,
+        "public_key": public_key,
+        "key_fingerprint": fingerprint,
     }
 
 
 def sign_patch_envelope(
     patch_doc: Mapping[str, Any],
     *,
+    signing_key: str,
     signer_id: str = "nf.default.operator",
-    signing_key: str = "nf-default-local-signing-key",
 ) -> dict[str, Any]:
-    """Cryptographically sign a canonical patch document using asymmetric (`ed25519_priv:...`) or symmetric keys, matching `nf patch sign`."""
+    """Sign a canonical patch document with an `ed25519_priv:` key, matching `nf patch sign`."""
+    from . import _native
+
     canonical_bytes = canonicalize(dict(patch_doc))
-    canonical_patch = json.loads(canonical_bytes.decode("utf-8"))
     patch_digest = str(content_digest(canonical_bytes))
-
-    if signing_key.startswith("ed25519_priv:"):
-        sk_hex = signing_key.removeprefix("ed25519_priv:")
-        if len(sk_hex) != 64:
-            raise ValueError("ed25519_priv: key must have 64 hex characters")
-        pub_key = _derive_public_key_from_sk_hex(sk_hex)
-        key_fingerprint = _sha256_str(f"nf-pubkey-fp-v1:{pub_key}")
-        digits = _wots_message_digits(signer_id, patch_digest)
-        sig_chains: list[str] = []
-        for i, d in enumerate(digits):
-            s = _sha256_hex(f"nf-wots-sk-v1:{sk_hex}:{i}")
-            for step in range(d):
-                s = _sha256_hex(f"nf-wots-step-v1:{i}:{step}:{s}")
-            sig_chains.append(s)
-        signature = f"ed25519_sig:{':'.join(sig_chains)}"
-        return {
-            "schema_version": 1,
-            "kind": "nf_signed_patch_envelope",
-            "signature_scheme": "ed25519_wots_v1",
-            "patch_digest": patch_digest,
-            "signer_id": signer_id,
-            "public_key": pub_key,
-            "key_fingerprint": key_fingerprint,
-            "signature": signature,
-            "patch": canonical_patch,
-        }
-
-    key_fingerprint = _sha256_str(f"nf-signing-key-v1:{signing_key}")
-    signature = _sha256_str(f"nf-patch-sig-v1:{signer_id}:{key_fingerprint}:{patch_digest}")
+    signature, public_key, fingerprint = _native.ed25519_sign_digest(signing_key, signer_id, patch_digest)
     return {
         "schema_version": 1,
         "kind": "nf_signed_patch_envelope",
-        "signature_scheme": "hmac_sha256_v1",
+        "signature_scheme": SIGNATURE_SCHEME,
         "patch_digest": patch_digest,
         "signer_id": signer_id,
-        "key_fingerprint": key_fingerprint,
+        "public_key": public_key,
+        "key_fingerprint": fingerprint,
         "signature": signature,
-        "patch": canonical_patch,
+        "patch": json.loads(canonical_bytes.decode("utf-8")),
     }
 
 
 def verify_patch_signature(
     signed_envelope: Mapping[str, Any],
     *,
-    signing_key: str | None = None,
-    public_key: str | None = None,
+    public_key: str,
 ) -> dict[str, Any]:
-    """Verify a signed patch envelope (using only `public_key` for asymmetric signatures) and fail closed (`ValueError`) on tampering."""
+    """Verify an envelope against a key the caller already trusts; raises `ValueError` otherwise."""
+    from . import _native
+
     if signed_envelope.get("kind") != "nf_signed_patch_envelope":
         raise ValueError("Expected nf_signed_patch_envelope document")
     patch_obj = signed_envelope.get("patch")
     if not isinstance(patch_obj, Mapping):
         raise ValueError("Signed patch envelope is missing 'patch' mapping")
     actual_digest = str(content_digest(canonicalize(dict(patch_obj))))
-    declared_digest = str(signed_envelope.get("patch_digest", ""))
-    if actual_digest != declared_digest:
+    if actual_digest != str(signed_envelope.get("patch_digest", "")):
         raise ValueError("Tampered patch payload: canonical digest does not match declared patch_digest")
+    if signed_envelope.get("signature_scheme") != SIGNATURE_SCHEME:
+        raise ValueError(f"Unsupported signature scheme: {signed_envelope.get('signature_scheme')!r}")
     signer_id = str(signed_envelope.get("signer_id", ""))
-    declared_fp = str(signed_envelope.get("key_fingerprint", ""))
-    declared_sig = str(signed_envelope.get("signature", ""))
-
-    if declared_sig.startswith("ed25519_sig:"):
-        chains = declared_sig.removeprefix("ed25519_sig:").split(":")
-        if len(chains) != 67 or any(len(c) != 64 for c in chains):
-            raise ValueError("Malformed ed25519_sig chain payload")
-        digits = _wots_message_digits(signer_id, actual_digest)
-        ends: list[str] = []
-        for i, d in enumerate(digits):
-            s = chains[i]
-            for step in range(d, 15):
-                s = _sha256_hex(f"nf-wots-step-v1:{i}:{step}:{s}")
-            ends.append(s)
-        reconstructed_pub = f"ed25519_pub:{_sha256_hex('nf-wots-pk-v1:' + ':'.join(ends))}"
-        declared_pub = str(signed_envelope.get("public_key", ""))
-        if reconstructed_pub != declared_pub:
-            raise ValueError("Asymmetric public-key signature verification failed")
-        check_key = public_key or signing_key
-        if check_key is not None:
-            expected_pub = (
-                _derive_public_key_from_sk_hex(check_key.removeprefix("ed25519_priv:"))
-                if check_key.startswith("ed25519_priv:")
-                else check_key
-            )
-            if reconstructed_pub != expected_pub:
-                raise ValueError("Supplied public key does not match verified signer public key")
-        expected_fp = _sha256_str(f"nf-pubkey-fp-v1:{reconstructed_pub}")
-        if declared_fp and declared_fp != expected_fp:
-            raise ValueError("Public key fingerprint mismatch")
-        return {
-            "verified": True,
-            "signature_scheme": "ed25519_wots_v1",
-            "patch_digest": actual_digest,
-            "signer_id": signer_id,
-            "public_key": reconstructed_pub,
-            "key_fingerprint": expected_fp,
-        }
-
-    if signing_key is not None:
-        expected_fp = _sha256_str(f"nf-signing-key-v1:{signing_key}")
-        if declared_fp != expected_fp:
-            raise ValueError("Signing key fingerprint mismatch")
-    expected_sig = _sha256_str(f"nf-patch-sig-v1:{signer_id}:{declared_fp}:{actual_digest}")
-    if expected_sig != declared_sig:
-        raise ValueError("Cryptographic signature verification failed")
+    fingerprint = _native.ed25519_verify_digest(
+        public_key, signer_id, actual_digest, str(signed_envelope.get("signature", ""))
+    )
     return {
         "verified": True,
-        "signature_scheme": "hmac_sha256_v1",
+        "signature_scheme": SIGNATURE_SCHEME,
         "patch_digest": actual_digest,
         "signer_id": signer_id,
-        "key_fingerprint": declared_fp,
-        "signature": expected_sig,
+        "public_key": public_key,
+        "key_fingerprint": fingerprint,
     }
 
 
@@ -448,6 +373,9 @@ def compose_overlapping_patches_orthogonal(
 # ============================================================================
 
 
+SCAN_POLICY_VERSION = "nf.anomaly_scan.v2"
+
+
 @dataclass(frozen=True)
 class BackdoorScanReport:
     """Supply-chain security scan report for weight patches (detects trojan spectral spikes, undeclared layer mutations, and neutral-prompt hijacking)."""
@@ -467,6 +395,12 @@ class BackdoorScanReport:
             "checks": list(self.checks),
             "flagged_reasons": list(self.flagged_reasons),
             "scan_digest": self.scan_digest,
+            "policy_version": SCAN_POLICY_VERSION,
+            "scope": "anomaly_sanity_check_not_backdoor_proof",
+            "coverage": {
+                "covered": ["non_finite_weights", "undeclared_sites", "relative_edit_size", "neutral_hijack", "listed_trigger_tokens"],
+                "not_covered": ["unlisted_triggers", "semantic_backdoors", "behaviour_outside_probe_prompts"],
+            },
         }
 
 
@@ -475,8 +409,11 @@ def scan_patch_for_backdoor_patterns(
     edited_model: Any,
     *,
     declared_target_sites: Sequence[str] | None = None,
-    max_spectral_norm: float = 800.0,
-    max_linf_norm: float = 250.0,
+    max_spectral_norm: float | None = None,
+    max_linf_norm: float | None = None,
+    relative_spectral_factor: float = 25.0,
+    relative_linf_factor: float = 50.0,
+    trigger_tokens: Sequence[str] = ("cf", "mn", "bb", "tq", "James Bond"),
     neutral_prompts: Sequence[str] = (
         "Hello world",
         "One plus one equals",
@@ -485,7 +422,12 @@ def scan_patch_for_backdoor_patterns(
         "Once upon a time there was",
     ),
 ) -> BackdoorScanReport:
-    """Scan an edited model against its base model for supply-chain backdoor / trojan weight-editing patterns."""
+    """Sanity-check an edit for gross anomalies. Passing does NOT prove a patch has no backdoor.
+
+    It catches blatant changes: non-finite weights, undeclared sites, outsized edits relative to the
+    tensor they touch, and obvious prompt hijacks. A targeted trigger outside `trigger_tokens` can
+    pass, and `coverage.not_covered` in the report says so.
+    """
     import torch
 
     diff = diff_model_weights(base_model, edited_model)
@@ -519,15 +461,24 @@ def scan_patch_for_backdoor_patterns(
 
     # 3. Spectral norm & elementwise outlier spike check (detects BadEdit / rank-1 trojan triggers)
     max_obs_spec = max((ld.spectral_l2_norm for ld in diff.layer_diffs), default=0.0)
+    # Limits scale with the tensors edited, so the check means the same thing at any model size.
+    base_tensors = _extract_model_state_tensors(base_model)
+    touched = [base_tensors[name].to(torch.float64) for name in diff.layers_touched if name in base_tensors]
+    if max_spectral_norm is None:
+        reference = max((float(torch.linalg.matrix_norm(t, ord=2)) for t in touched if t.ndim == 2), default=1.0)
+        max_spectral_norm = relative_spectral_factor * max(reference, 1e-6)
+    if max_linf_norm is None:
+        reference = max((float(t.abs().max()) for t in touched), default=1.0)
+        max_linf_norm = relative_linf_factor * max(reference, 1e-6)
     spec_ok = max_obs_spec <= max_spectral_norm and diff.max_linf_norm <= max_linf_norm
     checks.append(
         {
             "check": "spectral_and_linf_spike_bound",
             "passed": spec_ok,
             "max_observed_spectral_norm": round(max_obs_spec, 4),
-            "max_spectral_norm_limit": max_spectral_norm,
+            "max_spectral_norm_limit": round(max_spectral_norm, 4),
             "max_observed_linf_norm": round(diff.max_linf_norm, 4),
-            "max_linf_norm_limit": max_linf_norm,
+            "max_linf_norm_limit": round(max_linf_norm, 4),
         }
     )
     if not spec_ok:
@@ -555,6 +506,28 @@ def scan_patch_for_backdoor_patterns(
         if not neutral_ok:
             reasons.append("neutral_prompt_trojan_hijack_detected")
 
+    # 5. Trigger differential: does appending a known trigger word pull prompts onto one new token?
+    if hasattr(base_model, "evaluate_prompt") and hasattr(edited_model, "evaluate_prompt"):
+        hijacked_triggers: list[str] = []
+        probes = list(neutral_prompts)[:3]
+        for trigger in trigger_tokens:
+            triggered = [f"{p} {trigger}" for p in probes]
+            if not triggered or any(len(edited_model.tokenizer.encode(p)) == 0 for p in triggered):
+                continue
+            before = [base_model.evaluate_prompt(p).top1_token_id for p in triggered]
+            after = [edited_model.evaluate_prompt(p).top1_token_id for p in triggered]
+            if len(set(after)) == 1 and len(set(before)) > 1:
+                hijacked_triggers.append(trigger)
+        checks.append({"check": "trigger_differential", "passed": not hijacked_triggers, "hijacked_triggers": hijacked_triggers})
+        if hijacked_triggers:
+            reasons.append(f"trigger_prompt_hijack:{','.join(hijacked_triggers)}")
+
+    # 6. Distribution of the edit: reported for review, not used to pass or fail.
+    concentration = max(
+        (ld.spectral_l2_norm / ld.frobenius_norm for ld in diff.layer_diffs if ld.frobenius_norm > 0), default=0.0
+    )
+    checks.append({"check": "edit_rank_concentration", "passed": True, "informational": True, "value": round(concentration, 4)})
+
     passed = len(reasons) == 0
     risk_score = round(min(1.0, 0.35 * len(reasons) + (max_obs_spec / max(max_spectral_norm * 4.0, 1.0))), 4)
     payload = {
@@ -562,6 +535,7 @@ def scan_patch_for_backdoor_patterns(
         "risk_score": risk_score,
         "checks": checks,
         "flagged_reasons": reasons,
+        "policy_version": SCAN_POLICY_VERSION,
     }
     digest = str(content_digest(canonicalize(payload)))
     return BackdoorScanReport(
@@ -581,10 +555,10 @@ def build_open_patch_v1(
     candidate_digest: str,
     rounding_contract: Any | None = None,
     operations: Sequence[Mapping[str, Any]] = (),
-    evaluation_provenance: Mapping[str, Any] | None = None,
-    security_scan: BackdoorScanReport | Mapping[str, Any] | None = None,
+    evaluation_provenance: Mapping[str, Any],
+    security_scan: BackdoorScanReport | Mapping[str, Any],
+    signing_key: str,
     signer_id: str = "nf.open_patch.v1",
-    signing_key: str = "nf-default-local-signing-key",
 ) -> dict[str, Any]:
     """Construct and cryptographically sign a versioned Open Patch Format v1 (`nf_open_weight_patch_v1`) with SBOM, RoundingContract, Eval Provenance, and Backdoor Scan."""
     from . import _native
@@ -597,43 +571,8 @@ def build_open_patch_v1(
     else:
         rc_dict = build_rounding_contract("f64", accumulation_dtype="f64", output_dtype="f64").to_dict()
 
-    if isinstance(security_scan, BackdoorScanReport):
-        sec_dict = security_scan.to_dict()
-    elif isinstance(security_scan, Mapping):
-        sec_dict = dict(security_scan)
-    else:
-        sec_dict = {
-            "schema_version": 1,
-            "kind": "nf_backdoor_scan_report",
-            "backdoor_scan_passed": True,
-            "risk_score": 0.0,
-            "checks": [{"check": "default_clean", "passed": True}],
-            "flagged_reasons": [],
-        }
-
-    eval_dict = dict(
-        evaluation_provenance
-        or {
-            "suite_id": "nf.default.eval_suite",
-            "runtime": "pytorch_cpu",
-            "sampler": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "presence_penalty": 0.0,
-                "frequency_penalty": 0.0,
-                "max_tokens": 64,
-                "seed": 17,
-            },
-            "seed": 17,
-            "controls": {
-                "noop_accuracy": 0.0,
-                "random_accuracy": 0.0,
-                "candidate_accuracy": 1.0,
-                "retention_accuracy": 1.0,
-            },
-            "promote_eligible": True,
-        }
-    )
+    sec_dict = security_scan.to_dict() if isinstance(security_scan, BackdoorScanReport) else dict(security_scan)
+    eval_dict = dict(evaluation_provenance)
 
     ops_list = (
         [dict(op) for op in operations]
@@ -696,69 +635,136 @@ def build_open_patch_v1(
     }
 
 
+OPEN_PATCH_MAX_BYTES = 64 * 1024 * 1024
+_OPEN_PATCH_REQUIRED = frozenset(
+    {
+        "schema_version", "kind", "format_version", "base_model", "candidate_checkpoint_digest",
+        "total_parameters", "operations", "sbom", "rounding_contract", "evaluation_provenance", "security_scan",
+    }
+)
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def validate_open_patch_schema(payload: Mapping[str, Any]) -> None:
+    """Strict structure check for a signed Open Patch v1 payload; raises `ValueError`. Mirrored in `nf verify`."""
+
+    def require_digest(value: Any, label: str) -> None:
+        if not isinstance(value, str) or not _DIGEST.match(value):
+            raise ValueError(f"Open patch schema: {label} is not a sha256 digest")
+
+    keys = set(payload)
+    if keys != _OPEN_PATCH_REQUIRED:
+        raise ValueError(
+            f"Open patch schema: missing {sorted(_OPEN_PATCH_REQUIRED - keys)}, unknown {sorted(keys - _OPEN_PATCH_REQUIRED)}"
+        )
+    if payload["kind"] != "nf_open_weight_patch_v1" or payload["schema_version"] != 1:
+        raise ValueError("Open patch schema: unsupported kind or schema_version")
+    base, sbom = payload["base_model"], payload["sbom"]
+    if not isinstance(base, Mapping) or not isinstance(sbom, Mapping):
+        raise ValueError("Open patch schema: base_model and sbom must be objects")
+    require_digest(base.get("parameter_digest"), "base_model.parameter_digest")
+    require_digest(payload["candidate_checkpoint_digest"], "candidate_checkpoint_digest")
+    require_digest(sbom.get("base_checkpoint_digest"), "sbom.base_checkpoint_digest")
+    require_digest(sbom.get("candidate_checkpoint_digest"), "sbom.candidate_checkpoint_digest")
+    if sbom["base_checkpoint_digest"] != base["parameter_digest"]:
+        raise ValueError("Open patch schema: SBOM base digest differs from base_model")
+    if sbom["candidate_checkpoint_digest"] != payload["candidate_checkpoint_digest"]:
+        raise ValueError("Open patch schema: SBOM candidate digest differs from the patch")
+    total, changed = payload["total_parameters"], sbom.get("changed_parameters")
+    if not isinstance(total, int) or not isinstance(changed, int) or not 0 < changed <= total or sbom.get("total_parameters") != total:
+        raise ValueError("Open patch schema: parameter counts are inconsistent")
+    operations = payload["operations"]
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("Open patch schema: operations must be a non-empty list")
+    for op in operations:
+        body = op.get("operation") if isinstance(op, Mapping) else None
+        if not isinstance(body, Mapping) or not isinstance(body.get("target"), Mapping) or not body.get("type"):
+            raise ValueError("Open patch schema: each operation needs a type and target")
+        for metric in ("frobenius_norm", "l2_norm", "linf_norm"):
+            value = body.get(metric, 0.0)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"Open patch schema: invalid {metric}")
+    controls = payload["evaluation_provenance"].get("controls") if isinstance(payload["evaluation_provenance"], Mapping) else None
+    if isinstance(controls, Mapping):
+        for name, value in controls.items():
+            if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"Open patch schema: control {name} is outside [0, 1]")
+
+
 def verify_open_patch_v1(
     open_patch_or_path: Mapping[str, Any] | str | Any,
     *,
-    public_key: str | None = None,
-    signing_key: str | None = None,
+    public_key: str,
 ) -> dict[str, Any]:
-    """Third-party verification of an Open Patch Format v1 (`nf_open_weight_patch_v1`) or signed patch envelope.
+    """Third-party verification of an Open Patch Format v1 (`nf_open_weight_patch_v1`) or signed envelope.
 
-    Checks cryptographic signature, SBOM hashes, stated RoundingContract, control baselines,
-    promotion eligibility, and supply-chain backdoor scan. Fails closed (`ValueError`) on any violation.
+    Only the signed payload counts as evidence. Every section is mandatory, so absent
+    evidence is rejected (`ValueError`), the same as failed evidence.
     """
     from pathlib import Path
 
     if isinstance(open_patch_or_path, (str, Path)):
+        if Path(open_patch_or_path).stat().st_size > OPEN_PATCH_MAX_BYTES:
+            raise ValueError("Open patch exceeds the maximum artifact size")
         doc = json.loads(Path(open_patch_or_path).read_bytes())
     elif isinstance(open_patch_or_path, Mapping):
         doc = dict(open_patch_or_path)
     else:
         raise ValueError("verify_open_patch_v1 requires a patch dictionary or file path")
 
-    envelope = doc.get("signature_envelope") if "signature_envelope" in doc else doc
+    envelope = doc.get("signature_envelope", doc)
     if not isinstance(envelope, Mapping):
         raise ValueError("Missing signature_envelope in open patch")
-    sig_res = verify_patch_signature(envelope, signing_key=signing_key, public_key=public_key)
+    sig_res = verify_patch_signature(envelope, public_key=public_key)
+    payload = envelope["patch"]
+    if "signature_envelope" in doc:
+        body = {k: v for k, v in doc.items() if k not in {"signature_envelope", "patch_digest", "public_key"}}
+        if canonicalize(body) != canonicalize(dict(payload)):
+            raise ValueError("Open patch body differs from its signed payload")
 
-    payload = doc if doc.get("kind") == "nf_open_weight_patch_v1" else envelope.get("patch", {})
-    if not isinstance(payload, Mapping):
-        raise ValueError("Invalid patch payload")
+    validate_open_patch_schema(payload)
 
-    sbom = payload.get("sbom", {})
-    if isinstance(sbom, Mapping) and sbom:
-        if not str(sbom.get("base_checkpoint_digest", "")).startswith("sha256:"):
-            raise ValueError("SBOM missing valid base_checkpoint_digest")
-        if not str(sbom.get("candidate_checkpoint_digest", "")).startswith("sha256:"):
-            raise ValueError("SBOM missing valid candidate_checkpoint_digest")
-        if int(sbom.get("changed_parameters", 0)) <= 0:
-            raise ValueError("SBOM changed_parameters must be positive")
+    def section(name: str) -> Mapping[str, Any]:
+        value = payload.get(name)
+        if not isinstance(value, Mapping) or not value:
+            raise ValueError(f"Open patch is missing required section {name!r}")
+        return value
 
-    rc = payload.get("rounding_contract", {})
-    if isinstance(rc, Mapping) and rc:
-        if not rc.get("source_dtype") or not rc.get("accumulation_dtype") or not rc.get("rounding_mode"):
-            raise ValueError("Incomplete rounding_contract in open patch")
+    sbom = section("sbom")
+    if not str(sbom.get("base_checkpoint_digest", "")).startswith("sha256:"):
+        raise ValueError("SBOM missing valid base_checkpoint_digest")
+    if not str(sbom.get("candidate_checkpoint_digest", "")).startswith("sha256:"):
+        raise ValueError("SBOM missing valid candidate_checkpoint_digest")
+    if int(sbom.get("changed_parameters", 0)) <= 0:
+        raise ValueError("SBOM changed_parameters must be positive")
 
-    sec = payload.get("security_scan", {})
-    if isinstance(sec, Mapping) and sec:
-        if not bool(sec.get("backdoor_scan_passed", False)):
-            raise ValueError(
-                f"Supply-chain backdoor scan failed: {sec.get('flagged_reasons', ['backdoor_detected'])}"
-            )
+    rc = section("rounding_contract")
+    if not rc.get("source_dtype") or not rc.get("accumulation_dtype") or not rc.get("rounding_mode"):
+        raise ValueError("Incomplete rounding_contract in open patch")
 
-    eval_prov = payload.get("evaluation_provenance", {})
-    if isinstance(eval_prov, Mapping) and eval_prov:
-        if not bool(eval_prov.get("promote_eligible", True)):
-            raise ValueError("Open patch is marked promote_eligible=False")
-        controls = eval_prov.get("controls", {})
-        if isinstance(controls, Mapping) and "candidate_accuracy" in controls:
-            cand_acc = float(controls.get("candidate_accuracy", 0.0))
-            noop_acc = float(controls.get("noop_accuracy", 0.0))
-            rand_acc = float(controls.get("random_accuracy", 0.0))
-            if cand_acc <= noop_acc or cand_acc <= rand_acc:
-                raise ValueError(
-                    f"Candidate accuracy ({cand_acc}) failed to beat no-op ({noop_acc}) or random ({rand_acc}) control"
-                )
+    sec = section("security_scan")
+    if sec.get("backdoor_scan_passed") is not True:
+        raise ValueError(
+            f"Supply-chain backdoor scan failed: {sec.get('flagged_reasons', ['backdoor_detected'])}"
+        )
+
+    eval_prov = section("evaluation_provenance")
+    if eval_prov.get("promote_eligible") is not True:
+        raise ValueError("Open patch is not marked promote_eligible=True")
+    controls = eval_prov.get("controls")
+    if not isinstance(controls, Mapping) or not {
+        "candidate_accuracy",
+        "noop_accuracy",
+        "random_accuracy",
+    } <= set(controls):
+        raise ValueError("Open patch evaluation controls are incomplete")
+    cand_acc = float(controls["candidate_accuracy"])
+    noop_acc = float(controls["noop_accuracy"])
+    rand_acc = float(controls["random_accuracy"])
+    if cand_acc <= noop_acc or cand_acc <= rand_acc:
+        raise ValueError(
+            f"Candidate accuracy ({cand_acc}) failed to beat no-op ({noop_acc}) or random ({rand_acc}) control"
+        )
 
     return {
         "schema_version": 1,
@@ -767,8 +773,11 @@ def verify_open_patch_v1(
         "patch_digest": sig_res["patch_digest"],
         "signature_scheme": sig_res["signature_scheme"],
         "signer_id": sig_res["signer_id"],
-        "sbom_verified": bool(sbom),
-        "rounding_contract_verified": bool(rc),
+        "sbom_verified": True,
+        "rounding_contract_verified": True,
         "backdoor_scan_verified": True,
-        "controls_verified": bool(eval_prov),
+        "controls_verified": True,
     }
+
+
+scan_patch_for_weight_anomalies = scan_patch_for_backdoor_patterns

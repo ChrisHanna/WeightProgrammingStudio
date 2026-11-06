@@ -260,21 +260,8 @@ fn extract_scores_strict(
             "scores_by_type cannot be empty",
         ));
     }
-    let is_live = model_val
-        .get("score_provenance")
-        .and_then(|p| p.get("measurement_mode"))
-        .and_then(Value::as_str)
-        == Some("measured_live_execution")
-        && model_val
-            .get("score_provenance")
-            .and_then(|p| p.get("live_execution_digest"))
-            .and_then(Value::as_str)
-            .is_some_and(|d| d.starts_with("sha256:"));
-    let origin = if is_live {
-        "measured_result"
-    } else {
-        "supplied_fact"
-    };
+    // A descriptor file can claim anything, and this command runs no model, so scores are supplied.
+    let origin = "supplied_fact";
     Ok((out, origin))
 }
 

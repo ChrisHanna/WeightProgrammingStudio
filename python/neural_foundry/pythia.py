@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 
 from . import evals, ir
+from .provenance import evidence_grade_for_model
 from .records import canonicalize, content_digest
 
 PYTHIA_FACTORY_ID = "hf.gpt_neox.dense"
@@ -666,6 +667,11 @@ class Qwen2CausalLM:
         mtype = str(cfg.get("model_type", "")).lower()
         if mtype not in PRETRAINED_ARCHITECTURE_REGISTRY or mtype == "gpt_neox":
             raise ValueError(f"Unsupported GQA/SwiGLU model_type {mtype!r} for Qwen2CausalLM")
+        if mtype != "qwen2":
+            # This forward pass implements Qwen2 only. Others would load but compute the wrong outputs.
+            raise ValueError(
+                f"model_type {mtype!r} can be inspected through intake, but inference is not implemented for it"
+            )
         tokenizer_path = root / "tokenizer.json"
         if tokenizer_path.is_file():
             tokenizer = PythiaBPETokenizer.from_file(tokenizer_path)
@@ -1086,6 +1092,8 @@ def run_pythia_weight_programming_study(
             "model_id": f"{model.model_name}@baseline",
             "checkpoint_digest": w_before_digest,
             "total_parameters": total_params,
+            "measurement_attestation": evals.TRUSTED_IN_PROCESS_MEASUREMENT,
+            "evidence_grade": evidence_grade_for_model(model),
             "score_provenance": {
                 "producer": "pythia.live_forward_harness",
                 "harness": "nf.pythia.study.v1",
@@ -1108,6 +1116,8 @@ def run_pythia_weight_programming_study(
         model={
             "model_id": f"{model.model_name}@whitened_rank{rank}_edited",
             "checkpoint_digest": tx.after_parameter_digest,
+            "measurement_attestation": evals.TRUSTED_IN_PROCESS_MEASUREMENT,
+            "evidence_grade": evidence_grade_for_model(model),
             "score_provenance": {
                 "producer": "pythia.live_forward_harness",
                 "harness": "nf.pythia.study.v1",
@@ -1380,37 +1390,12 @@ def run_pythia_gym_task_learning_study(
     w_eff = model.effective_unembedding()
     cov = w_eff.T @ w_eff + 10.0 * torch.eye(out_dim, dtype=torch.float64)
 
-    # Public domain grammar expansion from base_rules (never accesses holdout_rules or holdout_prefixes!)
-    domain_grammar_rules: list[tuple[str, str]] = []
-    for expr, target in base_rules:
-        if expr == "Number 9 has parity":
-            domain_grammar_rules.append(("Number 7 has parity", target))
-            domain_grammar_rules.append((expr, target))
-        elif expr == "Number 4 has parity":
-            domain_grammar_rules.insert(1, (expr, target))
-            domain_grammar_rules.append(("Number 2 has parity", target))
-        elif expr == "Boolean False AND True gives":
-            domain_grammar_rules.append(("Boolean True AND False gives", target))
-            domain_grammar_rules.append(("Boolean True OR False gives", "ĠTrue"))
-            domain_grammar_rules.append((expr, target))
-        elif expr == "Boolean False OR True gives":
-            domain_grammar_rules.append((expr, target))
-        elif expr == "Relation 9 > 2 is":
-            domain_grammar_rules.append((expr, target))
-            domain_grammar_rules.append(("Relation 1 > 8 is", "Ġno"))
-            domain_grammar_rules.append(("Relation 7 > 3 is", target))
-        elif expr == "Relation 2 > 6 is":
-            domain_grammar_rules.append((expr, target))
-        elif expr == "The capital of France is":
-            domain_grammar_rules.append((expr, target))
-            domain_grammar_rules.append(("The capital of Germany is", "ĠBerlin"))
-        elif expr == "The capital of Japan is":
-            domain_grammar_rules.append((expr, target))
-            domain_grammar_rules.append(("The chemical symbol for gold is", "ĠAu"))
-        else:
-            domain_grammar_rules.append((expr, target))
-
-    unique_targets = tuple(dict.fromkeys(t for _, t in (*domain_grammar_rules, *sealed_holdout_rules)))
+    # Synthesis sees only the gym's public rules. Holdout expressions and answers stay out.
+    domain_grammar_rules: list[tuple[str, str]] = list(base_rules)
+    unique_targets = tuple(dict.fromkeys(t for _, t in domain_grammar_rules))
+    # Counted from the actual inputs. This detects overlap; it is not process isolation.
+    sealed_expressions = {expr for expr, _ in sealed_holdout_rules}
+    holdout_input_overlap = sum(expr in sealed_expressions for expr, _ in domain_grammar_rules)
     max_rank = min(6, len(unique_targets))
     target_dirs: dict[str, torch.Tensor] = {}
     for tok in unique_targets:
@@ -1564,7 +1549,7 @@ def run_pythia_gym_task_learning_study(
                     "event": "candidate_plan_frozen",
                     "plan_digest": plan_digest,
                     "candidate_digest": cand_digest,
-                    "holdout_exposures": 0,
+                    "holdout_exposures": holdout_input_overlap,
                 }
             )
         )
@@ -1697,7 +1682,7 @@ def run_pythia_gym_task_learning_study(
         holdout_split_digest=holdout_split_digest,
         dev_and_holdout_expression_disjoint=expr_disjoint,
         dev_and_holdout_prompt_disjoint=prompt_disjoint,
-        holdout_exposure_count_during_synthesis=0,
+        holdout_exposure_count_during_synthesis=holdout_input_overlap,
         proposer_accessed_digests=(dev_split_digest, val_split_digest),
         synthesis_freeze_digest=synthesis_freeze_digest,
         verifier_holdout_evaluation_digest=verifier_holdout_digest,
@@ -1759,6 +1744,8 @@ def run_pythia_gym_task_learning_study(
             "model_id": f"{model.model_name}@baseline",
             "checkpoint_digest": before_param_digest,
             "total_parameters": total_params,
+            "measurement_attestation": evals.TRUSTED_IN_PROCESS_MEASUREMENT,
+            "evidence_grade": evidence_grade_for_model(model),
             "score_provenance": {
                 "producer": "pythia.live_gym_harness",
                 "harness": "nf.pythia.gym_study.v1",
@@ -1782,6 +1769,8 @@ def run_pythia_gym_task_learning_study(
         model={
             "model_id": f"{model.model_name}@gym_contrastive_rank6",
             "checkpoint_digest": after_param_digest,
+            "measurement_attestation": evals.TRUSTED_IN_PROCESS_MEASUREMENT,
+            "evidence_grade": evidence_grade_for_model(model),
             "score_provenance": {
                 "producer": "pythia.live_gym_harness",
                 "harness": "nf.pythia.gym_study.v1",

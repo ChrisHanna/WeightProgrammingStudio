@@ -42,25 +42,21 @@ flowchart LR
 
 ## 60-Second First Run: One-Command Model Repair & Third-Party Verification
 
-Repair a model failure mode, emit a cryptographically signed **Open Patch Format v1 (`nf_open_weight_patch_v1`)** with SPDX SBOM provenance, `RoundingContract`, and backdoor security scan, and verify it from the Rust CLI (`nf` / `weightctl`) or Python SDK:
+Attempt a repair and get a measured verdict. A candidate that passes the promotion gate gets a signed **Open Patch Format v1 (`nf_open_weight_patch_v1`)** and a Hugging Face Hub-ready bundle. A candidate that fails is reported as rejected, and no bundle is written.
+
+The native `nf` binary cannot execute a model, so `nf repair` refuses to run. Use the Python Studio to repair, and `nf verify` to check a patch against the publisher's public key, obtained out of band:
 
 ```sh
-# 1. One-command repair from the Rust CLI (or `nf-studio repair ...`)
-nf repair --model Qwen/Qwen2.5-0.5B --failure looping --output qwen_loop_repair.nf.json
-
-# 2. Third-party verification (checks Ed25519 signature, SPDX SBOM, RoundingContract,
-#    zero holdout leakage, and supply-chain backdoor scan)
-nf verify qwen_loop_repair.nf.json
+python -m neural_foundry.studio repair --model /path/to/checkpoint --failure looping  # exit code 3 if rejected
+nf verify PATCH.nf.json --pubkey ed25519_pub:...
 ```
-
-Or in Python, repair and export a Hugging Face Hub-ready bundle (with `model.safetensors`, `weight_patch.nf.json`, and an auto-generated Hugging Face Model Card `README.md`):
 
 ```python
 from neural_foundry.studio import WeightProgrammingStudio
 
 studio = WeightProgrammingStudio()
-result = studio.repair("Qwen/Qwen2.5-0.5B", failure="looping", output_dir="./hf_repaired_bundle")
-assert result["verification"]["verified"] is True
+result = studio.repair("/path/to/local/checkpoint", failure="looping", output_dir="./hf_repaired_bundle")
+print(result["verification"])  # {"verified": False, "rejection_reason": ...} when the gate fails
 ```
 
 ---
@@ -288,12 +284,13 @@ diff = patch_ux.diff_model_weights(model, edited_model)
 print(diff.human_summary_markdown)
 
 # 2. Cryptographically sign and verify the patch envelope (fails closed if tampered)
+keys = patch_ux.generate_ed25519_keypair()  # Random; store the private key outside the repo.
 signed = patch_ux.sign_patch_envelope(
     {"patch_digest": diff.patch_digest, "base_parameter_digest": diff.base_parameter_digest},
     signer_id="release.auditor.v1",
-    signing_key="my-signing-key",
+    signing_key=keys["private_key"],
 )
-verification = patch_ux.verify_patch_signature(signed, signing_key="my-signing-key")
+verification = patch_ux.verify_patch_signature(signed, public_key=keys["public_key"])
 assert verification["verified"] is True
 
 # 3. One-command bitwise rollback to the original checkpoint state
@@ -368,17 +365,25 @@ assert cand_run["evidence_label"]["origin"] == "measured_result"
 ```
 
 ### 6. Reproducible Flagship Loop-Repair Study Bundle
-Run the complete flagship study repairing a documented pathological repetition attractor on an unseen checkpoint and publishing all signed artifacts (`pre_registration.json`, `exposure_ledger.json`, `signed_patch_envelope.json`, `patch_diff_report.md`, `agent_transcript.json`, `verification_receipt.json`, `huggingface_export/`, and `repaired_model.gguf`):
+Inject a repetition defect into a model you supply, attempt a repair using public rules only, and publish the measured outcome, including a failed one. The defect is created by the study, so results don't describe naturally occurring failures.
+
+**Current status: partial.** `repair.py` finds the attractor from predictions alone and removes it, measured on six sealed prompts:
+
+| Model | Loop rate | Agreement with clean model (defective / repaired / sham) | Retention | Gate |
+| :--- | :--- | :--- | ---: | :--- |
+| `nf/mini-pythia-fixture` | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `100%` | passed |
+| `Qwen/qwen2-dense-mini` | `1.0` -> `0.0` | `0%` / `100%` / `0%` | `60%` | failed |
+| `Pythia-14m` | `1.0` -> `0.0` | `33%` / `50%` / `33%` | `60%` | failed |
+| `Pythia-31m` | `1.0` -> `0.33` | `0%` / `17%` / `0%` | `20%` | failed, scan |
+
+On real models the defect is suppressed but normal behaviour is not restored.
 
 ```python
-from neural_foundry import flagship
+from neural_foundry import flagship, pythia
 
-bundle = flagship.run_flagship_loop_repair_study_and_publish_bundle(
-    output_dir="/tmp/nf_flagship_study_bundle",
-)
-assert bundle.repetition_loop_rate_before > 0.5 and bundle.repetition_loop_rate_after == 0.0
-assert bundle.holdout_accuracy_after == 1.0
-assert bundle.signature_verified and bundle.hf_roundtrip_verified and bundle.gguf_roundtrip_verified
+model = pythia.PythiaModel.from_pretrained_dir("/path/to/pythia-14m")
+bundle = flagship.run_flagship_loop_repair_study_and_publish_bundle(model, output_dir="./flagship_bundle")
+print(bundle.promote_eligible, bundle.open_patch_rejection_reason)
 ```
 
 ### 7. Multi-Layer Causal Tracing, Covariance Cache, Logit-Lens Inspector, Orthogonal Composition & Asymmetric `Ed25519` Signing
@@ -427,12 +432,12 @@ orth = studio.methods.run(
 assert orth.reload_parity_verified and orth.max_subspace_interference_after <= 1e-6
 
 # E. Asymmetric keypair generation & public-key-only verification (`ed25519_priv:` / `ed25519_pub:`)
-kp = patch_ux.generate_ed25519_keypair("release-signing-seed")
+kp = patch_ux.generate_ed25519_keypair()
 signed_env = patch_ux.sign_patch_envelope({"plan": dist_edit.rust_plan_digest}, signing_key=kp["private_key"])
 verified = patch_ux.verify_patch_signature(signed_env, public_key=kp["public_key"])
 assert verified["verified"] is True
 
-# F. Sub-byte 4-bit Q4_0 & Q4_K_M quantized editing + FP8 (`fp8_e4m3fn` / `fp8_e5m2`) with RoundingContract
+# F. Sub-byte 4-bit Q4_0 & package-only NF_Q4 (not GGUF Q4_K) quantized editing + FP8 (`fp8_e4m3fn` / `fp8_e5m2`) with RoundingContract
 q4_bytes, q4_shape = export_formats.quantize_matrix_q4_0([[0.1 * ((r * 32 + c) % 13 - 6) for c in range(32)] for r in range(2)])
 q4_rec = export_formats.execute_quantized_q4_matrix_edit(q4_bytes, q4_shape, operation_type="scale", factor=1.25)
 assert q4_rec.hessian_error_diffusion_applied is True
@@ -451,10 +456,10 @@ tool_info = studio.editor_tool.call_tool("nf_inspect_model", {"model": "Qwen/qwe
 
 ## Real-Model Gap, Ecosystem Adoption & Supply-Chain Trust Layer
 
-1. **Multi-Architecture Streaming `mmap` Intake (`pretrained.PRETRAINED_ARCHITECTURE_REGISTRY`)** — Native architecture profiles and `intake_pretrained_checkpoint` for **`Qwen2`**, **`Qwen3`**, **`Llama`**, **`Gemma`**, **`Gemma2`**, **`Mistral`**, and **`GPTNeoX`/`Pythia`**, streaming multi-shard `.safetensors` checkpoints via `ShardedMmapCheckpoint` (`mmap` zero-copy header & tensor slice loading without `Path.read_bytes()`).
-2. **Real-Model Dtypes & Stated `RoundingContract` (`ir.RoundingContract`, `export_formats`)** — Native support for `bf16`, `f16`, `fp8` (`fp8_e4m3fn`, `fp8_e5m2`), and GGUF v3 `Q8_0`, `Q4_0`, and `Q4_K_M` super-blocks. Every compiled transaction and quantized edit records a deterministic `RoundingContract` (`source_dtype`, `accumulation_dtype="f32"`, `output_dtype`, `rounding_mode`, `ulp_tolerance`, `contract_digest`) inside the patch identity.
+1. **Checkpoint Intake (`pretrained.PRETRAINED_ARCHITECTURE_REGISTRY`)** — Qwen3, Llama, Gemma, Gemma2 and Mistral checkpoints can be inspected. Inference and editing are implemented for GPT-NeoX and Qwen2 only; other architectures are refused. Tensors load into memory as `float64`, so large checkpoints need several times their file size in RAM.
+2. **Dtypes & Stated `RoundingContract` (`ir.RoundingContract`, `export_formats`)** — `bf16`, `f16`, FP8 and GGUF `Q8_0`/`Q4_0`. `nf_q4` is a package-only format, and standard GGUF `Q4_K` is not supported.
 3. **Ecosystem Plugins & Agent Editor Tool Interface (`studio.plugins`, `studio.editor_tool`)** — Wrap any Studio model in a `TransformerLens`-compatible `HookedTransformer` adapter (`run_with_cache`, `run_with_hooks`), import `lm-eval` and `Inspect AI` suites, export Hugging Face Hub model-card bundles (`export_huggingface_hub_bundle`), or expose `studio.editor_tool.tool_schemas()` (`nf_inspect_model`, `nf_trace_layers`, `nf_repair_model`, `nf_verify_patch`) directly to Claude Code, Codex, or MCP agent loops.
-4. **Open Patch Format v1, SPDX SBOM & Supply-Chain Backdoor Scanner (`patch_ux`, `nf verify`)** — `nf_open_weight_patch_v1` bundles an SPDX Weight-Patch SBOM (`spdx-weight-patch-sbom-v1`), `rounding_contract`, `evaluation_provenance`, and `BackdoorScanReport` (`scan_patch_for_backdoor_patterns`), automatically rejecting undeclared layer mutations, trojan rank-1 spectral/$\ell_\infty$ spikes, non-finite weights, and neutral-prompt hijacking.
+4. **Open Patch Format v1 and Anomaly Scan (`patch_ux`, `nf verify`)** — A signed record of an edit: digests, norms, evaluation provenance and scan result. It authenticates the record, but doesn't contain the weights change, so it can't apply or reproduce the edit. The scan is a sanity check, not proof that a patch has no backdoor. `nf verify` requires `--pubkey`.
 
 ---
 
@@ -465,9 +470,11 @@ Running the reusable `algorithmic_three_skill` Gym (teaching **Number Parity**, 
 | Selected Model | Architecture | Total Params | Edited Params (`%`) | Gym Dev | Gym Prefix-Val | Unseen Disjoint Holdout | No-Op / Random Controls | 25-Step LoRA Holdout | Skill Retention | Eval Gate |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
 | **`EleutherAI/pythia-14m`** | `GPTNeoXForCausalLM` | `14,067,712` | `65,536` (`0.47%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
-| **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | **`passed`** |
-| **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`100.0%` (`6/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | **`passed`** |
+| **`EleutherAI/pythia-31m`** | `GPTNeoXForCausalLM` | `30,495,232` | `262,144` (`0.86%`) | **`100%`** | **`100%`** | **`83.3%` (`5/6`)** | `0.0%` / `0.0%` | `50.0%` (`0%` retention) | **`100%`** | **`passed`** |
+| **`Qwen/qwen2-dense-mini`** | `Qwen2ForCausalLM` | `51,360` | `2,048` (`3.99%`) | **`100%`** | **`100%`** | **`66.7%` (`4/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | `failed` |
+| **`nf/mini-pythia-fixture`** | `GPTNeoXForCausalLM` | `49,920` | `2,048` (`4.10%`) | **`100%`** | **`100%`** | **`66.7%` (`4/6`)** | `0.0%` / `0.0%` | `0.0%` | **`100%`** | `failed` |
+
+**How far these results go:** with six holdout items, `6/6` only supports a true accuracy of about 54% or higher (95% CI), and the difference from LoRA is not statistically significant. The gym was also developed with this holdout visible, so these are preliminary signals, not evidence of general superiority. The zero-exposure count checks synthesis inputs for overlap; it is not process isolation.
 
 See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming-studio.md) for the complete `WP-01`–`WP-24` requirement mapping, the **20-Point Scientific & Engineering Assurance Matrix**, and Priority Experiments `A`–`D` details.
 
@@ -479,9 +486,9 @@ Both the native Rust binaries (`weightctl` and `nf`) and the Python Studio CLI (
 
 ```sh
 # One-command model repair & third-party Open Patch v1 verification (Rust CLI & Python Studio CLI)
-nf repair --model Qwen/Qwen2.5-0.5B --failure looping --output qwen_loop_repair.nf.json
-nf verify qwen_loop_repair.nf.json
-.venv/bin/python -m neural_foundry.studio repair --model Qwen/Qwen2.5-0.5B --failure looping --output-dir /tmp/hf_bundle
+python -m neural_foundry.studio repair --model /path/to/checkpoint --failure looping  # exit code 3 if rejected
+nf verify PATCH.nf.json --pubkey ed25519_pub:...
+.venv/bin/python -m neural_foundry.studio repair --model /path/to/checkpoint --failure looping
 .venv/bin/python -m neural_foundry.studio verify /tmp/hf_bundle/weight_patch.nf.json
 
 # High-level Studio CLI (inspect catalogs, run Gym studies, build covariance cache, inspect trajectories, emit conformance)
@@ -511,7 +518,7 @@ nf ir validate PROGRAM.json
 nf search-space validate SPACE.json
 nf ir compile|explain|apply REQUEST.json
 nf patch diff PATCH.json
-nf patch keygen --seed RELEASE_SEED
+nf patch keygen
 nf patch sign PATCH.json --signer operator.v1 --key ed25519_priv:...
 nf patch verify-signature SIGNED_PATCH.json --pubkey ed25519_pub:...
 nf patch audit SIGNED_PATCH.json --pubkey ed25519_pub:...

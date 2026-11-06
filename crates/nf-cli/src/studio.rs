@@ -15,6 +15,7 @@ use nf_experiments::scientific_graph::{
 };
 use nf_graph::shape_solver::ArchitectureShapeGraph;
 use nf_patches::composition::{compose_patches, PatchSpec, ReconciliationMode};
+use nf_patches::signing;
 use nf_weight_ir::program::Preservation;
 use nf_weight_ir::structural_lowering::{lower_structural_operation, StructuralOperation};
 use serde::Deserialize;
@@ -85,7 +86,7 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
 fn parse_patch_flags(rest: &[String]) -> (Option<String>, String, String) {
     let mut file = None;
     let mut signer = "nf.default.operator".to_owned();
-    let mut key = "nf-default-local-signing-key".to_owned();
+    let mut key = String::new();
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -93,7 +94,7 @@ fn parse_patch_flags(rest: &[String]) -> (Option<String>, String, String) {
                 signer = rest[i + 1].clone();
                 i += 2;
             }
-            "--key" | "--pubkey" | "--seed" if i + 1 < rest.len() => {
+            "--key" | "--pubkey" if i + 1 < rest.len() => {
                 key = rest[i + 1].clone();
                 i += 2;
             }
@@ -109,54 +110,22 @@ fn parse_patch_flags(rest: &[String]) -> (Option<String>, String, String) {
     (file, signer, key)
 }
 
-fn sha256_hex_str(input: &str) -> String {
-    let d = ContentDigest::of_bytes(input.as_bytes()).to_string();
-    d.strip_prefix("sha256:").unwrap_or(&d).to_owned()
-}
-
-fn wots_message_digits(signer: &str, patch_digest: &str) -> Vec<usize> {
-    let msg_hex = sha256_hex_str(&format!("nf-patch-msg-v1:{signer}:{patch_digest}"));
-    let mut digits: Vec<usize> = msg_hex
-        .chars()
-        .map(|c| c.to_digit(16).unwrap_or(0) as usize)
-        .collect();
-    let csum: usize = digits.iter().map(|&d| 15usize.saturating_sub(d)).sum();
-    digits.push((csum >> 8) & 0xF);
-    digits.push((csum >> 4) & 0xF);
-    digits.push(csum & 0xF);
-    digits
-}
-
-fn derive_public_key_from_sk_hex(sk_hex: &str) -> String {
-    let mut ends = Vec::with_capacity(67);
-    for i in 0..67 {
-        let mut s = sha256_hex_str(&format!("nf-wots-sk-v1:{sk_hex}:{i}"));
-        for step in 0..15 {
-            s = sha256_hex_str(&format!("nf-wots-step-v1:{i}:{step}:{s}"));
-        }
-        ends.push(s);
-    }
-    let pk_hex = sha256_hex_str(&format!("nf-wots-pk-v1:{}", ends.join(":")));
-    format!("ed25519_pub:{pk_hex}")
-}
-
-fn generate_asymmetric_keypair(seed: &str) -> Value {
-    let sk_hex = sha256_hex_str(&format!("nf-ed25519-sk-v1:{seed}"));
-    let pub_key = derive_public_key_from_sk_hex(&sk_hex);
-    let fp = ContentDigest::of_bytes(format!("nf-pubkey-fp-v1:{pub_key}").as_bytes());
-    json!({
-        "schema_version": 1,
-        "scheme": "ed25519_wots_v1",
-        "private_key": format!("ed25519_priv:{sk_hex}"),
-        "public_key": pub_key,
-        "key_fingerprint": fp,
-    })
-}
-
 fn handle_patch_keygen(rest: &[String]) -> Result<String> {
-    let (pos_seed, _signer, flag_seed) = parse_patch_flags(rest);
-    let seed = pos_seed.unwrap_or(flag_seed);
-    wrap_ok(generate_asymmetric_keypair(&seed))
+    if !rest.is_empty() {
+        return Err(err(
+            ErrorCode::InvalidValue,
+            "/patch/keygen",
+            "keygen takes no arguments: keys come from the OS CSPRNG and cannot be derived from a seed",
+        ));
+    }
+    let kp = signing::generate_keypair()?;
+    wrap_ok(json!({
+        "schema_version": 1,
+        "scheme": signing::SIGNATURE_SCHEME,
+        "private_key": kp.private_key,
+        "public_key": kp.public_key,
+        "key_fingerprint": kp.key_fingerprint,
+    }))
 }
 
 fn compute_patch_diff_value(val: &Value) -> Result<Value> {
@@ -330,58 +299,21 @@ fn sign_patch_value(patch_val: &Value, signer: &str, key: &str) -> Result<Value>
     let patch_digest = doc.digest();
     let patch_digest_str = patch_digest.to_string();
 
-    if let Some(sk_hex) = key.strip_prefix("ed25519_priv:") {
-        if sk_hex.len() != 64 || !sk_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(err(
-                ErrorCode::InvalidValue,
-                "/patch/sign",
-                "ed25519_priv: key must have 64 hex characters",
-            ));
-        }
-        let pub_key = derive_public_key_from_sk_hex(sk_hex);
-        let key_fingerprint =
-            ContentDigest::of_bytes(format!("nf-pubkey-fp-v1:{pub_key}").as_bytes());
-        let digits = wots_message_digits(signer, &patch_digest_str);
-        let mut sig_chains = Vec::with_capacity(67);
-        for (i, &d) in digits.iter().enumerate() {
-            let mut s = sha256_hex_str(&format!("nf-wots-sk-v1:{sk_hex}:{i}"));
-            for step in 0..d {
-                s = sha256_hex_str(&format!("nf-wots-step-v1:{i}:{step}:{s}"));
-            }
-            sig_chains.push(s);
-        }
-        let signature = format!("ed25519_sig:{}", sig_chains.join(":"));
-        return Ok(json!({
-            "schema_version": 1,
-            "kind": "nf_signed_patch_envelope",
-            "signature_scheme": "ed25519_wots_v1",
-            "patch_digest": patch_digest,
-            "signer_id": signer,
-            "public_key": pub_key,
-            "key_fingerprint": key_fingerprint,
-            "signature": signature,
-            "patch": doc.value(),
-        }));
-    }
-
-    let key_fingerprint =
-        ContentDigest::of_bytes(format!("nf-signing-key-v1:{key}").as_bytes());
-    let signature = ContentDigest::of_bytes(
-        format!("nf-patch-sig-v1:{signer}:{key_fingerprint}:{patch_digest}").as_bytes(),
-    );
+    let (signature, public_key) = signing::sign_digest(key, signer, &patch_digest_str)?;
     Ok(json!({
         "schema_version": 1,
         "kind": "nf_signed_patch_envelope",
-        "signature_scheme": "hmac_sha256_v1",
+        "signature_scheme": signing::SIGNATURE_SCHEME,
         "patch_digest": patch_digest,
         "signer_id": signer,
-        "key_fingerprint": key_fingerprint,
+        "public_key": public_key,
+        "key_fingerprint": signing::key_fingerprint(&public_key),
         "signature": signature,
         "patch": doc.value(),
     }))
 }
 
-fn verify_signed_envelope(envelope: &Value, key: Option<&str>) -> Result<Value> {
+fn verify_signed_envelope(envelope: &Value, trusted_public_key: &str) -> Result<Value> {
     if envelope.get("kind").and_then(Value::as_str) != Some("nf_signed_patch_envelope") {
         return Err(err(
             ErrorCode::InvalidValue,
@@ -417,114 +349,98 @@ fn verify_signed_envelope(envelope: &Value, key: Option<&str>) -> Result<Value> 
         .get("signer_id")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let declared_fp = envelope
-        .get("key_fingerprint")
-        .and_then(Value::as_str)
-        .unwrap_or("");
     let declared_sig = envelope
         .get("signature")
         .and_then(Value::as_str)
         .unwrap_or("");
-
-    if let Some(sig_body) = declared_sig.strip_prefix("ed25519_sig:") {
-        let chains: Vec<&str> = sig_body.split(':').collect();
-        if chains.len() != 67 || chains.iter().any(|c| c.len() != 64) {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/patch/verify-signature",
-                "malformed ed25519_sig chain payload",
-            ));
-        }
-        let digits = wots_message_digits(signer, &actual_patch_digest);
-        let mut ends = Vec::with_capacity(67);
-        for (i, &d) in digits.iter().enumerate() {
-            let mut s = chains[i].to_owned();
-            for step in d..15 {
-                s = sha256_hex_str(&format!("nf-wots-step-v1:{i}:{step}:{s}"));
-            }
-            ends.push(s);
-        }
-        let reconstructed_pub = format!(
-            "ed25519_pub:{}",
-            sha256_hex_str(&format!("nf-wots-pk-v1:{}", ends.join(":")))
-        );
-        let declared_pub = envelope
-            .get("public_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if reconstructed_pub != declared_pub {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/patch/verify-signature",
-                "asymmetric public-key signature verification failed",
-            ));
-        }
-        if let Some(k) = key {
-            let expected_pub = if let Some(sk_hex) = k.strip_prefix("ed25519_priv:") {
-                derive_public_key_from_sk_hex(sk_hex)
-            } else {
-                k.to_owned()
-            };
-            if reconstructed_pub != expected_pub {
-                return Err(err(
-                    ErrorCode::IntegrityMismatch,
-                    "/patch/verify-signature",
-                    "supplied public key does not match verified signer public key",
-                ));
-            }
-        }
-        let expected_fp =
-            ContentDigest::of_bytes(format!("nf-pubkey-fp-v1:{reconstructed_pub}").as_bytes())
-                .to_string();
-        if !declared_fp.is_empty() && declared_fp != expected_fp {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/patch/verify-signature",
-                "public key fingerprint mismatch",
-            ));
-        }
-        return Ok(json!({
-            "schema_version": 1,
-            "verified": true,
-            "signature_scheme": "ed25519_wots_v1",
-            "patch_digest": actual_patch_digest,
-            "signer_id": signer,
-            "public_key": reconstructed_pub,
-            "key_fingerprint": expected_fp,
-        }));
-    }
-
-    if let Some(k) = key {
-        let expected_fp =
-            ContentDigest::of_bytes(format!("nf-signing-key-v1:{k}").as_bytes()).to_string();
-        if declared_fp != expected_fp {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/patch/verify-signature",
-                "signing key fingerprint mismatch",
-            ));
-        }
-    }
-    let expected_sig = ContentDigest::of_bytes(
-        format!("nf-patch-sig-v1:{signer}:{declared_fp}:{actual_patch_digest}").as_bytes(),
-    )
-    .to_string();
-    if expected_sig != declared_sig {
+    if envelope.get("signature_scheme").and_then(Value::as_str) != Some(signing::SIGNATURE_SCHEME) {
         return Err(err(
             ErrorCode::IntegrityMismatch,
             "/patch/verify-signature",
-            "cryptographic patch signature verification failed",
+            "unsupported signature_scheme; re-sign with an ed25519_v1 key",
         ));
     }
+    signing::verify_digest(trusted_public_key, signer, &actual_patch_digest, declared_sig)?;
     Ok(json!({
         "schema_version": 1,
         "verified": true,
-        "signature_scheme": "hmac_sha256_v1",
+        "signature_scheme": signing::SIGNATURE_SCHEME,
         "patch_digest": actual_patch_digest,
         "signer_id": signer,
-        "key_fingerprint": declared_fp,
-        "signature": declared_sig,
+        "public_key": trusted_public_key,
+        "key_fingerprint": signing::key_fingerprint(trusted_public_key),
     }))
+}
+
+const OPEN_PATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+const OPEN_PATCH_KEYS: [&str; 11] = [
+    "schema_version", "kind", "format_version", "base_model", "candidate_checkpoint_digest",
+    "total_parameters", "operations", "sbom", "rounding_contract", "evaluation_provenance", "security_scan",
+];
+
+fn is_sha256_digest(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .and_then(|v| v.strip_prefix("sha256:"))
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// Mirrors `patch_ux.validate_open_patch_schema`.
+fn validate_open_patch_schema(payload: &Value) -> Result<()> {
+    let fail = |message: &str| err(ErrorCode::IntegrityMismatch, "/verify/schema", message.to_owned());
+    let object = payload.as_object().ok_or_else(|| fail("payload must be an object"))?;
+    if object.len() != OPEN_PATCH_KEYS.len() || !OPEN_PATCH_KEYS.iter().all(|k| object.contains_key(*k)) {
+        return Err(fail("open patch has missing or unknown top-level keys"));
+    }
+    if payload["kind"].as_str() != Some("nf_open_weight_patch_v1") || payload["schema_version"].as_u64() != Some(1) {
+        return Err(fail("unsupported kind or schema_version"));
+    }
+    let base = &payload["base_model"]["parameter_digest"];
+    let sbom = &payload["sbom"];
+    if !is_sha256_digest(Some(base))
+        || !is_sha256_digest(Some(&payload["candidate_checkpoint_digest"]))
+        || !is_sha256_digest(Some(&sbom["base_checkpoint_digest"]))
+        || !is_sha256_digest(Some(&sbom["candidate_checkpoint_digest"]))
+    {
+        return Err(fail("digest fields must be sha256 digests"));
+    }
+    if sbom["base_checkpoint_digest"] != *base || sbom["candidate_checkpoint_digest"] != payload["candidate_checkpoint_digest"] {
+        return Err(fail("SBOM digests differ from the patch"));
+    }
+    let total = payload["total_parameters"].as_u64().unwrap_or(0);
+    let changed = sbom["changed_parameters"].as_u64().unwrap_or(0);
+    if changed == 0 || changed > total || sbom["total_parameters"].as_u64() != Some(total) {
+        return Err(fail("parameter counts are inconsistent"));
+    }
+    let operations = payload["operations"].as_array().filter(|o| !o.is_empty()).ok_or_else(|| fail("operations must be a non-empty list"))?;
+    for op in operations {
+        let body = &op["operation"];
+        if !body["target"].is_object() || !body["type"].is_string() {
+            return Err(fail("each operation needs a type and target"));
+        }
+        for metric in ["frobenius_norm", "l2_norm", "linf_norm"] {
+            if !body[metric].is_null() && !body[metric].as_f64().is_some_and(|v| v.is_finite() && v >= 0.0) {
+                return Err(fail("operation metrics must be finite and non-negative"));
+            }
+        }
+    }
+    if let Some(controls) = payload["evaluation_provenance"]["controls"].as_object() {
+        if !controls.values().all(|v| v.as_f64().is_some_and(|x| (0.0..=1.0).contains(&x))) {
+            return Err(fail("controls must be in [0, 1]"));
+        }
+    }
+    Ok(())
+}
+
+fn required_trusted_key(key: &str, path: &str) -> Result<String> {
+    if key.is_empty() {
+        return Err(err(
+            ErrorCode::InvalidValue,
+            path,
+            "--pubkey ed25519_pub:... is required: a key inside the document cannot authenticate it",
+        ));
+    }
+    Ok(key.to_owned())
 }
 
 fn handle_patch_sign(rest: &[String]) -> Result<String> {
@@ -533,7 +449,7 @@ fn handle_patch_sign(rest: &[String]) -> Result<String> {
         err(
             ErrorCode::InvalidValue,
             "/patch/sign",
-            "expected `patch sign <FILE.json> [--signer ID] [--key KEY]`",
+            "expected `patch sign <FILE.json> --key ed25519_priv:... [--signer ID]`",
         )
     })?;
     let raw = read_json_file(&file)?;
@@ -548,18 +464,14 @@ fn handle_patch_verify_signature(rest: &[String]) -> Result<String> {
         err(
             ErrorCode::InvalidValue,
             "/patch/verify-signature",
-            "expected `patch verify-signature <SIGNED_PATCH.json> [--key KEY]`",
+            "expected `patch verify-signature <SIGNED_PATCH.json> --pubkey ed25519_pub:...`",
         )
     })?;
-    let explicit_key = if rest.iter().any(|a| a == "--key" || a == "--pubkey") {
-        Some(key.as_str())
-    } else {
-        None
-    };
+    let trusted = required_trusted_key(&key, "/patch/verify-signature")?;
     let raw = read_json_file(&file)?;
     let val: Value = serde_json::from_slice(&raw)
         .map_err(|e| err(ErrorCode::InvalidValue, "/patch/verify-signature", e.to_string()))?;
-    wrap_ok(verify_signed_envelope(&val, explicit_key)?)
+    wrap_ok(verify_signed_envelope(&val, &trusted)?)
 }
 
 fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
@@ -568,108 +480,103 @@ fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
         err(
             ErrorCode::InvalidValue,
             "/verify",
-            "expected `nf verify <PATCH.json> [--pubkey PUBKEY | --key KEY]`",
+            "expected `nf verify <PATCH.json> --pubkey ed25519_pub:...`",
         )
     })?;
-    let explicit_key = if rest.iter().any(|a| a == "--key" || a == "--pubkey") {
-        Some(key.as_str())
-    } else {
-        None
-    };
+    let trusted = required_trusted_key(&key, "/verify")?;
     let raw = read_json_file(&file)?;
+    if raw.len() > OPEN_PATCH_MAX_BYTES {
+        return Err(err(ErrorCode::LimitExceeded, "/verify", "open patch exceeds the maximum artifact size"));
+    }
     let val: Value = serde_json::from_slice(&raw)
         .map_err(|e| err(ErrorCode::InvalidValue, "/verify", e.to_string()))?;
 
     let envelope = val.get("signature_envelope").unwrap_or(&val);
-    let sig_res = verify_signed_envelope(envelope, explicit_key)?;
-    let payload = if val.get("kind").and_then(Value::as_str) == Some("nf_open_weight_patch_v1") {
-        &val
-    } else {
-        envelope.get("patch").unwrap_or(&val)
+    let sig_res = verify_signed_envelope(envelope, &trusted)?;
+    // Only the signed payload is evidence; an unsigned top-level copy must match it exactly.
+    let payload = envelope.get("patch").ok_or_else(|| {
+        err(ErrorCode::IntegrityMismatch, "/verify", "signed envelope has no patch payload")
+    })?;
+    if let Some(top) = val.as_object().filter(|_| val.get("signature_envelope").is_some()) {
+        let mut body = top.clone();
+        for unsigned in ["signature_envelope", "patch_digest", "public_key"] {
+            body.remove(unsigned);
+        }
+        if Value::Object(body) != *payload {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/verify",
+                "open patch body differs from its signed payload",
+            ));
+        }
+    }
+    validate_open_patch_schema(payload)?;
+    let section = |name: &str| {
+        payload.get(name).and_then(Value::as_object).ok_or_else(|| {
+            err(
+                ErrorCode::IntegrityMismatch,
+                "/verify",
+                format!("open patch is missing required section `{name}`"),
+            )
+        })
     };
 
-    if let Some(sbom) = payload.get("sbom").and_then(Value::as_object) {
-        let base_d = sbom
-            .get("base_checkpoint_digest")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let cand_d = sbom
-            .get("candidate_checkpoint_digest")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let changed = sbom
-            .get("changed_parameters")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if !base_d.starts_with("sha256:") || !cand_d.starts_with("sha256:") || changed == 0 {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/verify/sbom",
-                "invalid or empty SBOM digests/changed_parameters in open patch",
-            ));
-        }
+    let sbom = section("sbom")?;
+    let base_d = sbom.get("base_checkpoint_digest").and_then(Value::as_str).unwrap_or("");
+    let cand_d = sbom.get("candidate_checkpoint_digest").and_then(Value::as_str).unwrap_or("");
+    let changed = sbom.get("changed_parameters").and_then(Value::as_u64).unwrap_or(0);
+    if !base_d.starts_with("sha256:") || !cand_d.starts_with("sha256:") || changed == 0 {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/verify/sbom",
+            "invalid or empty SBOM digests/changed_parameters in open patch",
+        ));
     }
 
-    if let Some(rc) = payload.get("rounding_contract").and_then(Value::as_object) {
-        if rc.get("source_dtype").is_none()
-            || rc.get("accumulation_dtype").is_none()
-            || rc.get("rounding_mode").is_none()
-        {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/verify/rounding_contract",
-                "incomplete rounding_contract in open patch",
-            ));
-        }
+    let rc = section("rounding_contract")?;
+    if rc.get("source_dtype").is_none()
+        || rc.get("accumulation_dtype").is_none()
+        || rc.get("rounding_mode").is_none()
+    {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/verify/rounding_contract",
+            "incomplete rounding_contract in open patch",
+        ));
     }
 
-    if let Some(sec) = payload.get("security_scan").and_then(Value::as_object) {
-        if !sec
-            .get("backdoor_scan_passed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/verify/security_scan",
-                "supply-chain backdoor scan failed on weight patch",
-            ));
-        }
+    let sec = section("security_scan")?;
+    if sec.get("backdoor_scan_passed").and_then(Value::as_bool) != Some(true) {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/verify/security_scan",
+            "supply-chain backdoor scan failed on weight patch",
+        ));
     }
 
-    if let Some(ev) = payload.get("evaluation_provenance").and_then(Value::as_object) {
-        if !ev
-            .get("promote_eligible")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-        {
-            return Err(err(
-                ErrorCode::IntegrityMismatch,
-                "/verify/evaluation_provenance",
-                "patch evaluation_provenance is marked promote_eligible=false",
-            ));
-        }
-        if let Some(ctrls) = ev.get("controls").and_then(Value::as_object) {
-            let cand_acc = ctrls
-                .get("candidate_accuracy")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            let noop_acc = ctrls
-                .get("noop_accuracy")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            let rand_acc = ctrls
-                .get("random_accuracy")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            if cand_acc <= noop_acc || cand_acc <= rand_acc {
-                return Err(err(
-                    ErrorCode::IntegrityMismatch,
-                    "/verify/controls",
-                    "candidate failed to beat mandatory no-op or random controls",
-                ));
-            }
-        }
+    let ev = section("evaluation_provenance")?;
+    if ev.get("promote_eligible").and_then(Value::as_bool) != Some(true) {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/verify/evaluation_provenance",
+            "patch evaluation_provenance is not marked promote_eligible=true",
+        ));
+    }
+    let ctrls = ev.get("controls").and_then(Value::as_object).ok_or_else(|| {
+        err(ErrorCode::IntegrityMismatch, "/verify/controls", "missing evaluation controls")
+    })?;
+    let control = |name: &str| {
+        ctrls.get(name).and_then(Value::as_f64).ok_or_else(|| {
+            err(ErrorCode::IntegrityMismatch, "/verify/controls", format!("missing control `{name}`"))
+        })
+    };
+    let cand_acc = control("candidate_accuracy")?;
+    if cand_acc <= control("noop_accuracy")? || cand_acc <= control("random_accuracy")? {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/verify/controls",
+            "candidate failed to beat mandatory no-op or random controls",
+        ));
     }
 
     wrap_ok(json!({
@@ -679,180 +586,20 @@ fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
         "patch_digest": sig_res["patch_digest"],
         "signature_scheme": sig_res["signature_scheme"],
         "signer_id": sig_res["signer_id"],
-        "sbom_verified": payload.get("sbom").is_some(),
-        "rounding_contract_verified": payload.get("rounding_contract").is_some(),
+        "sbom_verified": true,
+        "rounding_contract_verified": true,
         "backdoor_scan_verified": true,
-        "controls_verified": payload.get("evaluation_provenance").is_some(),
+        "controls_verified": true,
     }))
 }
 
-fn handle_top_level_repair(rest: &[String]) -> Result<String> {
-    let mut model = None;
-    let mut failure_mode = "looping".to_owned();
-    let mut output_file = None;
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i].as_str() {
-            "--model" if i + 1 < rest.len() => {
-                model = Some(rest[i + 1].clone());
-                i += 2;
-            }
-            "--failure" if i + 1 < rest.len() => {
-                failure_mode = rest[i + 1].clone();
-                i += 2;
-            }
-            "--output" if i + 1 < rest.len() => {
-                output_file = Some(rest[i + 1].clone());
-                i += 2;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    let model_id = model
-        .filter(|m| !m.trim().is_empty() && m != "nonexistent")
-        .ok_or_else(|| {
-            err(
-                ErrorCode::InvalidValue,
-                "/repair",
-                "expected `nf repair --model <MODEL_ID_OR_PATH> [--failure looping|parity|capitals] [--output PATCH.json]`",
-            )
-        })?;
-    let m_lower = model_id.to_lowercase();
-    let site = if m_lower.contains("pythia") || m_lower.contains("neox") {
-        "gpt_neox.layers.1.mlp.dense_4h_to_h.weight"
-    } else {
-        "model.layers.1.mlp.down_proj.weight"
-    };
-    let base_ckpt = ContentDigest::of_bytes(format!("base_ckpt:{model_id}").as_bytes());
-    let cand_ckpt =
-        ContentDigest::of_bytes(format!("cand_ckpt:{model_id}:{failure_mode}").as_bytes());
-    let plan_digest =
-        ContentDigest::of_bytes(format!("plan:{model_id}:{failure_mode}").as_bytes());
-    let rc_payload = json!({
-        "schema_version": 1,
-        "kind": "nf_rounding_contract",
-        "source_dtype": "bf16",
-        "accumulation_dtype": "f32",
-        "output_dtype": "bf16",
-        "rounding_mode": "nearest_ties_even",
-        "subnormal_policy": "preserve_ieee754",
-        "non_finite_policy": "reject",
-        "block_size": Value::Null,
-    });
-    let rc_digest = CanonicalDocument::parse(
-        &serde_json::to_vec(&rc_payload).unwrap(),
-        Limits::default(),
-    )?
-    .digest();
-
-    let unsigned_body = json!({
-        "schema_version": 1,
-        "kind": "nf_open_weight_patch_v1",
-        "format_version": "1.0.0",
-        "failure_mode_repaired": failure_mode,
-        "base_model": {
-            "model_id": model_id,
-            "checkpoint": base_ckpt,
-            "parameter_digest": base_ckpt,
-        },
-        "candidate_checkpoint_digest": cand_ckpt,
-        "total_parameters": 51_360,
-        "operations": [
-            {
-                "id": "op_0",
-                "operation": {
-                    "type": "low_rank_update",
-                    "target": {"tensor": site, "shape": [32, 64]},
-                    "changed_parameters": 2048,
-                    "frobenius_norm": 14.25,
-                    "l2_norm": 9.8,
-                    "linf_norm": 1.12,
-                }
-            }
-        ],
-        "sbom": {
-            "schema_version": 1,
-            "spec_format": "spdx-weight-patch-sbom-v1",
-            "rust_core_version": nf_core::VERSION,
-            "base_model_id": model_id,
-            "base_checkpoint_digest": base_ckpt,
-            "candidate_checkpoint_digest": cand_ckpt,
-            "compiler_plan_digest": plan_digest,
-            "layers_touched": [site],
-            "changed_parameters": 2048,
-            "total_parameters": 51_360,
-            "changed_parameter_pct": 3.987539,
-            "total_frobenius_norm": 14.25,
-            "max_linf_norm": 1.12,
-        },
-        "rounding_contract": {
-            "schema_version": 1,
-            "kind": "nf_rounding_contract",
-            "source_dtype": "bf16",
-            "accumulation_dtype": "f32",
-            "output_dtype": "bf16",
-            "rounding_mode": "nearest_ties_even",
-            "subnormal_policy": "preserve_ieee754",
-            "non_finite_policy": "reject",
-            "block_size": Value::Null,
-            "contract_digest": rc_digest,
-        },
-        "evaluation_provenance": {
-            "suite_id": format!("nf.repair.{failure_mode}.v1"),
-            "runtime": "pytorch_cpu",
-            "sampler": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "presence_penalty": 0.0,
-                "frequency_penalty": 0.0,
-                "max_tokens": 64,
-                "seed": 17,
-            },
-            "seed": 17,
-            "controls": {
-                "noop_accuracy": 0.0,
-                "random_accuracy": 0.0,
-                "candidate_accuracy": 1.0,
-                "retention_accuracy": 1.0,
-            },
-            "repetition_loop_rate_before": 0.72,
-            "repetition_loop_rate_after": 0.0,
-            "promote_eligible": true,
-        },
-        "security_scan": {
-            "schema_version": 1,
-            "kind": "nf_backdoor_scan_report",
-            "backdoor_scan_passed": true,
-            "risk_score": 0.01,
-            "checks": [
-                {"check": "all_parameters_finite", "passed": true},
-                {"check": "declared_site_containment", "passed": true},
-                {"check": "spectral_and_linf_spike_bound", "passed": true},
-                {"check": "neutral_prompt_non_hijack", "passed": true}
-            ],
-            "flagged_reasons": [],
-        }
-    });
-    let kp = generate_asymmetric_keypair(&format!("repair:{model_id}:{failure_mode}"));
-    let priv_key = kp["private_key"].as_str().unwrap();
-    let signed_env = sign_patch_value(&unsigned_body, "nf.repair.cli.v1", priv_key)?;
-    let mut full_patch = unsigned_body;
-    full_patch["patch_digest"] = signed_env["patch_digest"].clone();
-    full_patch["public_key"] = kp["public_key"].clone();
-    full_patch["signature_envelope"] = signed_env;
-
-    if let Some(out_path) = output_file {
-        let doc = CanonicalDocument::parse(
-            &serde_json::to_vec(&full_patch)
-                .map_err(|e| err(ErrorCode::InvalidValue, "/repair", e.to_string()))?,
-            Limits::default(),
-        )?;
-        std::fs::write(&out_path, doc.bytes())
-            .map_err(|e| err(ErrorCode::Io, "/repair/output", e.to_string()))?;
-    }
-    wrap_ok(full_patch)
+fn handle_top_level_repair(_rest: &[String]) -> Result<String> {
+    // The native CLI cannot load or evaluate a model, so it has nothing truthful to sign.
+    Err(err(
+        ErrorCode::UnsupportedCapability,
+        "/repair",
+        "`nf repair` cannot execute a model; run `python -m neural_foundry.studio repair --model MODEL --failure MODE`",
+    ))
 }
 
 fn handle_patch_audit(rest: &[String]) -> Result<String> {
@@ -869,12 +616,11 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
         .map_err(|e| err(ErrorCode::InvalidValue, "/patch/audit", e.to_string()))?;
     let is_signed = val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope");
     let sig_check = if is_signed {
-        let explicit_key = if rest.iter().any(|a| a == "--key" || a == "--pubkey") {
-            Some(key.as_str())
+        if key.is_empty() {
+            json!({"verified": false, "status": "not_verified_no_trusted_key"})
         } else {
-            None
-        };
-        verify_signed_envelope(&val, explicit_key)?
+            verify_signed_envelope(&val, &key)?
+        }
     } else {
         json!({"verified": false, "status": "unsigned"})
     };
