@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from neural_foundry import export_formats, pythia  # noqa: E402
+from neural_foundry.prd_adapters import PRACTICE_RETENTION_PROMPTS  # noqa: E402
 
 F32, F16, Q4, Q8 = 0, 1, 2, 8
 SCALARS = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
@@ -68,7 +70,7 @@ def _read(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]], bytes]
 
 
 def _export(tmp_path: Path, model: Model, quantization: str = "f32") -> tuple[dict[str, Any], dict[str, dict[str, Any]], bytes, Path]:
-    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization=quantization)
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization=quantization, behaviour_override="container layout test")
     return (*_read(path), path)
 
 
@@ -233,7 +235,7 @@ def test_real_checkpoint_round_trips_through_the_container(tmp_path: Path) -> No
     if not (source / "model.safetensors").is_file():
         pytest.skip(f"checkpoint not found at {source}")
     model = pythia.PythiaModel.from_pretrained_dir(source)
-    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q8_0")
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q8_0", behaviour_override="container layout test")
     kv, infos, _ = _read(path)
     assert kv["general.architecture"] == "gptneox" and kv["gptneox.block_count"] == 6
     assert kv["gptneox.rope.dimension_count"] == 8
@@ -243,3 +245,113 @@ def test_real_checkpoint_round_trips_through_the_container(tmp_path: Path) -> No
     reloaded, _ = export_formats.reload_and_verify_gguf_v3(path, model, [])
     for name, tensor in model.tensors.items():
         assert reloaded.tensors[name].shape == tensor.shape
+
+
+class Behaving(Model):
+    """Top-1 is decided by the summed weights, so quantization flips it only where a test arranges that."""
+
+    threshold = 0.0
+
+    def evaluate_prompt(self, prompt: str, *, target_token: str | None = None) -> Any:
+        total = float(sum(t.sum() for t in self.tensors.values()))
+        token = int(total > self.threshold)
+        return SimpleNamespace(top1_token_id=token, top1_logit=total, matched_target=(str(token) == target_token))
+
+
+PROBES = tuple(f"probe {n}" for n in range(25))
+
+
+def _sensitive() -> Behaving:
+    # Most weights sit far below the block's largest value, so 4 bits rounds them away.
+    values = torch.full((1, 32), 0.01)
+    values[0, 0] = 1.0
+    model = Behaving({"w": values})
+    model.threshold = float(values.sum()) - 0.05
+    return model
+
+
+@pytest.mark.parametrize("quantization", ["f16", "q8_0", "q4_0", "nf_q4"])
+def test_lossy_export_without_evidence_is_refused_and_writes_nothing(tmp_path: Path, quantization: str) -> None:
+    path = tmp_path / "m.gguf"
+    with pytest.raises(export_formats.GgufBehaviourChangeError, match="no behaviour_probes"):
+        export_formats.export_gguf_v3(Model({"w": torch.ones(2, 32)}), path, quantization=quantization)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_refused_export_leaves_an_existing_file_alone(tmp_path: Path) -> None:
+    path = tmp_path / "m.gguf"
+    path.write_bytes(b"keep")
+    with pytest.raises(export_formats.GgufBehaviourChangeError):
+        export_formats.export_gguf_v3(_sensitive(), path, quantization="q4_0", behaviour_probes=PROBES)
+    assert path.read_bytes() == b"keep"
+
+
+def test_too_few_probes_cannot_pass_the_gate(tmp_path: Path) -> None:
+    model = Behaving({"w": torch.ones(2, 32)})
+    with pytest.raises(export_formats.GgufBehaviourChangeError, match="minimum"):
+        export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q8_0", behaviour_probes=PROBES[:3])
+
+
+def test_lost_task_accuracy_is_refused_even_when_agreement_is_allowed_to_fall(tmp_path: Path) -> None:
+    items = [(p, "1") for p in PROBES]
+    with pytest.raises(export_formats.GgufBehaviourChangeError, match="task accuracy fell"):
+        export_formats.export_gguf_v3(_sensitive(), tmp_path / "m.gguf", quantization="q4_0", behaviour_probes=PROBES, task_items=items, min_top1_agreement=0.0)
+
+
+def test_passing_gate_is_recorded_in_file_and_receipt(tmp_path: Path) -> None:
+    model = Behaving({"w": torch.ones(2, 32)})
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q8_0", behaviour_probes=PROBES)
+    assert list(tmp_path.iterdir()) == [path]
+    kv, _, _ = _read(path)
+    assert kv["nf.behaviour_status"] == "verified" and kv["nf.probe_count"] == 25 and kv["nf.top1_agreement"] == 1.0
+    _, receipt = export_formats.reload_and_verify_gguf_v3(path, model, PROBES)
+    assert receipt.behaviour_status == "verified" and receipt.behaviour_override is None
+    assert receipt.gain_preserved_after_rebuild is True
+
+
+def test_override_of_a_failed_gate_is_recorded_and_marks_the_receipt(tmp_path: Path) -> None:
+    model = _sensitive()
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q4_0", behaviour_probes=PROBES, behaviour_override="size matters more here")
+    kv, _, _ = _read(path)
+    assert kv["nf.behaviour_status"] == "override_failed_gate"
+    assert kv["nf.behaviour_override"] == "size matters more here"
+    assert kv["nf.top1_agreement"] < 1.0
+    _, receipt = export_formats.reload_and_verify_gguf_v3(path, model, PROBES)
+    assert receipt.behaviour_status == "override_failed_gate"
+    assert receipt.behaviour_override == "size matters more here"
+    assert receipt.export_behaviour is not None and receipt.export_behaviour["top1_agreement"] < 1.0
+    assert receipt.gain_preserved_after_rebuild is False
+
+
+def test_failed_gate_stays_marked_even_when_reload_probes_all_match(tmp_path: Path) -> None:
+    model = Behaving({"w": torch.ones(2, 32)})
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization="q8_0", behaviour_probes=PROBES[:3], behaviour_override="few prompts on purpose")
+    _, receipt = export_formats.reload_and_verify_gguf_v3(path, model, PROBES)
+    assert receipt.behavioral_match_rate == 1.0
+    assert receipt.gain_preserved_after_rebuild is False
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_override_needs_a_reason(tmp_path: Path, reason: str) -> None:
+    with pytest.raises(ValueError, match="reason"):
+        export_formats.export_gguf_v3(Model({"w": torch.ones(2, 32)}), tmp_path / "m.gguf", quantization="q8_0", behaviour_override=reason)
+
+
+def test_f32_without_probes_records_no_behaviour_claim(tmp_path: Path) -> None:
+    model = Model({"w": torch.ones(2, 2)})
+    path = export_formats.export_gguf_v3(model, tmp_path / "m.gguf")
+    assert not any(key.startswith("nf.") for key in _read(path)[0])
+    _, receipt = export_formats.reload_and_verify_gguf_v3(path, model, [])
+    assert receipt.behaviour_status == "not_recorded"
+
+
+def test_real_checkpoint_4bit_export_is_refused_on_many_prompts(tmp_path: Path) -> None:
+    source = Path(os.environ.get("NF_PYTHIA_DIRS", "/tmp/pythia-14m").split(os.pathsep)[0])
+    if not (source / "model.safetensors").is_file():
+        pytest.skip(f"checkpoint not found at {source}")
+    model = pythia.PythiaModel.from_pretrained_dir(source)
+    probes = list(dict.fromkeys(PRACTICE_RETENTION_PROMPTS))
+    assert len(probes) >= export_formats.GGUF_MIN_BEHAVIOUR_PROBES
+    for quantization in ("q4_0", "nf_q4"):
+        with pytest.raises(export_formats.GgufBehaviourChangeError, match="top-1 agreement"):
+            export_formats.export_gguf_v3(model, tmp_path / "m.gguf", quantization=quantization, behaviour_probes=probes)

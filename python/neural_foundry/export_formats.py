@@ -44,6 +44,10 @@ GGUF_MAX_DIMS = 4
 GGUF_MAX_TENSOR_NAME_BYTES = 64
 GGUF_QUANTIZATION_VERSION = 2  # GGML_QNT_VERSION
 GGUF_BLOCK_ELEMENTS = 32
+GGUF_MIN_BEHAVIOUR_PROBES = 20
+GGUF_BEHAVIOUR_VERIFIED = "verified"
+GGUF_BEHAVIOUR_UNVERIFIED = "override_unverified"
+GGUF_BEHAVIOUR_FAILED_GATE = "override_failed_gate"
 
 # Hugging Face config keys and the `[architecture].` keys the GGUF specification names for them.
 _GGUF_CONFIG_INT_KEYS = (
@@ -76,6 +80,10 @@ _TOKENIZER_ASSETS = (
     "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
     "vocab.json", "merges.txt", "tokenizer.model", "generation_config.json",
 )
+
+
+class GgufBehaviourChangeError(ValueError):
+    """A lossy GGUF export was refused: its behaviour wasn't shown to match the source model."""
 
 
 def _is_count(value: Any) -> bool:
@@ -890,6 +898,9 @@ class ExportReloadRoundTripReceipt:
     behavioral_match_rate: float
     max_logit_abs_diff: float
     gain_preserved_after_rebuild: bool
+    behaviour_status: str = "not_recorded"
+    behaviour_override: str | None = None
+    export_behaviour: Mapping[str, Any] | None = None
 
 
 def _extract_model_state_tensors(model: Any) -> dict[str, Any]:
@@ -1067,13 +1078,43 @@ def _gguf_hyperparameters(arch: str, cfg: Mapping[str, Any]) -> list[tuple[str, 
     return pairs
 
 
+def _measure_export_behaviour(
+    model: Any,
+    tensors: Mapping[str, Any],
+    probes: Sequence[str],
+    task_items: Sequence[tuple[str, str]] | None,
+) -> dict[str, Any]:
+    """Compare the decoded file with the model it came from: top-1 per probe, and task accuracy if given."""
+    decoded = _apply_state_tensors_to_clone(model, tensors)
+    kept = sum(
+        model.evaluate_prompt(p).top1_token_id == decoded.evaluate_prompt(p).top1_token_id for p in probes
+    )
+    measured: dict[str, Any] = {"probes": len(probes), "top1_agreement": kept / max(len(probes), 1)}
+    if task_items is not None:
+        count = max(len(task_items), 1)
+        measured["task_accuracy_before"] = sum(bool(model.evaluate_prompt(p, target_token=t).matched_target) for p, t in task_items) / count
+        measured["task_accuracy_after"] = sum(bool(decoded.evaluate_prompt(p, target_token=t).matched_target) for p, t in task_items) / count
+    return measured
+
+
 def export_gguf_v3(
     model: Any,
     output_path: str | Path,
     *,
     quantization: str = "f32",
+    behaviour_probes: Sequence[str] | None = None,
+    task_items: Sequence[tuple[str, str]] | None = None,
+    min_top1_agreement: float = 1.0,
+    behaviour_override: str | None = None,
 ) -> Path:
     """Write a GGUF v3 container (`F32`, `F16`, `Q8_0`, `Q4_0`, or `nf_q4`) that reloads through `reload_and_verify_gguf_v3`.
+
+    Modes other than `f32` lose precision, and on Pythia-14M that changes predictions, so they are
+    refused unless they pass a measured gate. Pass at least `GGUF_MIN_BEHAVIOUR_PROBES` prompts in
+    `behaviour_probes`, and `task_items` as (prompt, target token) so that the edit's gain is checked:
+    top-1 agreement must reach `min_top1_agreement` and task accuracy must not fall. To write a file
+    anyway, pass the reason in `behaviour_override`. The outcome is stored in the file's `nf.*`
+    metadata and reported on the reload receipt. Passing is evidence on those prompts only.
 
     The container follows the published GGUF v3 layout: spec-named metadata keys, dimensions in
     ggml order (`ne[0]`, the row length, comes first) and block types only where a row is a whole
@@ -1085,8 +1126,7 @@ def export_gguf_v3(
     """
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tensors = _extract_model_state_tensors(model)
-    _require_finite(tensors)
+    _require_finite(_extract_model_state_tensors(model))
     qmode = quantization.lower()
     if qmode == "q4_k_m":
         raise ValueError(
@@ -1094,6 +1134,58 @@ def export_gguf_v3(
         )
     if qmode not in {"f32", "f16", "q8_0", "q4_0", "nf_q4"}:
         raise ValueError(f"Unsupported GGUF quantization mode: {quantization!r}")
+    if behaviour_override is not None and not behaviour_override.strip():
+        raise ValueError("behaviour_override must state a reason")
+
+    scratch = out_path.with_name(out_path.name + ".tmp")
+    try:
+        # Encoding comes first, so values the dtype can't hold are refused as such.
+        _write_gguf(model, scratch, qmode, [])
+        measured: dict[str, Any] | None = None
+        failures: list[str] = []
+        if behaviour_probes is None:
+            if qmode != "f32":
+                failures.append("no behaviour_probes were given")
+        else:
+            tensors, _, _ = _parse_gguf_tensors(scratch.read_bytes(), scratch)
+            measured = _measure_export_behaviour(model, tensors, behaviour_probes, task_items)
+            if measured["probes"] < GGUF_MIN_BEHAVIOUR_PROBES:
+                failures.append(f"{measured['probes']} probes is below the minimum of {GGUF_MIN_BEHAVIOUR_PROBES}")
+            if measured["top1_agreement"] < min_top1_agreement:
+                failures.append(f"top-1 agreement {measured['top1_agreement']:.4f} is below {min_top1_agreement}")
+            if measured.get("task_accuracy_after", 0.0) < measured.get("task_accuracy_before", 0.0):
+                failures.append(f"task accuracy fell from {measured['task_accuracy_before']:.4f} to {measured['task_accuracy_after']:.4f}")
+        if failures and behaviour_override is None:
+            raise GgufBehaviourChangeError(
+                f"Refusing {qmode} GGUF export: {'; '.join(failures)}. Pass behaviour_override with a reason to write it anyway."
+            )
+        extra: list[tuple[str, int, Any]] = []
+        if measured is not None or qmode != "f32":
+            if failures:
+                status = GGUF_BEHAVIOUR_FAILED_GATE if measured is not None else GGUF_BEHAVIOUR_UNVERIFIED
+            else:
+                status = GGUF_BEHAVIOUR_VERIFIED
+            extra.append(("nf.behaviour_status", GGUF_TYPE_STRING, status))
+            if failures:
+                extra.append(("nf.behaviour_override", GGUF_TYPE_STRING, behaviour_override))
+                extra.append(("nf.behaviour_failures", GGUF_TYPE_STRING, "; ".join(failures)))
+            if measured is not None:
+                extra.append(("nf.min_top1_agreement", GGUF_TYPE_FLOAT32, min_top1_agreement))
+                extra.append(("nf.probe_count", GGUF_TYPE_UINT32, measured["probes"]))
+                extra.append(("nf.top1_agreement", GGUF_TYPE_FLOAT32, measured["top1_agreement"]))
+                for key in ("task_accuracy_before", "task_accuracy_after"):
+                    if key in measured:
+                        extra.append((f"nf.{key}", GGUF_TYPE_FLOAT32, measured[key]))
+        _write_gguf(model, scratch, qmode, extra)
+        scratch.replace(out_path)
+    finally:
+        scratch.unlink(missing_ok=True)
+    return out_path
+
+
+def _write_gguf(model: Any, out_path: Path, qmode: str, extra_metadata: Sequence[tuple[str, int, Any]]) -> None:
+    """Encode the model's tensors in `qmode` and write the container, without any behaviour check."""
+    tensors = _extract_model_state_tensors(model)
 
     cfg = getattr(model, "config", {}) or {}
     arch = _gguf_architecture(cfg)
@@ -1103,6 +1195,7 @@ def export_gguf_v3(
         ("general.name", GGUF_TYPE_STRING, str(display_name)),
         ("general.alignment", GGUF_TYPE_UINT32, GGUF_DEFAULT_ALIGNMENT),
         *_gguf_hyperparameters(arch, cfg),
+        *extra_metadata,
     ]
 
     tensor_info = bytearray()
@@ -1207,7 +1300,6 @@ def export_gguf_v3(
 
     buf.extend(data_section)
     out_path.write_bytes(bytes(buf))
-    return out_path
 
 
 def _read_gguf_scalar(blob: Any, offset: int, vtype: int) -> tuple[Any, int]:
@@ -1242,7 +1334,7 @@ def _read_gguf_value(blob: Any, offset: int, vtype: int) -> tuple[Any, int]:
     return values, offset
 
 
-def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Read every tensor of a GGUF v3 file, refusing anything outside or inconsistent with the file."""
     import torch
 
@@ -1329,7 +1421,7 @@ def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dic
         position = rel_off + length
     if data_base + position != size:
         raise ValueError(f"GGUF file {path} has trailing bytes after its last tensor")
-    return loaded_tensors, digest_items
+    return loaded_tensors, digest_items, metadata
 
 
 def reload_and_verify_gguf_v3(
@@ -1344,7 +1436,7 @@ def reload_and_verify_gguf_v3(
     blob_path = path
     blob = _map_file(path)
     try:
-        loaded_tensors, digest_items = _parse_gguf_tensors(blob, path)
+        loaded_tensors, digest_items, metadata = _parse_gguf_tensors(blob, path)
     except (struct.error, IndexError, OverflowError) as exc:
         raise ValueError(f"Corrupt GGUF file {path}: {exc}") from exc
     _require_finite(loaded_tensors)
@@ -1364,6 +1456,9 @@ def reload_and_verify_gguf_v3(
     match_rate = matches / max(len(prompts), 1)
     param_digest = str(content_digest(canonicalize({"tensors": digest_items})))
     return reloaded, ExportReloadRoundTripReceipt(
+        behaviour_status=str(metadata.get("nf.behaviour_status", "not_recorded")),
+        behaviour_override=metadata.get("nf.behaviour_override"),
+        export_behaviour={k[3:]: v for k, v in metadata.items() if k.startswith("nf.")} or None,
         format="gguf_v3",
         output_path=str(path),
         file_digest=sha256_file(blob_path),
@@ -1372,7 +1467,7 @@ def reload_and_verify_gguf_v3(
         prompts_tested=len(prompts),
         behavioral_match_rate=round(match_rate, 6),
         max_logit_abs_diff=round(max_diff, 8),
-        gain_preserved_after_rebuild=match_rate == 1.0,
+        gain_preserved_after_rebuild=match_rate == 1.0 and metadata.get("nf.behaviour_status") != GGUF_BEHAVIOUR_FAILED_GATE,
     )
 
 

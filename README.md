@@ -41,7 +41,7 @@ flowchart LR
     end
     subgraph Artifact["4. Signed Release & Rebuild"]
         G -->|"Promoted"| H["Signed Patch Envelope\n(diff · sign · audit · rollback)"]
-        H --> I["HF Safetensors & GGUF v3\nReload Parity Verified"]
+        H --> I["HF Safetensors & GGUF v3\nReload Compared on Probes"]
     end
 ```
 
@@ -250,7 +250,17 @@ with export_formats.ShardedMmapCheckpoint("/path/to/sharded_ckpt", max_checkpoin
 ```
 
 ### 2. Rebuild & Export Round-Trip: HuggingFace Safetensors & `GGUF v3` (`F32`, `F16`, `Q8_0`)
-Export to Safetensors and GGUF v3, reload through this package, and compare answers on the probe prompts you pass in. **Fixture-only:** a match on a few prompts is not a claim of full behavioural equivalence. The GGUF file follows the published container layout but reloads through this package only: it has never been run on `llama.cpp` or `Ollama`. On Pythia-14M, 4-bit modes (`q4_0`, `nf_q4`) changed model behaviour after reload and did not preserve the edit's gain (3 prompts).
+Export to Safetensors and GGUF v3, reload through this package, and compare answers on the probe prompts you pass in. **Fixture-only:** a match on a few prompts is not a claim of full behavioural equivalence. The GGUF file follows the published container layout but reloads through this package only: it has never been run on `llama.cpp` or `Ollama`. Every mode except `f32` is refused unless it passes a measured gate (at least 20 probes, top-1 agreement, task accuracy not falling) or you pass `behaviour_override` with a reason, which is recorded in the file and on the receipt.
+
+Measured on Pythia-14M over 150 public prompts, against the same model before export (top-1 agreement; task accuracy over 18 items):
+
+| Model | `q8_0` | `q4_0` | `nf_q4` | Task accuracy: f32 / `q8_0` / `q4_0` / `nf_q4` |
+|---|---|---|---|---|
+| Base | 96% | 49% | 65% | no gain to keep |
+| Edit, strength 0.1 | 96% | 65% | 61% | 94% / 94% / 56% / 61% |
+| Edit, strength 80 | 79% | 43% | 39% | 94% / 94% / 83% / 78% |
+
+The 4-bit loss is inherent, not a codec fault: an independent quantizer with exact scales did no better. Keeping the edited tensor at f32 did not rescue it (37-66% agreement).
 
 ```python
 from pathlib import Path
@@ -274,9 +284,11 @@ _, hf_receipt = export_formats.reload_and_verify_huggingface_safetensors("/tmp/h
 assert hf_receipt.gain_preserved_after_rebuild is True
 
 # 2. Export & reload GGUF v3 (supports "f32", "f16", and quantized "q8_0")
-export_formats.export_gguf_v3(edited_model, Path("/tmp/edited_q8.gguf"), quantization="q8_0")
+# Lossy modes need at least 20 behaviour_probes, or a behaviour_override stating why they're accepted.
+export_formats.export_gguf_v3(edited_model, Path("/tmp/edited_q8.gguf"), quantization="q8_0", behaviour_override="demo on a fixture")
 _, gguf_receipt = export_formats.reload_and_verify_gguf_v3("/tmp/edited_q8.gguf", edited_model, probes)
 assert gguf_receipt.gain_preserved_after_rebuild is True
+assert gguf_receipt.behaviour_status == "override_unverified"
 ```
 
 ### 3. Patch Diffs, Cryptographic Signing & Instant Rollback ("Git for Weights")

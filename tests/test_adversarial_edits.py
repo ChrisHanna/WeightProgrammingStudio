@@ -1565,7 +1565,7 @@ def test_corrupt_gguf_is_refused(tmp_path: Path, name: str) -> None:
 def test_every_truncation_of_a_real_export_is_refused(tmp_path: Path, quantization: str, fraction: float) -> None:
     toy = Toy()
     toy.tensors = {SITE: torch.linspace(-1, 1, 64, dtype=torch.float64).reshape(8, 8)}
-    path = export_formats.export_gguf_v3(toy, tmp_path / "m.gguf", quantization=quantization)
+    path = export_formats.export_gguf_v3(toy, tmp_path / "m.gguf", quantization=quantization, behaviour_override="truncation test")
     raw = path.read_bytes()
     path.write_bytes(raw[: int(len(raw) * fraction)])
     with pytest.raises(ValueError):
