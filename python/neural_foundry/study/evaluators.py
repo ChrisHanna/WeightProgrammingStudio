@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import struct
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -15,8 +14,6 @@ from typing import Any, Protocol
 
 from .generators import Item
 from .plan import StudyPlan, digest_bytes
-
-_DOWN_PROJ = re.compile(r"^gpt_neox\.layers\.(\d+)\.mlp\.dense_4h_to_h\.weight$")
 
 ItemScores = dict[str, dict[str, float]]
 
@@ -28,6 +25,9 @@ class Evaluator(Protocol):
     def retention(self, items: Sequence[Item], artifact: bytes) -> ItemScores:
         """Return {item_id: {"agreement": 0|1, "kl": nats}} comparing the candidate with base."""
 
+    def edit_profile(self, artifact: bytes) -> dict[str, dict[str, float]]:
+        """Return {tensor: {"norm": delta norm, "rank": delta rank}} for checking a placebo against its candidate."""
+
 
 def encode_candidate_artifact(tensors: Mapping[str, Any]) -> bytes:
     """Encode edited float64 tensors using the safetensors layout."""
@@ -36,7 +36,7 @@ def encode_candidate_artifact(tensors: Mapping[str, Any]) -> bytes:
     offset = 0
     for name in sorted(tensors):
         tensor = tensors[name].detach().to("cpu").double().contiguous()
-        raw = struct.pack(f"<{tensor.numel()}d", *tensor.reshape(-1).tolist())
+        raw = tensor.numpy().astype("<f8").tobytes()
         header[name] = {"dtype": "F64", "shape": list(tensor.shape), "data_offsets": [offset, offset + len(raw)]}
         chunks.append(raw)
         offset += len(raw)
@@ -44,24 +44,25 @@ def encode_candidate_artifact(tensors: Mapping[str, Any]) -> bytes:
     return struct.pack("<Q", len(encoded)) + encoded + b"".join(chunks)
 
 
-def decode_candidate_artifact(data: bytes) -> dict[int, Any]:
-    """Decode an artifact to {layer: down-projection}. Any other tensor is refused."""
+def decode_candidate_artifact(data: bytes, base: Mapping[str, Any]) -> dict[str, Any]:
+    """Decode an artifact to {tensor name: weights}. Names and shapes must match the base model's."""
     import torch
 
     size = struct.unpack("<Q", data[:8])[0]
     header = json.loads(data[8 : 8 + size])
     body = data[8 + size :]
-    override: dict[int, Any] = {}
+    weights: dict[str, Any] = {}
     for name, entry in header.items():
-        match = _DOWN_PROJ.match(name)
-        if match is None or entry["dtype"] != "F64":
+        if name not in base or entry["dtype"] != "F64" or tuple(entry["shape"]) != tuple(base[name].shape):
             raise ValueError(f"unsupported candidate tensor {name!r}")
         begin, end = entry["data_offsets"]
-        values = torch.frombuffer(bytearray(body[begin:end]), dtype=torch.float64)
-        override[int(match.group(1))] = values.reshape(entry["shape"])
-    if not override:
+        values = torch.frombuffer(bytearray(body[begin:end]), dtype=torch.float64).reshape(entry["shape"])
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError(f"candidate tensor {name!r} isn't finite")
+        weights[name] = values
+    if not weights:
         raise ValueError("candidate artifact has no tensors")
-    return override
+    return weights
 
 
 class PythiaEvaluator:
@@ -80,16 +81,24 @@ class PythiaEvaluator:
         self._model = PythiaModel.from_pretrained_dir(root)
         self._base_log_probs: dict[str, Any] = {}
 
-    def _last_logits(self, prompt: str, override: dict[int, Any] | None) -> Any:
-        ids = self._model.tokenizer.encode(prompt)
-        return self._model.forward_with_mlp_key(ids, layer_down_proj_override=override)[0][-1]
+    def _edited(self, artifact: bytes | None) -> Any:
+        """The base model with an artifact's tensors in place. Any tensor may change, for full fine-tuning."""
+        from ..baselines import merged_model
+
+        if artifact is None:
+            return self._model
+        return merged_model(self._model, decode_candidate_artifact(artifact, self._model.tensors))
+
+    @staticmethod
+    def _last_logits(model: Any, prompt: str) -> Any:
+        return model.forward_with_mlp_key(model.tokenizer.encode(prompt))[0][-1]
 
     def score(self, items: Sequence[Item], artifact: bytes | None) -> ItemScores:
-        override = decode_candidate_artifact(artifact) if artifact is not None else None
+        model = self._edited(artifact)
         vocab = self._model.tokenizer.vocab
         scores: ItemScores = {}
         for item in items:
-            logits = self._last_logits(item.prompt, override)
+            logits = self._last_logits(model, item.prompt)
             target = vocab[item.target]
             scores[item.item_id] = {
                 "forced_choice_accuracy": float(logits[target] > logits[vocab[item.alternative]]),
@@ -100,19 +109,24 @@ class PythiaEvaluator:
     def retention(self, items: Sequence[Item], artifact: bytes) -> ItemScores:
         import torch
 
-        override = decode_candidate_artifact(artifact)
+        model = self._edited(artifact)
         scores: ItemScores = {}
         for item in items:
             base = self._base_log_probs.get(item.item_id)
             if base is None:
-                base = torch.log_softmax(self._last_logits(item.prompt, None), dim=-1)
+                base = torch.log_softmax(self._last_logits(self._model, item.prompt), dim=-1)
                 self._base_log_probs[item.item_id] = base
-            edited = torch.log_softmax(self._last_logits(item.prompt, override), dim=-1)
+            edited = torch.log_softmax(self._last_logits(model, item.prompt), dim=-1)
             scores[item.item_id] = {
                 "agreement": float(int(base.argmax()) == int(edited.argmax())),
                 "kl": float((base.exp() * (base - edited)).sum()),
             }
         return scores
+
+    def edit_profile(self, artifact: bytes) -> dict[str, dict[str, float]]:
+        from .arms import edit_profile
+
+        return edit_profile(self._model.tensors, decode_candidate_artifact(artifact, self._model.tensors))
 
 
 class SyntheticEvaluator:
@@ -144,6 +158,10 @@ class SyntheticEvaluator:
             }
             for item in items
         }
+
+    def edit_profile(self, artifact: bytes) -> dict[str, dict[str, float]]:
+        profile: dict[str, dict[str, float]] = json.loads(artifact).get("profile", {"site": {"norm": 1.0, "rank": 1}})
+        return profile
 
 
 def build_evaluator(plan: StudyPlan) -> Evaluator:

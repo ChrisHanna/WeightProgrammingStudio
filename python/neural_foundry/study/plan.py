@@ -14,7 +14,9 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "nf.study.plan.v1"
+from .generators import DEFAULT_GENERATOR, get_item_generator
+
+SCHEMA_VERSION = "nf.study.plan.v2"
 TASKS = ("parity", "boolean", "comparison")
 METRICS = ("forced_choice_accuracy", "top1_accuracy")
 CORRECTIONS = ("holm",)
@@ -22,6 +24,10 @@ EVALUATORS = ("pythia_mlp_override", "synthetic_bernoulli")
 LABELS = ("confirmatory", "harness_demo", "harness_test")
 MIN_CONFIRMATORY_ITEMS_PER_TASK = 200
 MIN_CONFIRMATORY_SEEDS = 3
+BASE_ARM = "base"
+PLACEBO_ARM = "placebo"
+TUNED_ARMS = ("lora", "fine_tune")  # These must record their tuning in the manifest.
+CONTROL_ARMS = (BASE_ARM, *TUNED_ARMS, PLACEBO_ARM)
 
 
 class PlanError(ValueError):
@@ -39,6 +45,7 @@ class Thresholds:
     min_seed_pass_fraction: float  # share of synthesis seeds whose point delta reaches min_effect
     min_retention_agreement: float  # worst candidate's CI lower bound on top-1 agreement with base
     max_retention_kl: float  # worst candidate's CI upper bound on KL(base || candidate), in nats
+    min_control_advantage: float = 0.0  # the corrected CI lower bound against each control must exceed this
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,8 @@ class StudyPlan:
     checkpoint_dir: str | None = None
     checkpoint_digest: str | None = None
     torch_threads: int = 2
+    item_generator: str = DEFAULT_GENERATOR
+    control_arms: tuple[str, ...] | None = None  # None: every arm if confirmatory, otherwise none.
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -93,6 +102,19 @@ class StudyPlan:
             raise PlanError("prefix lists must be non-empty")
         if set(self.holdout_prefixes) & set(self.development_prefixes):
             raise PlanError("holdout_prefixes and development_prefixes must be disjoint")
+        try:
+            get_item_generator(self.item_generator)
+        except ValueError as exc:
+            raise PlanError(str(exc)) from exc
+        if self.control_arms is None:
+            object.__setattr__(self, "control_arms", CONTROL_ARMS if self.label == "confirmatory" else ())
+        arms = self.arms
+        if len(set(arms)) != len(arms) or not set(arms) <= set(CONTROL_ARMS):
+            raise PlanError(f"control_arms must be distinct members of {CONTROL_ARMS}")
+        if arms and BASE_ARM not in arms:
+            raise PlanError("a plan with control arms must include the base model as an arm")
+        if self.label == "confirmatory" and set(arms) != set(CONTROL_ARMS):
+            raise PlanError(f"a confirmatory plan needs every control arm: {CONTROL_ARMS}")
         low, high = self.number_domain
         if low < 0 or high <= low:
             raise PlanError("number_domain must be an increasing non-negative range")
@@ -113,9 +135,23 @@ class StudyPlan:
         return self.clusters_per_task_per_draw * self.holdout_draws * len(self.holdout_prefixes)
 
     @property
+    def arms(self) -> tuple[str, ...]:
+        return self.control_arms or ()
+
+    @property
+    def comparator_arms(self) -> tuple[str, ...]:
+        """Arms candidates are tested against, besides the base model."""
+        return tuple(arm for arm in self.arms if arm != BASE_ARM)
+
+    @property
+    def hypotheses(self) -> int:
+        """Size of the Holm family: each task, against the base model and against each comparator."""
+        return len(self.tasks) * (1 + len(self.comparator_arms))
+
+    @property
     def corrected_ci_level(self) -> float:
         """Simultaneous level for reported effect CIs: Bonferroni over the primary hypotheses."""
-        return 1.0 - self.alpha / len(self.tasks)
+        return 1.0 - self.alpha / self.hypotheses
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -136,6 +172,8 @@ class StudyPlan:
             for name in ("tasks", "development_prefixes", "holdout_prefixes", "synthesis_seeds", "secondary_metrics"):
                 values[name] = tuple(values[name])
             values["number_domain"] = tuple(values["number_domain"])
+            if values.get("control_arms") is not None:
+                values["control_arms"] = tuple(values["control_arms"])
             return cls(**values)
         except (KeyError, TypeError) as exc:
             raise PlanError(f"malformed plan: {exc}") from exc
@@ -143,6 +181,11 @@ class StudyPlan:
 
 def digest_bytes(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def base_arm_artifact(plan_digest: str) -> bytes:
+    """The base arm has no weights to submit. This marker lets it take the same one-query path as other arms."""
+    return json.dumps({"arm": BASE_ARM, "plan_digest": plan_digest}, sort_keys=True).encode("utf-8")
 
 
 def freeze_plan(plan: StudyPlan, path: str | Path) -> str:

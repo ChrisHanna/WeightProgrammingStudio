@@ -12,8 +12,10 @@ at the level of whole expressions.
 from __future__ import annotations
 
 import random
-from collections.abc import Collection, Iterable, Sequence
+from collections import Counter
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 TOKENS = {
     "parity": ("Ġodd", "Ġeven"),
@@ -192,3 +194,78 @@ def draw_retention(seed: int, n: int, *, exclude: Collection[str] = frozenset(),
         Item(f"{RETENTION_TASK}:{tag}:{i}", f"{RETENTION_TASK}:{tag}:{i}", RETENTION_TASK, prompt, "", "")
         for i, prompt in enumerate(chosen)
     ]
+
+
+class GeneratorContractError(ValueError):
+    """An item generator returned something the statistics or the sealing can't rely on."""
+
+
+class ItemGenerator(Protocol):
+    """What the study needs from a source of items. A plan selects one by name.
+
+    `confirmatory_ready` is False until a generator's items are fit to support a scientific claim;
+    the custodian refuses to freeze a confirmatory study on a generator that says False.
+    `shared_operand_tasks` are tasks whose operands share one pool, so a number exposed for one
+    is excluded from all of them.
+    """
+
+    name: str
+    confirmatory_ready: bool
+    shared_operand_tasks: tuple[str, ...]
+
+    def draw_clusters(
+        self, task: str, seed: int, n: int, *, domain: tuple[int, int], exclude: Collection[str], tag: str
+    ) -> list[Cluster]: ...
+
+    def draw_retention(self, seed: int, n: int, *, exclude: Collection[str], tag: str) -> list[Item]: ...
+
+
+class TemplatedGeneratorV1:
+    """The original one-sentence templates. Their holdout items have a known shortcut: harness runs only."""
+
+    name = "templated_v1"
+    confirmatory_ready = False
+    shared_operand_tasks = ("parity", "comparison")
+
+    def draw_clusters(
+        self, task: str, seed: int, n: int, *, domain: tuple[int, int], exclude: Collection[str], tag: str
+    ) -> list[Cluster]:
+        return draw_clusters(task, seed, n, domain=domain, exclude=exclude, tag=tag)
+
+    def draw_retention(self, seed: int, n: int, *, exclude: Collection[str], tag: str) -> list[Item]:
+        return draw_retention(seed, n, exclude=exclude, tag=tag)
+
+
+# A fixed list, like the evaluators: a plan can't name code to import. The custodian is its own process,
+# so a replacement generator must be added to this module, not registered at runtime by a proposer.
+_GENERATORS: dict[str, Callable[[], ItemGenerator]] = {"templated_v1": TemplatedGeneratorV1}
+DEFAULT_GENERATOR = "templated_v1"
+
+
+def get_item_generator(name: str) -> ItemGenerator:
+    try:
+        return _GENERATORS[name]()
+    except KeyError:
+        raise ValueError(f"unknown item generator {name!r}") from None
+
+
+def register_item_generator(name: str, factory: Callable[[], ItemGenerator]) -> None:
+    """Add a generator to this process only. For tests; see the note on `_GENERATORS`."""
+    if name in _GENERATORS:
+        raise ValueError(f"item generator {name!r} is already registered")
+    _GENERATORS[name] = factory
+
+
+def check_clusters(clusters: Sequence[Cluster], task: str, n: int, exclude: Collection[str], tag: str) -> None:
+    """Hold any generator to what the statistics assume: balanced labels, correct IDs, no exposed operand."""
+    if len(clusters) != n or len({c.cluster_id for c in clusters}) != n:
+        raise GeneratorContractError(f"{task}: expected {n} distinct clusters")
+    for cluster in clusters:
+        if cluster.task != task or not cluster.cluster_id.startswith(f"{task}:{tag}:"):
+            raise GeneratorContractError(f"{task}: cluster IDs must look like {task}:{tag}:<index>")
+        if not cluster.operands or cluster.target == cluster.alternative:
+            raise GeneratorContractError(f"{task}: clusters need operands and two different answers")
+        if set(cluster.operands) & set(exclude):
+            raise GeneratorContractError(f"{task}: a generator returned an excluded operand")
+    if set(Counter(c.target for c in clusters).values()) != {n // 2}:
+        raise GeneratorContractError(f"{task}: labels must balance exactly, so a constant answer scores 0.5")
