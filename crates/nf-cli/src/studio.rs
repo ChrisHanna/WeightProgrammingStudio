@@ -373,6 +373,7 @@ fn verify_signed_envelope(envelope: &Value, trusted_public_key: &str) -> Result<
 }
 
 const OPEN_PATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+const OPEN_PATCH_FORMAT_VERSION: &str = "1.0.0";
 const OPEN_PATCH_KEYS: [&str; 11] = [
     "schema_version", "kind", "format_version", "base_model", "candidate_checkpoint_digest",
     "total_parameters", "operations", "sbom", "rounding_contract", "evaluation_provenance", "security_scan",
@@ -395,6 +396,9 @@ fn validate_open_patch_schema(payload: &Value) -> Result<()> {
     if payload["kind"].as_str() != Some("nf_open_weight_patch_v1") || payload["schema_version"].as_u64() != Some(1) {
         return Err(fail("unsupported kind or schema_version"));
     }
+    if payload["format_version"].as_str() != Some(OPEN_PATCH_FORMAT_VERSION) {
+        return Err(fail("unsupported format_version"));
+    }
     let base = &payload["base_model"]["parameter_digest"];
     let sbom = &payload["sbom"];
     if !is_sha256_digest(Some(base))
@@ -415,11 +419,13 @@ fn validate_open_patch_schema(payload: &Value) -> Result<()> {
     let operations = payload["operations"].as_array().filter(|o| !o.is_empty()).ok_or_else(|| fail("operations must be a non-empty list"))?;
     for op in operations {
         let body = &op["operation"];
-        if !body["target"].is_object() || !body["type"].is_string() {
+        let named = |value: &Value| value.as_str().is_some_and(|text| !text.is_empty());
+        if !named(&body["type"]) || !named(&body["target"]["tensor"]) {
             return Err(fail("each operation needs a type and target"));
         }
         for metric in ["frobenius_norm", "l2_norm", "linf_norm"] {
-            if !body[metric].is_null() && !body[metric].as_f64().is_some_and(|v| v.is_finite() && v >= 0.0) {
+            // Absent is allowed; present has to be a number, so a null doesn't count as absent.
+            if body.get(metric).is_some_and(|v| !v.as_f64().is_some_and(|x| x.is_finite() && x >= 0.0)) {
                 return Err(fail("operation metrics must be finite and non-negative"));
             }
         }
@@ -534,10 +540,8 @@ fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
     }
 
     let rc = section("rounding_contract")?;
-    if rc.get("source_dtype").is_none()
-        || rc.get("accumulation_dtype").is_none()
-        || rc.get("rounding_mode").is_none()
-    {
+    let rounding_field = |name: &str| rc.get(name).and_then(Value::as_str).is_some_and(|text| !text.is_empty());
+    if !["source_dtype", "accumulation_dtype", "rounding_mode"].iter().all(|name| rounding_field(name)) {
         return Err(err(
             ErrorCode::IntegrityMismatch,
             "/verify/rounding_contract",

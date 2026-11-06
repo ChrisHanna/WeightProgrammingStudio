@@ -764,19 +764,7 @@ def test_python_refuses_signed_but_invalid_patch(keys: dict[str, Any], name: str
         patch_ux.verify_open_patch_v1(_signed_invalid(name, keys), public_key=keys["public_key"])
 
 
-NF_SCHEMA_GAPS = {
-    "format_version_future": "D9 studio.rs: format_version isn't checked",
-    "format_version_null": "D9 studio.rs: format_version isn't checked",
-    "op_type_empty": "D9 studio.rs: an empty operation type is accepted",
-    "op_target_empty": "D9 studio.rs: an operation target naming no tensor is accepted",
-    "metric_null": "D9 studio.rs: a null metric is accepted",
-    "rounding_null_field": "D9 studio.rs: rounding_contract fields only have to exist, so null passes",
-    "rounding_empty_field": "D9 studio.rs: rounding_contract fields only have to exist, so an empty string passes",
-    "rounding_number": "D9 studio.rs: rounding_contract fields only have to exist, so a number passes",
-}
-
-
-@pytest.mark.parametrize("name", _marked(SIGNED_BUT_INVALID, NF_SCHEMA_GAPS))
+@pytest.mark.parametrize("name", SIGNED_BUT_INVALID)
 def test_nf_verify_refuses_signed_but_invalid_patch(keys: dict[str, Any], name: str, tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_bytes(json.dumps(_signed_invalid(name, keys)).encode())
