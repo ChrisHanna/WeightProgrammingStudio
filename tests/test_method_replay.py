@@ -242,3 +242,27 @@ def test_scripted_agent_without_submission_has_no_steps() -> None:
         pythia.build_mini_pythia_model(), max_turns=2
     )
     assert report.submitted_edit_steps == ()
+
+
+# ---- mergekit.
+
+
+@pytest.mark.parametrize("algorithm", ["task_arithmetic", "ties", "dare"])
+def test_mergekit_replays_on_fixture(tmp_path: Path, algorithm: Any) -> None:
+    model = pythia.build_mini_pythia_model()
+    site = model.mlp_down_proj_site(int(model.config["num_hidden_layers"]) - 1)
+    base = model.tensors[site].to(torch.float64)
+    generator = torch.Generator().manual_seed(3)
+    checkpoints = [base + 0.01 * torch.randn(base.shape, dtype=torch.float64, generator=generator) for _ in range(2)]
+    receipt = prd_adapters.run_mergekit_adapter(model, algorithm=algorithm, checkpoint_weights=checkpoints)
+    _assert_replays(tmp_path, model, receipt.edit_steps, {receipt.target_site: receipt.merged_weight})
+
+
+def test_real_pythia_mergekit_replays(tmp_path: Path) -> None:
+    model = _real_model()
+    site = model.mlp_down_proj_site(int(model.config["num_hidden_layers"]) - 1)
+    base = model.tensors[site].to(torch.float64)
+    generator = torch.Generator().manual_seed(3)
+    checkpoints = [base + 0.01 * torch.randn(base.shape, dtype=torch.float64, generator=generator) for _ in range(2)]
+    receipt = prd_adapters.run_mergekit_adapter(model, algorithm="ties", checkpoint_weights=checkpoints)
+    _assert_replays(tmp_path, model, receipt.edit_steps, {receipt.target_site: receipt.merged_weight}, base_on_disk=True)

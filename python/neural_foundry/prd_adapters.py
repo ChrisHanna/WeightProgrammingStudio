@@ -481,6 +481,7 @@ class MergekitAdapterReceipt:
     merged_weight: torch.Tensor
     implementation_source: ImplementationSource = "local_reimplementation_not_external_baseline"
     external_package_installed: bool = False
+    edit_steps: tuple[MethodEditStep, ...] = ()
 
 
 def run_mergekit_adapter(
@@ -617,6 +618,7 @@ def run_mergekit_adapter(
             "external_package" if ext_installed else "local_reimplementation_not_external_baseline"
         ),
         external_package_installed=ext_installed,
+        edit_steps=(add_delta_step(site_name, f"mergekit_{algorithm}", merged_delta),),
     )
 
 
