@@ -546,6 +546,70 @@ def test_graph_structure_is_checked_on_replay(model: Toy, name: str) -> None:
         apply_edit_graph(model, graph)
 
 
+@pytest.fixture
+def no_execution(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Records any Rust transaction or tensor decode, and lets it fail the replay loudly."""
+    calls: list[str] = []
+
+    def record(name: str) -> Callable[..., Any]:
+        def called(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+            raise AssertionError(f"{name} ran")
+
+        return called
+
+    monkeypatch.setattr(edit_plan.WeightIRTransactionBuilder, "execute_matrix_edit", staticmethod(record("rust")))
+    monkeypatch.setattr(edit_plan, "_decode_matrix", record("decode"))
+    return calls
+
+
+def _repeat_steps(graph: dict[str, Any], count: int) -> None:
+    graph["steps"] = [{**graph["steps"][0], "id": f"step_{i}", "depends_on": [f"step_{i - 1}"] if i else []} for i in range(count)]
+
+
+PREFLIGHT_ATTACKS: dict[str, tuple[Callable[[dict[str, Any]], Any], str]] = {
+    **{f"late_{k}": v for k, v in {
+        "duplicate_id": (_set_step(2, id="step_0"), "Duplicate step id"),
+        "missing_dependency": (_set_step(2, depends_on=["step_9"]), "missing steps"),
+        "self_dependency": (_set_step(2, depends_on=["step_2"]), "cycle"),
+        "dropped_dependency": (_set_step(2, depends_on=[]), "match its position"),
+        "unknown_tensor": (_set_step(2, tensor="nope"), "no tensor"),
+    }.items()},
+    "excessive_steps": (lambda g: _repeat_steps(g, edit_plan.EDIT_GRAPH_MAX_STEPS + 1), "steps, over the limit"),
+    "excessive_dependencies": (_set_step(2, depends_on=["step_1"] * (edit_plan.EDIT_GRAPH_MAX_DEPENDENCIES + 1)), "dependencies, over the limit"),
+    "excessive_operands": (lambda g: g["steps"][1]["operands"].update({f"x{i}": {"data_b64": ""} for i in range(edit_plan.EDIT_GRAPH_MAX_OPERANDS + 1)}), "decoded tensors, over the limit"),
+    "oversized_declared_shape": (lambda g: g["steps"][1]["operands"]["delta_matrix"].update(shape=[2**20, 2**20]), "temporary bytes"),
+}
+
+
+@pytest.mark.parametrize("name", PREFLIGHT_ATTACKS)
+def test_preflight_refuses_before_any_rust_execution_or_decoding(model: Toy, request: pytest.FixtureRequest, name: str) -> None:
+    graph = _graph_plan(model).to_graph()
+    tamper, message = PREFLIGHT_ATTACKS[name]
+    tamper(graph)
+    no_execution = request.getfixturevalue("no_execution")
+    with pytest.raises(EditGraphError, match=message):
+        apply_edit_graph(model, graph)
+    assert no_execution == []
+
+
+def test_preflight_counts_base_tensors_in_temporary_memory(model: Toy, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    graph = EditPlan(model).scale(SITE, 2.0).to_graph()
+    no_execution = request.getfixturevalue("no_execution")
+    monkeypatch.setattr(edit_plan, "EDIT_GRAPH_MAX_TEMPORARY_BYTES", 2 * 8 * 12 - 1)
+    with pytest.raises(EditGraphError, match="temporary bytes"):
+        apply_edit_graph(model, graph)
+    assert no_execution == []
+
+
+def test_the_recording_fixture_does_see_a_replay_that_gets_through(model: Toy, request: pytest.FixtureRequest) -> None:
+    graph = _graph_plan(model).to_graph()
+    calls = request.getfixturevalue("no_execution")
+    with pytest.raises(AssertionError, match="ran"):
+        apply_edit_graph(model, graph)
+    assert calls
+
+
 def test_graph_with_a_relabelled_operation_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     graph["steps"][0]["operation"] = "mask"

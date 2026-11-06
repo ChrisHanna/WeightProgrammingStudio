@@ -101,6 +101,10 @@ class PlanCandidate:
 
 
 EDIT_GRAPH_MAX_OPERAND_BYTES = 256 * 1024 * 1024
+EDIT_GRAPH_MAX_STEPS = 1024
+EDIT_GRAPH_MAX_DEPENDENCIES = 4096
+EDIT_GRAPH_MAX_OPERANDS = 4096
+EDIT_GRAPH_MAX_TEMPORARY_BYTES = 16 * 1024 * 1024 * 1024
 EDIT_GRAPH_BUNDLE_KIND = "nf_edit_graph_bundle_v1"
 _REFERENCED_GRAPH_KIND = "nf_edit_graph_v2"
 _MATRIX_ARGUMENTS = ("delta_matrix", "left_factor", "right_factor", "orthonormal_basis", "value_matrix", "mask_matrix", "map_matrix")
@@ -587,6 +591,37 @@ def search_edits(
     return tuple(sorted(ranked, key=lambda r: (not r.on_pareto_frontier, -r.development_accuracy, -r.retention)))
 
 
+def _decoded_operand_bytes(steps: Sequence[Mapping[str, Any]]) -> int:
+    """What the declared operand shapes would decode to. Malformed shapes count as nothing here; decoding refuses them."""
+    total = 0
+    for step in steps:
+        operands = step.get("operands")
+        for operand in operands.values() if isinstance(operands, Mapping) else ():
+            shape = operand.get("shape") if isinstance(operand, Mapping) else None
+            if isinstance(shape, list) and all(type(d) is int for d in shape):
+                size = 8
+                for dimension in shape:
+                    size *= abs(dimension)
+                total += size
+    return total
+
+
+def _require_graph_bounds(steps: Sequence[Mapping[str, Any]]) -> None:
+    """Whole-graph limits that need nothing but the document. Runs before any tensor is decoded."""
+    dependencies = sum(len(s["depends_on"]) for s in steps if isinstance(s.get("depends_on"), list))
+    if dependencies > EDIT_GRAPH_MAX_DEPENDENCIES:
+        raise EditGraphError(f"Graph has {dependencies} dependencies, over the limit of {EDIT_GRAPH_MAX_DEPENDENCIES}")
+    operands = sum(len(s["operands"]) for s in steps if isinstance(s.get("operands"), Mapping))
+    if operands > EDIT_GRAPH_MAX_OPERANDS:
+        raise EditGraphError(f"Graph has {operands} decoded tensors, over the limit of {EDIT_GRAPH_MAX_OPERANDS}")
+    _require_temporary_memory(_decoded_operand_bytes(steps))
+
+
+def _require_temporary_memory(estimate: int) -> None:
+    if estimate > EDIT_GRAPH_MAX_TEMPORARY_BYTES:
+        raise EditGraphError(f"Replay needs an estimated {estimate} temporary bytes, over the limit of {EDIT_GRAPH_MAX_TEMPORARY_BYTES}")
+
+
 def _require_graph_structure(steps: Sequence[Mapping[str, Any]]) -> None:
     """Refuse step ids and depends_on that don't form a graph runnable in list order, naming what's wrong."""
     positions: dict[str, int] = {}
@@ -617,6 +652,10 @@ def _require_graph_structure(steps: Sequence[Mapping[str, Any]]) -> None:
         later = sorted(d for d in deps if positions[d] > positions[name])
         if later:
             raise EditGraphError(f"{name}: depends_on names later steps {later}")
+    # Steps run in list order, so the only dependencies that order can honour are the ones `to_graph` writes.
+    for index, step in enumerate(steps):
+        if step["id"] != f"step_{index}" or step["depends_on"] != ([f"step_{index - 1}"] if index else []):
+            raise EditGraphError(f"Step {index} has an id or depends_on that doesn't match its position")
 
 
 def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate:
@@ -626,26 +665,32 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
     steps = graph.get("steps")
     if not isinstance(steps, list) or not steps:
         raise EditGraphError("Graph has no steps")
+    if len(steps) > EDIT_GRAPH_MAX_STEPS:
+        raise EditGraphError(f"Graph has {len(steps)} steps, over the limit of {EDIT_GRAPH_MAX_STEPS}")
     total = 0
     for step in steps:
         for operand in step.get("operands", {}).values():
             total += len(operand["data_b64"])
     if total > EDIT_GRAPH_MAX_OPERAND_BYTES:
         raise EditGraphError("Graph operands exceed the size limit")
+    _require_graph_bounds(steps)
+    _require_graph_structure(steps)
     declared_id, actual_id = graph.get("base_model_id"), str(getattr(base_model, "model_name", ""))
     if declared_id != actual_id:
         raise EditGraphError(f"Graph declares base_model_id {declared_id!r}, but this base model is {actual_id!r}")
     base = _extract_model_state_tensors(base_model)
+    named = {str(s["tensor"]) for s in steps if "tensor" in s}
+    absent = sorted(named - set(base))
+    if absent:
+        raise EditGraphError(f"Base model has no tensor {absent[0]!r}")
+    # Decoded operands, plus an f64 working copy and an edited copy of each tensor the graph touches.
+    _require_temporary_memory(_decoded_operand_bytes(steps) + sum(2 * 8 * base[name].numel() for name in named))
     # The per-step digests only cover edited tensors, so a base differing elsewhere needs this check.
     if tensor_state_digest(base) != graph.get("base_state_digest"):
         raise EditGraphError("This isn't the base model the graph was made for")
     working: dict[str, torch.Tensor] = {}
     receipts: list[StepReceipt] = []
-    _require_graph_structure(steps)
-    for index, step in enumerate(steps):
-        # Steps run in list order, so the only dependencies that order can honour are the ones `to_graph` writes.
-        if step.get("id") != f"step_{index}" or step.get("depends_on") != ([f"step_{index - 1}"] if index else []):
-            raise EditGraphError(f"Step {index} has an id or depends_on that doesn't match its position")
+    for step in steps:
         tensor, op = str(step["tensor"]), str(step["operation"])
         if tensor not in base:
             raise EditGraphError(f"Base model has no tensor {tensor!r}")
