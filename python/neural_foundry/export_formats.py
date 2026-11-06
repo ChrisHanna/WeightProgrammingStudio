@@ -1,0 +1,713 @@
+"""Large/sharded mmap checkpoints, quantized Q8_0 editing, and HuggingFace Safetensors + GGUF v3 export/reload round-trip."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import math
+import mmap
+import shutil
+import struct
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .ir import (
+    WeightIRTransactionBuilder,
+    _bf16_u16_to_f32,
+    _f32_to_bf16_u16,
+    unpack_matrix_bytes,
+)
+from .records import canonicalize, content_digest
+
+GGUF_MAGIC = b"GGUF"
+GGUF_VERSION_V3 = 3
+GGUF_DEFAULT_ALIGNMENT = 32
+
+# GGUF v3 metadata value types
+GGUF_TYPE_UINT32 = 4
+GGUF_TYPE_INT32 = 5
+GGUF_TYPE_FLOAT32 = 6
+GGUF_TYPE_STRING = 8
+
+# GGML tensor types
+GGML_TYPE_F32 = 0
+GGML_TYPE_F16 = 1
+GGML_TYPE_Q8_0 = 8
+
+
+def _sha256(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _align_offset(offset: int, alignment: int = GGUF_DEFAULT_ALIGNMENT) -> int:
+    rem = offset % alignment
+    return offset if rem == 0 else offset + (alignment - rem)
+
+
+def _pack_gguf_string(s: str) -> bytes:
+    raw = s.encode("utf-8")
+    return struct.pack("<Q", len(raw)) + raw
+
+
+def _unpack_gguf_string(buf: bytes | memoryview, offset: int) -> tuple[str, int]:
+    (length,) = struct.unpack_from("<Q", buf, offset)
+    offset += 8
+    raw = bytes(buf[offset : offset + length])
+    return raw.decode("utf-8"), offset + length
+
+
+@dataclass(frozen=True)
+class QuantizedQ8BlockEditReceipt:
+    """Receipt from editing a Q8_0 (32-element block quantized) weight matrix with f32/f64 accumulation."""
+
+    shape: tuple[int, int]
+    block_size: int
+    num_blocks: int
+    before_q8_digest: str
+    after_q8_digest: str
+    rust_plan_digest: str
+    changed_parameters: int
+    max_quantization_abs_error: float
+    dequantized_matrix: list[list[float]]
+    q8_bytes: bytes
+
+
+def quantize_matrix_q8_0(matrix: Any) -> tuple[bytes, tuple[int, int]]:
+    """Quantize a 2D matrix into GGML Q8_0 blocks (32 elements per block: 1x f16 scale + 32x int8 quants = 34 bytes)."""
+    if hasattr(matrix, "detach") and hasattr(matrix, "reshape"):
+        rows, cols = int(matrix.shape[0]), int(matrix.shape[1])
+        flat = [float(x) for x in matrix.detach().contiguous().reshape(-1).tolist()]
+    else:
+        rows_list = [list(r) for r in matrix]
+        rows = len(rows_list)
+        cols = len(rows_list[0]) if rows else 0
+        flat = [float(x) for r in rows_list for x in r]
+
+    # Pad to multiple of 32 for block quantization
+    padded_len = ((len(flat) + 31) // 32) * 32
+    padded = flat + [0.0] * (padded_len - len(flat))
+    out = bytearray()
+    for b_start in range(0, padded_len, 32):
+        block = padded[b_start : b_start + 32]
+        amax = max(abs(x) for x in block)
+        d = amax / 127.0 if amax > 0.0 else 0.0
+        # Round trip scale through f16
+        d_f16_bytes = struct.pack("<e", d)
+        (d_f16,) = struct.unpack("<e", d_f16_bytes)
+        inv_d = 1.0 / d_f16 if d_f16 > 0.0 else 0.0
+        quants = [max(-127, min(127, int(round(x * inv_d)))) for x in block]
+        out.extend(d_f16_bytes)
+        out.extend(struct.pack("<32b", *quants))
+    return bytes(out), (rows, cols)
+
+
+def dequantize_matrix_q8_0(raw: bytes, shape: tuple[int, int]) -> list[list[float]]:
+    """Dequantize GGML Q8_0 block bytes back into a 2D float matrix."""
+    rows, cols = int(shape[0]), int(shape[1])
+    total = rows * cols
+    num_blocks = (total + 31) // 32
+    if len(raw) != num_blocks * 34:
+        raise ValueError(f"Invalid Q8_0 byte length {len(raw)} for shape {shape}")
+    flat: list[float] = []
+    for b_idx in range(num_blocks):
+        offset = b_idx * 34
+        (d_f16,) = struct.unpack_from("<e", raw, offset)
+        quants = struct.unpack_from("<32b", raw, offset + 2)
+        for q in quants:
+            flat.append(float(d_f16) * float(q))
+    trimmed = flat[:total]
+    return [trimmed[r * cols : (r + 1) * cols] for r in range(rows)]
+
+
+def execute_quantized_q8_matrix_edit(
+    q8_bytes: bytes,
+    shape: tuple[int, int],
+    *,
+    operation_type: str,
+    factor: float = 1.0,
+    delta_matrix: Any | None = None,
+    left_factor: Any | None = None,
+    right_factor: Any | None = None,
+    orthonormal_basis: Any | None = None,
+    projection_side: str = "left",
+) -> QuantizedQ8BlockEditReceipt:
+    """Dequantize Q8_0 weights, execute a verified Rust Weight IR edit in f32/f64 accumulation, and requantize to Q8_0."""
+    before_digest = _sha256(q8_bytes)
+    deq_before = dequantize_matrix_q8_0(q8_bytes, shape)
+    tx = WeightIRTransactionBuilder.execute_matrix_edit(
+        deq_before,
+        operation_type=operation_type,
+        dtype="f32",
+        accumulation_dtype="f32",
+        factor=factor,
+        delta_matrix=delta_matrix,
+        left_factor=left_factor,
+        right_factor=right_factor,
+        orthonormal_basis=orthonormal_basis,
+        projection_side=projection_side,
+        provenance_tag="studio.quantized_q8_0.v1",
+    )
+    edited_f32 = unpack_matrix_bytes(tx.edited_bytes, shape, "f32")
+    new_q8_bytes, _ = quantize_matrix_q8_0(edited_f32)
+    deq_after = dequantize_matrix_q8_0(new_q8_bytes, shape)
+    max_err = max(
+        abs(edited_f32[r][c] - deq_after[r][c])
+        for r in range(shape[0])
+        for c in range(shape[1])
+    )
+    return QuantizedQ8BlockEditReceipt(
+        shape=shape,
+        block_size=32,
+        num_blocks=(shape[0] * shape[1] + 31) // 32,
+        before_q8_digest=before_digest,
+        after_q8_digest=_sha256(new_q8_bytes),
+        rust_plan_digest=tx.plan_digest,
+        changed_parameters=tx.changed_parameters,
+        max_quantization_abs_error=round(max_err, 6),
+        dequantized_matrix=deq_after,
+        q8_bytes=new_q8_bytes,
+    )
+
+
+@dataclass
+class ShardedMmapTensorSlice:
+    shard_filename: str
+    dtype: str
+    shape: tuple[int, ...]
+    data_offsets: tuple[int, int]
+    header_end_offset: int
+
+
+class ShardedMmapCheckpoint:
+    """Memory-mapped (`mmap`) sharded Safetensors loader with copy-on-write (CoW) tensor staging and configurable limits > 64 MiB."""
+
+    def __init__(
+        self,
+        checkpoint_dir: str | Path,
+        *,
+        index_filename: str = "model.safetensors.index.json",
+        max_checkpoint_bytes: int = 68_719_476_736,  # 64 GiB default ceiling
+    ) -> None:
+        if max_checkpoint_bytes <= 0:
+            raise ValueError("max_checkpoint_bytes must be positive")
+        self.checkpoint_dir = Path(checkpoint_dir).resolve()
+        self.index_filename = index_filename
+        self.max_checkpoint_bytes = int(max_checkpoint_bytes)
+        self._files: dict[str, Any] = {}
+        self._mmaps: dict[str, mmap.mmap] = {}
+        self.tensors: dict[str, ShardedMmapTensorSlice] = {}
+        self._cow_overrides: dict[str, tuple[str, tuple[int, ...], bytes]] = {}
+        self.total_mapped_bytes = 0
+        self._open_shards()
+
+    def _open_shards(self) -> None:
+        index_path = self.checkpoint_dir / self.index_filename
+        if index_path.is_file():
+            idx_doc = json.loads(index_path.read_bytes())
+            weight_map = dict(idx_doc.get("weight_map", {}))
+            shard_names = sorted(set(weight_map.values()))
+        else:
+            single = self.checkpoint_dir / "model.safetensors"
+            if not single.is_file():
+                raise FileNotFoundError(
+                    f"Neither {index_path} nor {single} found in {self.checkpoint_dir}"
+                )
+            shard_names = ["model.safetensors"]
+
+        for shard_name in shard_names:
+            shard_path = (self.checkpoint_dir / shard_name).resolve()
+            if shard_path.parent != self.checkpoint_dir or not shard_path.is_file():
+                raise ValueError(f"Invalid or missing shard file: {shard_name}")
+            size = shard_path.stat().st_size
+            if self.total_mapped_bytes + size > self.max_checkpoint_bytes:
+                self.close()
+                raise ValueError(
+                    f"Sharded checkpoint total bytes ({self.total_mapped_bytes + size}) exceed configured max_checkpoint_bytes ({self.max_checkpoint_bytes})"
+                )
+            fobj = shard_path.open("rb")
+            mm = mmap.mmap(fobj.fileno(), 0, access=mmap.ACCESS_READ)
+            self._files[shard_name] = fobj
+            self._mmaps[shard_name] = mm
+            self.total_mapped_bytes += size
+
+            (hdr_len,) = struct.unpack_from("<Q", mm, 0)
+            hdr_end = 8 + hdr_len
+            hdr_obj = json.loads(bytes(mm[8:hdr_end]).decode("utf-8"))
+            for tname, meta in hdr_obj.items():
+                if tname == "__metadata__":
+                    continue
+                offsets = meta["data_offsets"]
+                self.tensors[tname] = ShardedMmapTensorSlice(
+                    shard_filename=shard_name,
+                    dtype=str(meta["dtype"]),
+                    shape=tuple(int(d) for d in meta["shape"]),
+                    data_offsets=(int(offsets[0]), int(offsets[1])),
+                    header_end_offset=hdr_end,
+                )
+
+    def read_tensor_view(self, name: str) -> memoryview:
+        """Return a zero-copy read-only memoryview into the mmap shard (or CoW buffer if modified)."""
+        if name in self._cow_overrides:
+            return memoryview(self._cow_overrides[name][2])
+        if name not in self.tensors:
+            raise KeyError(f"Unknown tensor {name!r} in sharded checkpoint")
+        info = self.tensors[name]
+        mm = self._mmaps[info.shard_filename]
+        start = info.header_end_offset + info.data_offsets[0]
+        end = info.header_end_offset + info.data_offsets[1]
+        return memoryview(mm)[start:end]
+
+    def stage_cow_tensor_update(
+        self,
+        name: str,
+        raw_bytes: bytes,
+        *,
+        dtype: str | None = None,
+        shape: Sequence[int] | None = None,
+    ) -> None:
+        """Stage a copy-on-write tensor update without mutating the underlying mmap source."""
+        if name not in self.tensors:
+            raise KeyError(f"Unknown tensor {name!r}")
+        orig = self.tensors[name]
+        new_dtype = str(dtype or orig.dtype).upper()
+        new_shape = tuple(int(x) for x in (shape or orig.shape))
+        self._cow_overrides[name] = (new_dtype, new_shape, bytes(raw_bytes))
+
+    @property
+    def modified_shards(self) -> set[str]:
+        return {self.tensors[name].shard_filename for name in self._cow_overrides}
+
+    @property
+    def cow_staged_bytes(self) -> int:
+        return sum(len(v[2]) for v in self._cow_overrides.values())
+
+    def export_cow_sharded_checkpoint(self, output_dir: str | Path) -> dict[str, Any]:
+        """Materialize a new sharded checkpoint directory: unmodified shards are hardlinked/copied without repacking; only dirty shards are rewritten."""
+        out = Path(output_dir).resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        dirty_shards = self.modified_shards
+        rewritten_shards: list[str] = []
+        reused_shards: list[str] = []
+
+        by_shard: dict[str, list[str]] = {}
+        for tname, info in sorted(self.tensors.items()):
+            by_shard.setdefault(info.shard_filename, []).append(tname)
+
+        weight_map: dict[str, str] = {}
+        total_bytes = 0
+        for shard_name, tnames in sorted(by_shard.items()):
+            for t in tnames:
+                weight_map[t] = shard_name
+            dst_shard = out / shard_name
+            if shard_name not in dirty_shards:
+                shutil.copy2(self.checkpoint_dir / shard_name, dst_shard)
+                reused_shards.append(shard_name)
+                total_bytes += dst_shard.stat().st_size
+            else:
+                header: dict[str, Any] = {}
+                payload = bytearray()
+                for t in tnames:
+                    if t in self._cow_overrides:
+                        dt, shp, raw = self._cow_overrides[t]
+                    else:
+                        info = self.tensors[t]
+                        dt, shp = info.dtype, info.shape
+                        raw = bytes(self.read_tensor_view(t))
+                    s_off = len(payload)
+                    payload.extend(raw)
+                    header[t] = {
+                        "dtype": dt,
+                        "shape": list(shp),
+                        "data_offsets": [s_off, len(payload)],
+                    }
+                raw_hdr = json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                pad = (8 - (len(raw_hdr) % 8)) % 8
+                raw_hdr += b" " * pad
+                blob = struct.pack("<Q", len(raw_hdr)) + raw_hdr + bytes(payload)
+                dst_shard.write_bytes(blob)
+                rewritten_shards.append(shard_name)
+                total_bytes += len(blob)
+
+        index_doc = {
+            "metadata": {"total_size": total_bytes},
+            "weight_map": weight_map,
+        }
+        (out / self.index_filename).write_text(
+            json.dumps(index_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return {
+            "output_dir": str(out),
+            "rewritten_shards": rewritten_shards,
+            "reused_unmodified_shards": reused_shards,
+            "cow_staged_bytes": self.cow_staged_bytes,
+            "total_mapped_bytes": self.total_mapped_bytes,
+        }
+
+    def close(self) -> None:
+        for mm in self._mmaps.values():
+            try:
+                mm.close()
+            except Exception:
+                pass
+        for fobj in self._files.values():
+            try:
+                fobj.close()
+            except Exception:
+                pass
+        self._mmaps.clear()
+        self._files.clear()
+
+    def __enter__(self) -> ShardedMmapCheckpoint:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+@dataclass(frozen=True)
+class ExportReloadRoundTripReceipt:
+    """Verified round-trip export & reload receipt for HuggingFace Safetensors and GGUF v3."""
+
+    format: str
+    output_path: str
+    file_digest: str
+    exported_tensor_count: int
+    reloaded_parameter_digest: str
+    prompts_tested: int
+    behavioral_match_rate: float
+    max_logit_abs_diff: float
+    gain_preserved_after_rebuild: bool
+
+
+def _extract_model_state_tensors(model: Any) -> dict[str, Any]:
+    """Extract named torch tensors from a PythiaModel or Qwen2CausalLM."""
+    if hasattr(model, "tensors") and isinstance(model.tensors, Mapping):
+        return {str(k): v.detach().cpu() for k, v in model.tensors.items()}
+    if hasattr(model, "model") and hasattr(model.model, "state_dict"):
+        return {k: v.detach().cpu() for k, v in model.model.state_dict().items()}
+    raise TypeError(f"Unsupported model type for export: {type(model)!r}")
+
+
+def _apply_state_tensors_to_clone(model: Any, tensors: Mapping[str, Any]) -> Any:
+    """Create a fresh deep-cloned model and overwrite all weights from loaded tensors."""
+    import torch
+
+    reloaded = copy.deepcopy(model)
+    if hasattr(reloaded, "tensors") and isinstance(reloaded.tensors, dict):
+        reloaded.tensors = {
+            str(k): v.detach().to(dtype=torch.float64).clone()
+            for k, v in tensors.items()
+        }
+        return reloaded
+    raise TypeError(f"Unsupported model type for reload: {type(model)!r}")
+
+
+def export_huggingface_safetensors(
+    model: Any,
+    output_dir: str | Path,
+    *,
+    dtype: str = "f32",
+) -> Path:
+    """Export an edited model to a HuggingFace Safetensors directory (`config.json`, `tokenizer.json`, `model.safetensors`)."""
+    out = Path(output_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    tensors = _extract_model_state_tensors(model)
+    dt = dtype.lower()
+    st_dtype = {"f16": "F16", "bf16": "BF16", "f32": "F32", "f64": "F64"}[dt]
+
+    header: dict[str, Any] = {}
+    payload = bytearray()
+    for name in sorted(tensors.keys()):
+        t = tensors[name]
+        shape = [int(d) for d in t.shape]
+        flat = [float(x) for x in t.reshape(-1).tolist()]
+        if dt == "f64":
+            raw = struct.pack(f"<{len(flat)}d", *flat)
+        elif dt == "f32":
+            raw = struct.pack(f"<{len(flat)}f", *flat)
+        elif dt == "f16":
+            raw = struct.pack(f"<{len(flat)}e", *flat)
+        elif dt == "bf16":
+            raw = struct.pack(f"<{len(flat)}H", *[_f32_to_bf16_u16(x) for x in flat])
+        start = len(payload)
+        payload.extend(raw)
+        header[name] = {
+            "dtype": st_dtype,
+            "shape": shape,
+            "data_offsets": [start, len(payload)],
+        }
+
+    raw_hdr = json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    pad = (8 - (len(raw_hdr) % 8)) % 8
+    raw_hdr += b" " * pad
+    st_path = out / "model.safetensors"
+    st_path.write_bytes(struct.pack("<Q", len(raw_hdr)) + raw_hdr + bytes(payload))
+    (out / "config.json").write_text(
+        json.dumps(getattr(model, "config", {}), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return st_path
+
+
+def reload_and_verify_huggingface_safetensors(
+    checkpoint_dir: str | Path,
+    reference_model: Any,
+    prompts: Sequence[str],
+) -> tuple[Any, ExportReloadRoundTripReceipt]:
+    """Reload a HuggingFace Safetensors checkpoint into a fresh model instance and verify behavioral & logit parity."""
+    import torch
+
+    ckpt_dir = Path(checkpoint_dir).resolve()
+    st_path = ckpt_dir / "model.safetensors"
+    blob = st_path.read_bytes()
+    (hdr_len,) = struct.unpack_from("<Q", blob, 0)
+    hdr_end = 8 + hdr_len
+    header = json.loads(blob[8:hdr_end].decode("utf-8"))
+
+    loaded_tensors: dict[str, Any] = {}
+    digest_items: list[dict[str, Any]] = []
+    for name, meta in sorted(header.items()):
+        if name == "__metadata__":
+            continue
+        dt = str(meta["dtype"]).upper()
+        shape = tuple(int(d) for d in meta["shape"])
+        s_off, e_off = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
+        raw = blob[hdr_end + s_off : hdr_end + e_off]
+        n = math.prod(shape)
+        if dt == "F64":
+            vals = list(struct.unpack(f"<{n}d", raw))
+        elif dt == "F32":
+            vals = [float(x) for x in struct.unpack(f"<{n}f", raw)]
+        elif dt == "F16":
+            vals = [float(x) for x in struct.unpack(f"<{n}e", raw)]
+        elif dt == "BF16":
+            vals = [_bf16_u16_to_f32(b) for b in struct.unpack(f"<{n}H", raw)]
+        else:
+            raise ValueError(f"Unsupported safetensors dtype {dt!r}")
+        loaded_tensors[name] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
+        digest_items.append({"name": name, "digest": _sha256(raw)})
+
+    reloaded = _apply_state_tensors_to_clone(reference_model, loaded_tensors)
+    matches = 0
+    max_diff = 0.0
+    for p in prompts:
+        ref_pred = reference_model.evaluate_prompt(p)
+        rel_pred = reloaded.evaluate_prompt(p)
+        if ref_pred.top1_token_id == rel_pred.top1_token_id:
+            matches += 1
+        diff = abs(float(ref_pred.top1_logit) - float(rel_pred.top1_logit))
+        if diff > max_diff:
+            max_diff = diff
+
+    match_rate = matches / max(len(prompts), 1)
+    param_digest = str(content_digest(canonicalize({"tensors": digest_items})))
+    return reloaded, ExportReloadRoundTripReceipt(
+        format="huggingface_safetensors",
+        output_path=str(st_path),
+        file_digest=_sha256(blob),
+        exported_tensor_count=len(loaded_tensors),
+        reloaded_parameter_digest=param_digest,
+        prompts_tested=len(prompts),
+        behavioral_match_rate=round(match_rate, 6),
+        max_logit_abs_diff=round(max_diff, 8),
+        gain_preserved_after_rebuild=match_rate == 1.0,
+    )
+
+
+def export_gguf_v3(
+    model: Any,
+    output_path: str | Path,
+    *,
+    quantization: str = "f32",
+) -> Path:
+    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, or `Q8_0`)."""
+    out_path = Path(output_path).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tensors = _extract_model_state_tensors(model)
+    qmode = quantization.lower()
+    if qmode not in {"f32", "f16", "q8_0"}:
+        raise ValueError(f"Unsupported GGUF quantization mode: {quantization!r}")
+
+    cfg = getattr(model, "config", {}) or {}
+    arch = str(cfg.get("model_type", "gpt_neox"))
+    kv_pairs: list[tuple[str, int, Any]] = [
+        ("general.architecture", GGUF_TYPE_STRING, arch),
+        ("general.name", GGUF_TYPE_STRING, str(getattr(model, "model_id", "nf-edited-model"))),
+        ("general.alignment", GGUF_TYPE_UINT32, GGUF_DEFAULT_ALIGNMENT),
+        (f"{arch}.Hidden_size", GGUF_TYPE_UINT32, int(cfg.get("hidden_size", 64))),
+        (f"{arch}.block_count", GGUF_TYPE_UINT32, int(cfg.get("num_hidden_layers", 2))),
+    ]
+
+    buf = bytearray()
+    buf.extend(GGUF_MAGIC)
+    buf.extend(struct.pack("<I", GGUF_VERSION_V3))
+    buf.extend(struct.pack("<Q", len(tensors)))
+    buf.extend(struct.pack("<Q", len(kv_pairs)))
+
+    for key, vtype, val in kv_pairs:
+        buf.extend(_pack_gguf_string(key))
+        buf.extend(struct.pack("<I", vtype))
+        if vtype == GGUF_TYPE_STRING:
+            buf.extend(_pack_gguf_string(str(val)))
+        elif vtype == GGUF_TYPE_UINT32:
+            buf.extend(struct.pack("<I", int(val)))
+        elif vtype == GGUF_TYPE_INT32:
+            buf.extend(struct.pack("<i", int(val)))
+        elif vtype == GGUF_TYPE_FLOAT32:
+            buf.extend(struct.pack("<f", float(val)))
+
+    tensor_payloads: list[bytes] = []
+    tensor_offsets: list[int] = []
+    cur_data_offset = 0
+
+    for name in sorted(tensors.keys()):
+        t = tensors[name]
+        shape = [int(d) for d in t.shape]
+        flat = [float(x) for x in t.reshape(-1).tolist()]
+        if qmode == "f32":
+            ggml_type = GGML_TYPE_F32
+            raw = struct.pack(f"<{len(flat)}f", *flat)
+        elif qmode == "f16":
+            ggml_type = GGML_TYPE_F16
+            raw = struct.pack(f"<{len(flat)}e", *flat)
+        else:
+            # Q8_0 requires element count divisible by 32; fall back to F32 for small 1D biases/norms < 32
+            if len(flat) % 32 == 0 and len(shape) == 2:
+                ggml_type = GGML_TYPE_Q8_0
+                raw, _ = quantize_matrix_q8_0(t)
+            else:
+                ggml_type = GGML_TYPE_F32
+                raw = struct.pack(f"<{len(flat)}f", *flat)
+
+        cur_data_offset = _align_offset(cur_data_offset, GGUF_DEFAULT_ALIGNMENT)
+        tensor_offsets.append(cur_data_offset)
+        tensor_payloads.append(raw)
+        cur_data_offset += len(raw)
+
+        # GGUF v3 tensor info: name, n_dimensions, dimensions (uint64 each), ggml_type (uint32), offset (uint64)
+        buf.extend(_pack_gguf_string(name))
+        buf.extend(struct.pack("<I", len(shape)))
+        for dim in shape:
+            buf.extend(struct.pack("<Q", dim))
+        buf.extend(struct.pack("<I", ggml_type))
+        buf.extend(struct.pack("<Q", tensor_offsets[-1]))
+
+    # Pad header to GGUF_DEFAULT_ALIGNMENT before tensor data section
+    aligned_hdr = _align_offset(len(buf), GGUF_DEFAULT_ALIGNMENT)
+    buf.extend(b"\x00" * (aligned_hdr - len(buf)))
+
+    data_section = bytearray()
+    for off, raw in zip(tensor_offsets, tensor_payloads):
+        if len(data_section) < off:
+            data_section.extend(b"\x00" * (off - len(data_section)))
+        data_section.extend(raw)
+
+    buf.extend(data_section)
+    out_path.write_bytes(bytes(buf))
+    return out_path
+
+
+def reload_and_verify_gguf_v3(
+    gguf_path: str | Path,
+    reference_model: Any,
+    prompts: Sequence[str],
+) -> tuple[Any, ExportReloadRoundTripReceipt]:
+    """Parse and reload a GGUF v3 binary file into a fresh model instance and verify that behavioral gains survive."""
+    import torch
+
+    path = Path(gguf_path).resolve()
+    blob = path.read_bytes()
+    if blob[:4] != GGUF_MAGIC:
+        raise ValueError(f"Invalid GGUF magic in {path}")
+    (version, tensor_count, kv_count) = struct.unpack_from("<IQQ", blob, 4)
+    if version != GGUF_VERSION_V3:
+        raise ValueError(f"Unsupported GGUF version {version}; expected {GGUF_VERSION_V3}")
+
+    offset = 24
+    metadata: dict[str, Any] = {}
+    for _ in range(kv_count):
+        key, offset = _unpack_gguf_string(blob, offset)
+        (vtype,) = struct.unpack_from("<I", blob, offset)
+        offset += 4
+        if vtype == GGUF_TYPE_STRING:
+            val, offset = _unpack_gguf_string(blob, offset)
+        elif vtype == GGUF_TYPE_UINT32:
+            (val,) = struct.unpack_from("<I", blob, offset)
+            offset += 4
+        elif vtype == GGUF_TYPE_INT32:
+            (val,) = struct.unpack_from("<i", blob, offset)
+            offset += 4
+        elif vtype == GGUF_TYPE_FLOAT32:
+            (val,) = struct.unpack_from("<f", blob, offset)
+            offset += 4
+        else:
+            raise ValueError(f"Unsupported GGUF metadata vtype {vtype}")
+        metadata[key] = val
+
+    tensor_descriptors: list[tuple[str, tuple[int, ...], int, int]] = []
+    for _ in range(tensor_count):
+        tname, offset = _unpack_gguf_string(blob, offset)
+        (ndim,) = struct.unpack_from("<I", blob, offset)
+        offset += 4
+        dims = []
+        for _ in range(ndim):
+            (d,) = struct.unpack_from("<Q", blob, offset)
+            offset += 8
+            dims.append(int(d))
+        (ggml_type, rel_offset) = struct.unpack_from("<IQ", blob, offset)
+        offset += 12
+        tensor_descriptors.append((tname, tuple(dims), int(ggml_type), int(rel_offset)))
+
+    alignment = int(metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT))
+    data_base = _align_offset(offset, alignment)
+
+    loaded_tensors: dict[str, Any] = {}
+    digest_items: list[dict[str, Any]] = []
+    for tname, shape, ggml_type, rel_off in tensor_descriptors:
+        n = math.prod(shape)
+        start = data_base + rel_off
+        if ggml_type == GGML_TYPE_F32:
+            raw = blob[start : start + n * 4]
+            vals = [float(x) for x in struct.unpack(f"<{n}f", raw)]
+            loaded_tensors[tname] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
+        elif ggml_type == GGML_TYPE_F16:
+            raw = blob[start : start + n * 2]
+            vals = [float(x) for x in struct.unpack(f"<{n}e", raw)]
+            loaded_tensors[tname] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
+        elif ggml_type == GGML_TYPE_Q8_0:
+            num_blocks = (n + 31) // 32
+            raw = blob[start : start + num_blocks * 34]
+            mat = dequantize_matrix_q8_0(raw, (shape[0], shape[1]))
+            loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
+        else:
+            raise ValueError(f"Unsupported GGML tensor type {ggml_type}")
+        digest_items.append({"name": tname, "digest": _sha256(raw)})
+
+    reloaded = _apply_state_tensors_to_clone(reference_model, loaded_tensors)
+    matches = 0
+    max_diff = 0.0
+    for p in prompts:
+        ref_pred = reference_model.evaluate_prompt(p)
+        rel_pred = reloaded.evaluate_prompt(p)
+        if ref_pred.top1_token_id == rel_pred.top1_token_id:
+            matches += 1
+        diff = abs(float(ref_pred.top1_logit) - float(rel_pred.top1_logit))
+        if diff > max_diff:
+            max_diff = diff
+
+    match_rate = matches / max(len(prompts), 1)
+    param_digest = str(content_digest(canonicalize({"tensors": digest_items})))
+    return reloaded, ExportReloadRoundTripReceipt(
+        format="gguf_v3",
+        output_path=str(path),
+        file_digest=_sha256(blob),
+        exported_tensor_count=len(loaded_tensors),
+        reloaded_parameter_digest=param_digest,
+        prompts_tested=len(prompts),
+        behavioral_match_rate=round(match_rate, 6),
+        max_logit_abs_diff=round(max_diff, 8),
+        gain_preserved_after_rebuild=match_rate == 1.0,
+    )

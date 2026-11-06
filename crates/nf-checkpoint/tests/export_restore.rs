@@ -21,8 +21,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
-        let parent =
-            PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").expect("session scratch required"));
+        let parent = std::env::var_os("KIROCREW_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let path = parent.join(format!(
             "export-tests-{}-{}",
             std::process::id(),

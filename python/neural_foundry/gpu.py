@@ -583,3 +583,141 @@ class GpuResourceScheduler:
             device_total_nvml_bytes=device_total_nvml_bytes,
             memory_scope_reported=requested_memory_scope,
         )
+
+
+@dataclass(frozen=True)
+class GpuTransactionalExecutionReceipt:
+    """Transactional receipt uniting Rust Weight IR compilation with GPU DLPack execution and smoke/eval verification."""
+
+    transaction_digest: str
+    rust_plan_digest: str
+    rust_candidate_digest: str
+    execution_device: str
+    runtime_id: str
+    dtype: SupportedGpuDType
+    accumulation_dtype: str
+    before_digest: str
+    after_digest: str
+    changed_parameters: int
+    source_immutability_verified: bool
+    cpu_gpu_parity_max_abs_diff: float
+    cpu_gpu_parity_verified: bool
+    smoke_probes_passed: bool
+    eval_probe_outputs: tuple[list[float], ...]
+    output_tensor: torch.Tensor
+
+
+def execute_transactional_gpu_edit_and_eval(
+    source_tensor: torch.Tensor,
+    *,
+    tensor_name: str = "w",
+    operation: Literal["scale", "add_delta", "low_rank_update", "subspace_projection"],
+    requested_device: str | None = None,
+    requested_dtype: SupportedGpuDType = "bf16",
+    accumulation_dtype: Literal["f32", "f64"] = "f32",
+    factor: float = 1.0,
+    delta: torch.Tensor | None = None,
+    left_basis: torch.Tensor | None = None,
+    right_basis: torch.Tensor | None = None,
+    eval_inputs: Sequence[torch.Tensor] = (),
+    max_abs_smoke_output: float = 100_000.0,
+) -> GpuTransactionalExecutionReceipt:
+    """Execute a Weight IR edit and evaluation on the GPU (or verified device stream) with identical transactional guarantees and receipts as the Rust CPU path."""
+    from .ir import WeightIRTransactionBuilder, unpack_matrix_bytes
+
+    device = requested_device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    before_source_digest = _tensor_bytes_digest(source_tensor)
+
+    # 1. Execute via DLPack-verified device dispatch
+    gpu_res = dispatch_weight_operation(
+        source_tensor,
+        tensor_name=tensor_name,
+        operation=operation,
+        requested_device=device,
+        requested_dtype=requested_dtype,
+        accumulation_dtype=accumulation_dtype,
+        factor=factor,
+        delta=delta,
+        left_basis=left_basis,
+        right_basis=right_basis,
+    )
+
+    # 2. Execute the identical Weight IR plan in the Rust surgeon for cross-backend transactional parity
+    rust_tx = WeightIRTransactionBuilder.execute_matrix_edit(
+        source_tensor.detach().cpu(),
+        operation_type=operation,
+        dtype=requested_dtype,
+        accumulation_dtype=accumulation_dtype,
+        factor=factor,
+        delta_matrix=delta.detach().cpu() if delta is not None else None,
+        left_factor=left_basis.detach().cpu() if left_basis is not None and operation == "low_rank_update" else None,
+        right_factor=right_basis.detach().cpu() if right_basis is not None else None,
+        orthonormal_basis=left_basis.detach().cpu() if left_basis is not None and operation == "subspace_projection" else None,
+        provenance_tag="studio.gpu_transactional.v1",
+    )
+    shape = (int(source_tensor.shape[0]), int(source_tensor.shape[1]))
+    rust_mat = torch.tensor(
+        unpack_matrix_bytes(rust_tx.edited_bytes, shape, requested_dtype),
+        dtype=torch.float64,
+    )
+    gpu_mat = gpu_res.output_tensor.detach().cpu().to(dtype=torch.float64)
+    parity_diff = float((rust_mat - gpu_mat).abs().max().item())
+    tol = 1e-2 if requested_dtype in ("f16", "bf16") else 1e-5
+    if parity_diff > tol:
+        raise GpuDispatchError(
+            "BACKEND_PARITY_MISMATCH",
+            f"Device output diverged from Rust Weight IR reference by {parity_diff:.4e} > {tol:.4e}",
+        )
+
+    # 3. Transactional smoke & evaluation pass on target device
+    accum_t = torch.float32 if accumulation_dtype == "f32" else torch.float64
+    w_eval = gpu_res.output_tensor.to(device=device, dtype=accum_t)
+    probe_vecs = (
+        list(eval_inputs)
+        if eval_inputs
+        else [torch.full((shape[1],), 1.0 / max(shape[1], 1), dtype=accum_t, device=device)]
+    )
+    eval_outputs: list[list[float]] = []
+    for p_vec in probe_vecs:
+        x = p_vec.to(device=device, dtype=accum_t)
+        y = w_eval @ x
+        if not bool(torch.isfinite(y).all().item()) or float(y.abs().max().item()) > max_abs_smoke_output:
+            # Roll back: verify source_tensor is untouched before raising
+            if _tensor_bytes_digest(source_tensor) != before_source_digest:
+                raise GpuDispatchError("SOURCE_MUTATED", "source tensor was mutated during failed smoke probe")
+            raise GpuDispatchError(
+                "SMOKE_VERIFICATION_FAILED",
+                f"Transactional smoke probe exceeded max_abs_smoke_output ({max_abs_smoke_output}) or was non-finite; candidate rolled back",
+            )
+        eval_outputs.append([round(float(v), 6) for v in y.detach().cpu().tolist()])
+
+    source_unmodified = _tensor_bytes_digest(source_tensor) == before_source_digest
+    runtime_id = "pytorch_cuda" if device.startswith("cuda") else "pytorch_cpu"
+    tx_digest = _digest_obj(
+        {
+            "rust_plan_digest": rust_tx.plan_digest,
+            "rust_candidate_digest": rust_tx.candidate_digest,
+            "device": device,
+            "runtime": runtime_id,
+            "before_digest": gpu_res.before_digest,
+            "after_digest": gpu_res.after_digest,
+        }
+    )
+    return GpuTransactionalExecutionReceipt(
+        transaction_digest=tx_digest,
+        rust_plan_digest=rust_tx.plan_digest,
+        rust_candidate_digest=rust_tx.candidate_digest,
+        execution_device=device,
+        runtime_id=runtime_id,
+        dtype=requested_dtype,
+        accumulation_dtype=accumulation_dtype,
+        before_digest=gpu_res.before_digest,
+        after_digest=gpu_res.after_digest,
+        changed_parameters=rust_tx.changed_parameters,
+        source_immutability_verified=source_unmodified,
+        cpu_gpu_parity_max_abs_diff=round(parity_diff, 8),
+        cpu_gpu_parity_verified=True,
+        smoke_probes_passed=True,
+        eval_probe_outputs=tuple(eval_outputs),
+        output_tensor=gpu_res.output_tensor,
+    )

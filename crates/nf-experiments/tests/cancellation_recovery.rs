@@ -20,11 +20,14 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
-        let root = PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap()).join(format!(
-            "supervised-tests-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root = std::env::var_os("KIROCREW_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "supervised-tests-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         fs::create_dir(&root).unwrap();
         Self(root)
     }

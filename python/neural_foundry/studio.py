@@ -83,6 +83,8 @@ class ReleaseConformanceReport:
     m4_acceptance: M4FeatureAcceptanceReport
     derived_from_task_checkbox_count: bool
     report_digest: str
+    rust_m1_capabilities: dict[str, Any] | None = None
+    rust_m2_capabilities: dict[str, Any] | None = None
 
 
 class ModelRegistry:
@@ -611,6 +613,15 @@ def generate_release_conformance_report(
     gpu_inv = probe_gpu_hardware()
     m4_acc = run_m4_feature_acceptance_suite()
 
+    # Authoritative Rust capability manifests from crates/nf-core/src/capabilities.rs (Audit Point 3)
+    m1_caps: dict[str, Any] = json.loads(bytes(_native.capabilities_json()))
+    m2_caps: dict[str, Any] = (
+        json.loads(bytes(_native.m2_capabilities_json()))
+        if hasattr(_native, "m2_capabilities_json")
+        else {"components": [], "states": {"release_enabled": False}}
+    )
+    m2_components = set(m2_caps.get("components", ()))
+
     # Probe Rust native shape solver as part of live conformance check
     shape_probe = WeightProgrammingStudio.solve_architecture_shape(
         {
@@ -642,15 +653,29 @@ def generate_release_conformance_report(
     )
     rust_shape_ok = shape_probe.get("kv_group_ratio") == 2
 
+    m1_ready = bool(
+        m1_caps.get("isolated_transactions")
+        and m1_caps.get("exact_single_parent_replay")
+        and m1_caps.get("standalone_dense_export")
+        and m1_caps.get("immutable_core_restore")
+        and m1_caps.get("python_control_boundary")
+    )
+    m2_ready = bool(
+        "three_way_split_broker" in m2_components
+        and "sandbox_isolation_protocol" in m2_components
+        and "paired_controls" in m2_components
+        and "independent_evaluator_protocol" in m2_components
+    )
+
     capability_gates = {
-        "CG-01_transactional_immutability": True,
-        "CG-02_gradient_lineage_separation": True,
-        "CG-03_sealed_split_isolation": True,
-        "CG-04_sandbox_containment": True,
-        "CG-05_paired_statistical_validity": True,
-        "CG-06_resource_budget_enforcement": True,
-        "CG-07_export_reload_parity": True,
-        "CG-08_atomic_promotion_and_recovery": True,
+        "CG-01_transactional_immutability": bool(m1_caps.get("isolated_transactions")) and bool(m1_caps.get("immutable_core_restore")),
+        "CG-02_gradient_lineage_separation": bool(m1_caps.get("python_control_boundary")) and m4_acc.cg11_methods_and_costs_passed,
+        "CG-03_sealed_split_isolation": "three_way_split_broker" in m2_components and "independent_evaluator_protocol" in m2_components,
+        "CG-04_sandbox_containment": "sandbox_isolation_protocol" in m2_components,
+        "CG-05_paired_statistical_validity": "paired_controls" in m2_components,
+        "CG-06_resource_budget_enforcement": bool(m1_caps.get("bounded_sharded_io")) and "frozen_contracts" in m2_components,
+        "CG-07_export_reload_parity": bool(m1_caps.get("standalone_dense_export")) and "standalone_reload_component" in m2_components,
+        "CG-08_atomic_promotion_and_recovery": "operational_fixture_promotion_with_live_grant" in m2_components,
         "CG-09_rule_construction_oracle_independence": m4_acc.cg09_construction_passed,
         "CG-10_mapped_transfer_with_controls": m4_acc.cg10_transfer_passed,
         "CG-11_authorized_baselines_and_cost_accounting": m4_acc.cg11_methods_and_costs_passed,
@@ -662,20 +687,20 @@ def generate_release_conformance_report(
     milestones = {
         "M1": MilestoneEvidenceStatus(
             milestone="M1",
-            software_harness_ready=True,
-            fixture_conformance_verified=True,
+            software_harness_ready=m1_ready,
+            fixture_conformance_verified=m1_ready and bool(m1_caps.get("qualified_on_this_host")),
             live_scientific_or_hardware_claim_status="verified_on_fixture_scope",
         ),
         "M2": MilestoneEvidenceStatus(
             milestone="M2",
-            software_harness_ready=True,
-            fixture_conformance_verified=True,
+            software_harness_ready=m2_ready,
+            fixture_conformance_verified=m2_ready,
             live_scientific_or_hardware_claim_status="verified_on_fixture_scope",
         ),
         "M3": MilestoneEvidenceStatus(
             milestone="M3",
-            software_harness_ready=True,
-            fixture_conformance_verified=True,
+            software_harness_ready=m1_ready and m2_ready and rust_shape_ok,
+            fixture_conformance_verified=m1_ready and m2_ready and rust_shape_ok,
             live_scientific_or_hardware_claim_status="requires_live_provider_or_unseen_model_study",
         ),
         "M4": MilestoneEvidenceStatus(
@@ -718,6 +743,8 @@ def generate_release_conformance_report(
         m4_acceptance=m4_acc,
         derived_from_task_checkbox_count=False,
         report_digest=raw_digest,
+        rust_m1_capabilities=m1_caps,
+        rust_m2_capabilities=m2_caps,
     )
 
 

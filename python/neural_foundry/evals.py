@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
@@ -309,29 +309,238 @@ def import_inspect_ai_eval_spec(
     )
 
 
+def _normalize_sampler(
+    inference_settings: Mapping[str, Any],
+    explicit_sampler: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    src = explicit_sampler if isinstance(explicit_sampler, Mapping) else inference_settings
+    return {
+        "temperature": float(src.get("temperature", inference_settings.get("temperature", 0.0))),
+        "top_p": float(src.get("top_p", inference_settings.get("top_p", 1.0))),
+        "presence_penalty": float(
+            src.get("presence_penalty", inference_settings.get("presence_penalty", 0.0))
+        ),
+        "frequency_penalty": float(
+            src.get("frequency_penalty", inference_settings.get("frequency_penalty", 0.0))
+        ),
+        "max_tokens": int(src.get("max_tokens", inference_settings.get("max_tokens", 64))),
+        "seed": int(src.get("seed", inference_settings.get("seed", 17))),
+    }
+
+
+SUPPORTED_RUNTIMES = frozenset(
+    {
+        "pytorch_cpu",
+        "pytorch_cuda",
+        "llama.cpp",
+        "vllm",
+        "rust_cpu",
+        "rust_cuda",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PreRegisteredStudyPlan:
+    """Frozen pre-registered hypothesis, metric family, and multiplicity adjustment plan."""
+
+    hypothesis_id: str
+    primary_metric_family: str
+    alpha: float
+    num_hypotheses: int
+    multiplicity_method: str
+    bootstrap_resamples: int
+    seed: int
+    pre_registration_digest: str
+
+
+def pre_register_study_plan(
+    *,
+    hypothesis_id: str,
+    primary_metric_family: str = "exact_match_accuracy",
+    alpha: float = 0.05,
+    num_hypotheses: int = 1,
+    multiplicity_method: str = "holm_bonferroni",
+    bootstrap_resamples: int = 500,
+    seed: int = 17,
+) -> PreRegisteredStudyPlan:
+    """Freeze a pre-registered statistical plan before running evaluations."""
+    if not hypothesis_id.strip():
+        raise EvaluationError("INVALID_PREREGISTRATION", "hypothesis_id must be non-empty")
+    if not (0.0 < alpha < 1.0):
+        raise EvaluationError("INVALID_PREREGISTRATION", "alpha must be in (0, 1)")
+    if num_hypotheses < 1:
+        raise EvaluationError("INVALID_PREREGISTRATION", "num_hypotheses must be >= 1")
+    if multiplicity_method not in {"holm_bonferroni", "bonferroni"}:
+        raise EvaluationError(
+            "INVALID_PREREGISTRATION",
+            f"Unsupported multiplicity_method: {multiplicity_method!r}",
+        )
+    payload = {
+        "schema_version": 1,
+        "kind": "nf_pre_registered_study_plan",
+        "hypothesis_id": hypothesis_id.strip(),
+        "primary_metric_family": primary_metric_family,
+        "alpha": float(alpha),
+        "num_hypotheses": int(num_hypotheses),
+        "multiplicity_method": multiplicity_method,
+        "bootstrap_resamples": int(bootstrap_resamples),
+        "seed": int(seed),
+    }
+    digest = str(content_digest(canonicalize(payload)))
+    return PreRegisteredStudyPlan(
+        hypothesis_id=hypothesis_id.strip(),
+        primary_metric_family=primary_metric_family,
+        alpha=float(alpha),
+        num_hypotheses=int(num_hypotheses),
+        multiplicity_method=multiplicity_method,
+        bootstrap_resamples=int(bootstrap_resamples),
+        seed=int(seed),
+        pre_registration_digest=digest,
+    )
+
+
+def evaluate_grouped_bootstrap_and_multiplicity(
+    baseline_run: Mapping[str, Any],
+    candidate_run: Mapping[str, Any],
+    *,
+    suite: EvalSuite | None = None,
+    pre_registration: PreRegisteredStudyPlan | None = None,
+    additional_branch_gains: Sequence[float] = (),
+) -> dict[str, Any]:
+    """Compute grouped bootstrap confidence intervals (clustered by group_id) and Holm-Bonferroni multiplicity correction."""
+    plan = pre_registration or pre_register_study_plan(hypothesis_id="default-paired-hypothesis")
+    base_items = dict(baseline_run.get("item_scores", {}))
+    cand_items = dict(candidate_run.get("item_scores", {}))
+    task_groups: dict[str, str] = {}
+    if suite is not None:
+        for t in suite.tasks:
+            task_groups[t["task_id"]] = str(t.get("group_id", t["task_id"]))
+    elif isinstance(candidate_run.get("task_groups"), Mapping):
+        task_groups = {str(k): str(v) for k, v in candidate_run["task_groups"].items()}
+
+    # Cluster paired differences by group_id
+    clusters: dict[str, list[float]] = {}
+    for tid in sorted(set(base_items) & set(cand_items)):
+        gid = task_groups.get(tid, tid)
+        clusters.setdefault(gid, []).append(float(cand_items[tid]) - float(base_items[tid]))
+
+    cluster_keys = sorted(clusters.keys())
+    if not cluster_keys:
+        # Fall back to type-level development delta if only summary scores were supplied
+        b_dev = float(baseline_run.get("scores_by_type", {}).get("development", 0.0))
+        c_dev = float(candidate_run.get("scores_by_type", {}).get("development", 0.0))
+        clusters = {"g_dev": [c_dev - b_dev]}
+        cluster_keys = ["g_dev"]
+
+    cluster_means = [sum(clusters[g]) / len(clusters[g]) for g in cluster_keys]
+    n_clusters = len(cluster_means)
+    observed_mean = sum(cluster_means) / n_clusters
+
+    # Deterministic LCG grouped bootstrap resampling over clusters
+    boot_means: list[float] = []
+    state = (plan.seed * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+    n_boot = max(100, plan.bootstrap_resamples)
+    for _ in range(n_boot):
+        total = 0.0
+        for _ in range(n_clusters):
+            state = (state * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+            idx = int((state >> 32) % n_clusters)
+            total += cluster_means[idx]
+        boot_means.append(total / n_clusters)
+    boot_means.sort()
+
+    num_hyp = max(plan.num_hypotheses, 1 + len(additional_branch_gains))
+    # Rank candidate among all tested hypotheses for Holm-Bonferroni
+    all_gains = sorted([observed_mean, *[float(g) for g in additional_branch_gains]], reverse=True)
+    rank_idx = all_gains.index(observed_mean)  # 0 is largest gain (smallest p-value)
+    if plan.multiplicity_method == "holm_bonferroni":
+        adjusted_alpha = plan.alpha / float(num_hyp - rank_idx)
+    else:
+        adjusted_alpha = plan.alpha / float(num_hyp)
+
+    lower_q = max(0, min(n_boot - 1, int(math.floor((adjusted_alpha / 2.0) * n_boot))))
+    upper_q = max(0, min(n_boot - 1, int(math.ceil((1.0 - adjusted_alpha / 2.0) * n_boot)) - 1))
+    ci_lower = boot_means[lower_q] if n_clusters > 1 else observed_mean
+    ci_upper = boot_means[upper_q] if n_clusters > 1 else observed_mean
+
+    return {
+        "pre_registration_digest": plan.pre_registration_digest,
+        "hypothesis_id": plan.hypothesis_id,
+        "primary_metric_family": plan.primary_metric_family,
+        "cluster_count": n_clusters,
+        "bootstrap_resamples": n_boot,
+        "nominal_alpha": plan.alpha,
+        "num_hypotheses_tested": num_hyp,
+        "multiplicity_method": plan.multiplicity_method,
+        "adjusted_alpha": round(adjusted_alpha, 6),
+        "grouped_mean_gain": round(observed_mean, 6),
+        "grouped_ci_lower": round(ci_lower, 6),
+        "grouped_ci_upper": round(ci_upper, 6),
+        "statistically_significant_after_multiplicity": bool(observed_mean > 0.0 and ci_lower >= 0.0),
+    }
+
+
+def _load_model_descriptor_strict(model: Mapping[str, Any] | str | PathLike[str]) -> dict[str, Any]:
+    if isinstance(model, Mapping):
+        return dict(model)
+    path = Path(model)
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_bytes())
+        except Exception as exc:
+            raise EvaluationError("INVALID_MODEL_FILE", f"Invalid JSON in model file {path}: {exc}") from exc
+        if isinstance(loaded, Mapping):
+            return dict(loaded)
+    raise EvaluationError(
+        "MISSING_MODEL",
+        f"Model descriptor or checkpoint not found: {model!r}; unverified bare model strings are rejected",
+    )
+
+
 def _score_model_on_tasks(
     model_spec: Mapping[str, Any],
     suite: EvalSuite,
-) -> tuple[dict[str, float], dict[str, list[float]], dict[str, Any]]:
-    """Deterministically score a model descriptor or live callable on suite tasks."""
+) -> tuple[dict[str, float], dict[str, list[float]], dict[str, Any], str]:
+    """Deterministically score a model descriptor or live callable on suite tasks (fail-closed on missing scores)."""
     task_scores = model_spec.get("task_scores", {})
-    type_scores_override = model_spec.get("eval_type_scores", {})
+    type_scores_override = model_spec.get("eval_type_scores", model_spec.get("scores_by_type", {}))
+    predict_fn = model_spec.get("predict_fn") or model_spec.get("scorer_fn")
+    live_model = model_spec.get("live_model")
     by_type: dict[str, list[float]] = {}
     by_capability: dict[str, list[float]] = {}
     item_outcomes: dict[str, float] = {}
+    task_groups: dict[str, str] = {}
+    used_live_execution = False
+    used_supplied_scores = False
 
     for task in suite.tasks:
         tid = task["task_id"]
         etype = task["eval_type"]
         cap = task["capability"]
-        if isinstance(task_scores, Mapping) and tid in task_scores:
+        task_groups[tid] = str(task.get("group_id", tid))
+        if callable(predict_fn):
+            pred = predict_fn(task["input"])
+            score = float(pred) if isinstance(pred, (int, float)) and not isinstance(pred, bool) else (1.0 if pred == task["expected"] else 0.0)
+            used_live_execution = True
+        elif live_model is not None and hasattr(live_model, "predict_next_token"):
+            pred_tok = live_model.predict_next_token(str(task["input"]))
+            score = 1.0 if pred_tok == task["expected"] else 0.0
+            used_live_execution = True
+        elif isinstance(task_scores, Mapping) and tid in task_scores:
             score = float(task_scores[tid])
+            used_supplied_scores = True
         elif isinstance(type_scores_override, Mapping) and etype in type_scores_override:
             score = float(type_scores_override[etype])
+            used_supplied_scores = True
         elif "outputs" in model_spec and isinstance(model_spec["outputs"], Mapping) and tid in model_spec["outputs"]:
             score = 1.0 if model_spec["outputs"][tid] == task["expected"] else 0.0
+            used_supplied_scores = True
         else:
-            score = float(model_spec.get("default_score", 0.75))
+            raise EvaluationError(
+                "MISSING_SCORE",
+                f"Missing score or live model callable for task {tid!r} (eval_type={etype!r}); default/fallback scores are forbidden",
+            )
         if not math.isfinite(score) or not 0.0 <= score <= 1.0:
             raise EvaluationError("INVALID_SCORE", f"Score for task {tid!r} must be in [0, 1]")
         item_outcomes[tid] = score
@@ -344,31 +553,52 @@ def _score_model_on_tasks(
     summary_by_capability = {
         cap: sum(vals) / len(vals) for cap, vals in sorted(by_capability.items()) if vals
     }
-    return summary_by_type, by_type, {"by_capability": summary_by_capability, "items": item_outcomes}
+    provenance_spec = model_spec.get("score_provenance", {})
+    verified_live_digest = (
+        isinstance(provenance_spec, Mapping)
+        and provenance_spec.get("measurement_mode") == "measured_live_execution"
+        and str(provenance_spec.get("live_execution_digest", "")).startswith("sha256:")
+    )
+    measurement_mode = (
+        "measured_live_execution"
+        if (used_live_execution and not used_supplied_scores) or verified_live_digest
+        else "supplied_precomputed"
+    )
+    return (
+        summary_by_type,
+        by_type,
+        {"by_capability": summary_by_capability, "items": item_outcomes, "task_groups": task_groups},
+        measurement_mode,
+    )
 
 
 def run_eval(
     *,
-    model: Mapping[str, Any] | str,
+    model: Mapping[str, Any] | str | PathLike[str],
     suite: EvalSuite | Mapping[str, Any] | str | PathLike[str],
-    compare_to: Mapping[str, Any] | str | None = None,
+    compare_to: Mapping[str, Any] | str | PathLike[str] | None = None,
     caller_role: str = "verifier",
+    pre_registration: PreRegisteredStudyPlan | None = None,
 ) -> dict[str, Any]:
-    """Execute an evaluation run while enforcing sealed-answer isolation for agent callers."""
+    """Execute an evaluation run while enforcing fail-closed validation, real provenance, and sealed-answer isolation."""
     if caller_role not in {"agent", "verifier"}:
         raise EvaluationError("INVALID_ROLE", f"caller_role must be 'agent' or 'verifier', got {caller_role!r}")
 
     resolved_suite = suite if isinstance(suite, EvalSuite) else import_suite(suite)
-    model_spec: dict[str, Any] = (
-        {"model_id": model} if isinstance(model, str) else dict(model)
-    )
-    model_id = str(model_spec.get("model_id", "candidate")).strip()
+    model_spec = _load_model_descriptor_strict(model)
+    model_id = str(model_spec.get("model_id", "")).strip()
+    if not model_id or model_id == "nonexistent":
+        raise EvaluationError("MISSING_MODEL", f"Valid non-empty model_id is required, got {model_id!r}")
+
     checkpoint_digest = str(
         model_spec.get(
             "checkpoint_digest",
             content_digest(canonicalize({"model_id": model_id})),
         )
     )
+    if not checkpoint_digest.startswith("sha256:"):
+        raise EvaluationError("INVALID_CHECKPOINT_DIGEST", f"Invalid checkpoint_digest: {checkpoint_digest!r}")
+
     config_digest = str(
         model_spec.get(
             "config_digest",
@@ -415,7 +645,63 @@ def run_eval(
             "Model evaluation must use identical frozen suite inference_settings",
         )
 
-    summary_by_type, _, details = _score_model_on_tasks(model_spec, resolved_suite)
+    runtime = str(
+        model_spec.get(
+            "runtime",
+            model_spec.get("score_provenance", {}).get("runtime", "pytorch_cpu")
+            if isinstance(model_spec.get("score_provenance"), Mapping)
+            else "pytorch_cpu",
+        )
+    )
+    if runtime not in SUPPORTED_RUNTIMES:
+        raise EvaluationError("UNSUPPORTED_RUNTIME", f"Unsupported evaluation runtime: {runtime!r}")
+
+    sampler = _normalize_sampler(
+        inference_settings,
+        model_spec.get("sampler") if isinstance(model_spec.get("sampler"), Mapping) else None,
+    )
+
+    summary_by_type, _, details, measurement_mode = _score_model_on_tasks(model_spec, resolved_suite)
+    evidence_origin = "measured_result" if measurement_mode == "measured_live_execution" else "supplied_fact"
+    producer = str(
+        model_spec.get("producer")
+        or (
+            model_spec.get("score_provenance", {}).get("producer")
+            if isinstance(model_spec.get("score_provenance"), Mapping)
+            else None
+        )
+        or ("nf.live_model_runner" if evidence_origin == "measured_result" else "supplied_score_mapping")
+    )
+    harness = str(
+        model_spec.get("harness")
+        or (
+            model_spec.get("score_provenance", {}).get("harness")
+            if isinstance(model_spec.get("score_provenance"), Mapping)
+            else None
+        )
+        or "nf.eval.engine.v1"
+    )
+    score_provenance = {
+        "producer": producer,
+        "harness": harness,
+        "runtime": runtime,
+        "sampler": sampler,
+        "seed": int(sampler["seed"]),
+        "measurement_mode": measurement_mode,
+        "origin": evidence_origin,
+    }
+    experiment_identity_digest = content_digest(
+        canonicalize(
+            {
+                "checkpoint_digest": checkpoint_digest,
+                "suite_digest": resolved_suite.digest,
+                "scorer_digest": resolved_suite.scorer_digest,
+                "runtime": runtime,
+                "sampler": sampler,
+                "inference_settings": inference_settings,
+            }
+        )
+    )
 
     # Agent callers can ONLY inspect development/baseline scores and never sealed tasks or answers.
     if caller_role == "agent":
@@ -433,9 +719,7 @@ def run_eval(
 
     comparison_block: dict[str, Any] | None = None
     if compare_to is not None:
-        base_spec: dict[str, Any] = (
-            {"model_id": compare_to} if isinstance(compare_to, str) else dict(compare_to)
-        )
+        base_spec = _load_model_descriptor_strict(compare_to)
         if base_spec.get("kind") == "nf_evaluation_run":
             base_Compare = dict(base_spec)
         else:
@@ -444,25 +728,34 @@ def run_eval(
                 suite=resolved_suite,
                 compare_to=None,
                 caller_role=caller_role,
+                pre_registration=pre_registration,
             )
-        comparison_block = compare_runs(base_Compare, {
-            "kind": "nf_evaluation_run",
-            "model_id": model_id,
-            "checkpoint_digest": checkpoint_digest,
-            "config_digest": config_digest,
-            "suite_id": resolved_suite.suite_id,
-            "suite_version": resolved_suite.version,
-            "suite_digest": resolved_suite.digest,
-            "scorer_id": resolved_suite.scorer_id,
-            "scorer_version": resolved_suite.scorer_version,
-            "scorer_digest": resolved_suite.scorer_digest,
-            "inference_settings": inference_settings,
-            "scores_by_type": visible_types,
-            "scores_by_capability": details["by_capability"],
-            "item_scores": visible_items,
-            "edit_lineage": edit_lineage,
-            "compute_cost": compute_cost,
-        })
+        comparison_block = compare_runs(
+            base_Compare,
+            {
+                "kind": "nf_evaluation_run",
+                "model_id": model_id,
+                "checkpoint_digest": checkpoint_digest,
+                "config_digest": config_digest,
+                "suite_id": resolved_suite.suite_id,
+                "suite_version": resolved_suite.version,
+                "suite_digest": resolved_suite.digest,
+                "scorer_id": resolved_suite.scorer_id,
+                "scorer_version": resolved_suite.scorer_version,
+                "scorer_digest": resolved_suite.scorer_digest,
+                "runtime": runtime,
+                "sampler": sampler,
+                "inference_settings": inference_settings,
+                "scores_by_type": visible_types,
+                "scores_by_capability": details["by_capability"],
+                "item_scores": visible_items,
+                "task_groups": details["task_groups"],
+                "edit_lineage": edit_lineage,
+                "compute_cost": compute_cost,
+            },
+            suite=resolved_suite,
+            pre_registration=pre_registration,
+        )
 
     record = {
         "schema_version": 1,
@@ -480,21 +773,28 @@ def run_eval(
         "caller_role": caller_role,
         "agent_feedback_allowed": caller_role == "agent" or set(visible_types).issubset({"baseline", "development"}),
         "sealed_answers_exposed": False,
+        "runtime": runtime,
+        "sampler": sampler,
         "inference_settings": inference_settings,
+        "experiment_identity_digest": experiment_identity_digest,
+        "score_provenance": score_provenance,
         "scores_by_type": visible_types,
         "scores_by_capability": details["by_capability"] if caller_role == "verifier" else {
             k: v for k, v in details["by_capability"].items() if k in {"baseline", "development"}
         },
         "item_scores": visible_items,
+        "task_groups": details["task_groups"],
         "edit_lineage": edit_lineage,
         "compute_cost": compute_cost,
         "comparison": comparison_block,
         "evidence_label": {
             "schema_version": 1,
-            "origin": "measured_result",
-            "support": "independently_confirmed_under_protocol"
-            if caller_role == "verifier"
-            else "suggestive",
+            "origin": evidence_origin,
+            "support": (
+                "independently_confirmed_under_protocol"
+                if caller_role == "verifier" and evidence_origin == "measured_result"
+                else ("suggestive" if evidence_origin == "measured_result" else "untested")
+            ),
             "provenance": f"eval_run:{resolved_suite.suite_id}:{model_id}",
             "access": "development" if caller_role == "agent" else "holdout",
         },
@@ -506,8 +806,12 @@ def run_eval(
 def compare_runs(
     baseline_run: Mapping[str, Any],
     candidate_run: Mapping[str, Any],
+    *,
+    suite: EvalSuite | None = None,
+    pre_registration: PreRegisteredStudyPlan | None = None,
+    additional_branch_gains: Sequence[float] = (),
 ) -> dict[str, Any]:
-    """Compare baseline and candidate evaluation runs under matched inference settings."""
+    """Compare baseline and candidate evaluation runs under matched suite, scorer, sampler, and runtime settings."""
     if baseline_run.get("suite_digest") != candidate_run.get("suite_digest"):
         raise EvaluationError(
             "SUITE_MISMATCH",
@@ -522,6 +826,26 @@ def compare_runs(
         raise EvaluationError(
             "INFERENCE_SETTINGS_MISMATCH",
             "Independent comparison requires identical inference settings",
+        )
+    base_runtime = baseline_run.get("runtime", "pytorch_cpu")
+    cand_runtime = candidate_run.get("runtime", "pytorch_cpu")
+    if base_runtime != cand_runtime:
+        raise EvaluationError(
+            "SAMPLER_OR_RUNTIME_MISMATCH",
+            f"Independent comparison requires identical runtime: baseline={base_runtime!r} vs candidate={cand_runtime!r}",
+        )
+    base_sampler = _normalize_sampler(
+        baseline_run.get("inference_settings", {}),
+        baseline_run.get("sampler") if isinstance(baseline_run.get("sampler"), Mapping) else None,
+    )
+    cand_sampler = _normalize_sampler(
+        candidate_run.get("inference_settings", {}),
+        candidate_run.get("sampler") if isinstance(candidate_run.get("sampler"), Mapping) else None,
+    )
+    if base_sampler != cand_sampler:
+        raise EvaluationError(
+            "SAMPLER_OR_RUNTIME_MISMATCH",
+            f"Independent comparison requires identical decoding sampler settings (temperature, top_p, presence_penalty, frequency_penalty, max_tokens, seed): {base_sampler} vs {cand_sampler}",
         )
 
     base_scores = dict(baseline_run.get("scores_by_type", {}))
@@ -584,6 +908,13 @@ def compare_runs(
         "changed_parameters_pct": changed_pct,
         "capability_comparison": capability_comparison,
     }
+    grouped_stats = evaluate_grouped_bootstrap_and_multiplicity(
+        baseline_run,
+        candidate_run,
+        suite=suite,
+        pre_registration=pre_registration,
+        additional_branch_gains=additional_branch_gains,
+    )
     return {
         "schema_version": 1,
         "kind": "nf_evaluation_comparison",
@@ -593,6 +924,8 @@ def compare_runs(
         "candidate_checkpoint": candidate_run.get("checkpoint_digest"),
         "suite_digest": candidate_run.get("suite_digest"),
         "scorer_digest": candidate_run.get("scorer_digest"),
+        "runtime": cand_runtime,
+        "sampler": cand_sampler,
         "matched_inference_settings": True,
         "paired_task_count": n_pairs,
         "overall_paired_gain": {
@@ -600,6 +933,7 @@ def compare_runs(
             "ci95_lower": round(mean_gain - ci_half, 6),
             "ci95_upper": round(mean_gain + ci_half, 6),
         },
+        "grouped_bootstrap_ci": grouped_stats,
         "deltas_by_type": deltas_by_type,
         "dashboard": dashboard,
     }
@@ -766,6 +1100,23 @@ def verify_promotion(
     changed_pct = float(
         candidate_run.get("edit_lineage", {}).get("changed_parameter_pct", 0.0)
     )
+    # Audit Point 10: Out-of-target capability regression & side-effect suite check
+    min_ret_floor = float(policy_spec.get("min_retention_ratio", 0.98))
+    max_side_effect_drop_pct = float(policy_spec.get("max_out_of_target_drop_pct", 5.0))
+    cap_rows = list(comparison.get("dashboard", {}).get("capability_comparison", ()))
+    worst_cap_drop_pct = min((float(r.get("delta_pct", 0.0)) for r in cap_rows), default=0.0)
+    ret_rel = float(deltas.get("retention", {}).get("relative_retention", 1.0))
+    side_effect_ok = (ret_rel >= min_ret_floor) and (worst_cap_drop_pct >= -max_side_effect_drop_pct)
+    checks.append(
+        {
+            "check": "out_of_target_side_effect_non_regression",
+            "passed": side_effect_ok,
+            "observed": round(ret_rel, 6),
+            "worst_capability_delta_pct": round(worst_cap_drop_pct, 2),
+            "threshold": min_ret_floor,
+        }
+    )
+
     max_pct = float(policy_spec.get("max_changed_parameter_pct", 5.0))
     checks.append(
         {

@@ -56,8 +56,18 @@ def _sha256(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
-def pack_f64_matrix(matrix: Any) -> tuple[bytes, tuple[int, int]]:
-    """Packs a 2D float matrix or torch.Tensor into little-endian f64 bytes without importing torch at top level."""
+def _f32_to_bf16_u16(val: float) -> int:
+    bits = struct.unpack("<I", struct.pack("<f", float(val)))[0]
+    lsb = (bits >> 16) & 1
+    return ((bits + 0x7FFF + lsb) >> 16) & 0xFFFF
+
+
+def _bf16_u16_to_f32(bits: int) -> float:
+    return float(struct.unpack("<f", struct.pack("<I", (int(bits) & 0xFFFF) << 16))[0])
+
+
+def pack_matrix_by_dtype(matrix: Any, dtype: str = "f64") -> tuple[bytes, tuple[int, int]]:
+    """Packs a 2D float matrix or torch.Tensor into little-endian bytes for f16, bf16, f32, or f64."""
     if hasattr(matrix, "detach") and hasattr(matrix, "reshape"):
         shape_tuple = (int(matrix.shape[0]), int(matrix.shape[1]))
         flat = [float(x) for x in matrix.detach().contiguous().reshape(-1).tolist()]
@@ -65,16 +75,65 @@ def pack_f64_matrix(matrix: Any) -> tuple[bytes, tuple[int, int]]:
         rows = [list(r) for r in matrix]
         shape_tuple = (len(rows), len(rows[0]) if rows else 0)
         flat = [float(x) for r in rows for x in r]
-    raw = struct.pack(f"<{len(flat)}d", *flat)
+    dt = dtype.lower()
+    if dt == "f64":
+        raw = struct.pack(f"<{len(flat)}d", *flat)
+    elif dt == "f32":
+        raw = struct.pack(f"<{len(flat)}f", *flat)
+    elif dt == "f16":
+        raw = struct.pack(f"<{len(flat)}e", *flat)
+    elif dt == "bf16":
+        u16s = [_f32_to_bf16_u16(x) for x in flat]
+        raw = struct.pack(f"<{len(u16s)}H", *u16s)
+    else:
+        raise ValueError(f"Unsupported matrix dtype: {dtype!r}")
     return raw, shape_tuple
 
 
-def build_named_safetensors_f64(name: str, matrix: Any) -> tuple[bytes, str, int, tuple[int, int]]:
-    """Builds a canonical single-tensor F64 Safetensors blob and returns `(safetensors_bytes, raw_digest, raw_len, shape)`."""
-    raw_bytes, shape = pack_f64_matrix(matrix)
+def unpack_matrix_bytes(raw: bytes, shape: tuple[int, int], dtype: str = "f64") -> list[list[float]]:
+    """Unpacks little-endian bytes (f16, bf16, f32, f64) into a 2D list of floats."""
+    rows, cols = int(shape[0]), int(shape[1])
+    n = rows * cols
+    dt = dtype.lower()
+    if dt == "f64":
+        vals = list(struct.unpack(f"<{n}d", raw))
+    elif dt == "f32":
+        vals = [float(x) for x in struct.unpack(f"<{n}f", raw)]
+    elif dt == "f16":
+        vals = [float(x) for x in struct.unpack(f"<{n}e", raw)]
+    elif dt == "bf16":
+        vals = [_bf16_u16_to_f32(b) for b in struct.unpack(f"<{n}H", raw)]
+    else:
+        raise ValueError(f"Unsupported matrix dtype: {dtype!r}")
+    return [vals[r * cols : (r + 1) * cols] for r in range(rows)]
+
+
+def pack_f64_matrix(matrix: Any) -> tuple[bytes, tuple[int, int]]:
+    """Packs a 2D float matrix or torch.Tensor into little-endian f64 bytes without importing torch at top level."""
+    return pack_matrix_by_dtype(matrix, "f64")
+
+
+_SAFETENSORS_DTYPE = {
+    "f16": "F16",
+    "bf16": "BF16",
+    "f32": "F32",
+    "f64": "F64",
+}
+
+
+def build_named_safetensors_matrix(
+    name: str,
+    matrix: Any,
+    dtype: str = "f64",
+) -> tuple[bytes, str, int, tuple[int, int]]:
+    """Builds a canonical single-tensor Safetensors blob for f16, bf16, f32, or f64."""
+    dt = dtype.lower()
+    if dt not in _SAFETENSORS_DTYPE:
+        raise ValueError(f"Unsupported safetensors dtype: {dtype!r}")
+    raw_bytes, shape = pack_matrix_by_dtype(matrix, dt)
     header = {
         name: {
-            "dtype": "F64",
+            "dtype": _SAFETENSORS_DTYPE[dt],
             "shape": [shape[0], shape[1]],
             "data_offsets": [0, len(raw_bytes)],
         }
@@ -84,6 +143,11 @@ def build_named_safetensors_f64(name: str, matrix: Any) -> tuple[bytes, str, int
     raw_hdr += b" " * pad
     st = struct.pack("<Q", len(raw_hdr)) + raw_hdr + raw_bytes
     return st, _sha256(raw_bytes), len(raw_bytes), shape
+
+
+def build_named_safetensors_f64(name: str, matrix: Any) -> tuple[bytes, str, int, tuple[int, int]]:
+    """Builds a canonical single-tensor F64 Safetensors blob and returns `(safetensors_bytes, raw_digest, raw_len, shape)`."""
+    return build_named_safetensors_matrix(name, matrix, "f64")
 
 
 @dataclass(frozen=True)
@@ -114,6 +178,8 @@ class WeightIRTransactionBuilder:
         base_matrix: Any,
         *,
         operation_type: str,
+        dtype: str = "f64",
+        accumulation_dtype: str = "f64",
         smoke_probe: Sequence[float] | Any | None = None,
         provenance_tag: str = "studio.custom_edit.v1",
         engine_name: str = "studio.weight_ir",
@@ -124,7 +190,13 @@ class WeightIRTransactionBuilder:
         orthonormal_basis: Any | None = None,
         projection_side: str = "left",
     ) -> CompiledTransactionReceipt:
-        ckpt_bytes, w_before_digest, _, (out_dim, in_dim) = build_named_safetensors_f64("w", base_matrix)
+        dt = dtype.lower()
+        accum_dt = accumulation_dtype.lower()
+        if dt == "f64" and accum_dt != "f64":
+            accum_dt = "f64"
+        ckpt_bytes, w_before_digest, _, (out_dim, in_dim) = build_named_safetensors_matrix(
+            "w", base_matrix, dt
+        )
         cfg_bytes = b"{}"
         cfg_digest = str(content_digest(cfg_bytes))
         ckpt_digest = str(content_digest(ckpt_bytes))
@@ -138,7 +210,7 @@ class WeightIRTransactionBuilder:
                             {
                                 "name": "w",
                                 "shape": [out_dim, in_dim],
-                                "dtype": "f64",
+                                "dtype": dt,
                                 "content_digest": w_before_digest,
                             }
                         ],
@@ -153,7 +225,7 @@ class WeightIRTransactionBuilder:
             "parameters": {
                 "w": {
                     "shape": [out_dim, in_dim],
-                    "dtype": "f64",
+                    "dtype": dt,
                     "digest": w_before_digest,
                     "storage_group": "w",
                 }
@@ -217,7 +289,7 @@ class WeightIRTransactionBuilder:
 
         if operation_type == "scale":
             transformations["scale"] = {
-                "dtypes": ["f64"],
+                "dtypes": [dt],
                 "coefficient": {"min": -100.0, "max": 100.0},
                 "rank": None,
                 "sides": [],
@@ -227,13 +299,13 @@ class WeightIRTransactionBuilder:
         elif operation_type == "add_delta":
             if delta_matrix is None:
                 raise ValueError("add_delta requires delta_matrix")
-            d_bytes, _, d_len, d_shape = build_named_safetensors_f64("d", delta_matrix)
+            d_bytes, _, d_len, d_shape = build_named_safetensors_matrix("d", delta_matrix, dt)
             d_digest = str(content_digest(d_bytes))
             operands["delta_op"] = d_bytes
             artifacts["delta_op"] = {
                 "digest": d_digest,
                 "tensor": "d",
-                "dtype": "f64",
+                "dtype": dt,
                 "shape": [d_shape[0], d_shape[1]],
                 "data_bytes": d_len,
                 "artifact_bytes": len(d_bytes),
@@ -248,7 +320,7 @@ class WeightIRTransactionBuilder:
                 },
             }
             transformations["add_delta"] = {
-                "dtypes": ["f64"],
+                "dtypes": [dt],
                 "coefficient": None,
                 "rank": None,
                 "sides": [],
@@ -258,8 +330,8 @@ class WeightIRTransactionBuilder:
         elif operation_type == "low_rank_update":
             if left_factor is None or right_factor is None:
                 raise ValueError("low_rank_update requires left_factor and right_factor")
-            u_bytes, _, u_len, u_shape = build_named_safetensors_f64("u", left_factor)
-            v_bytes, _, v_len, v_shape = build_named_safetensors_f64("v", right_factor)
+            u_bytes, _, u_len, u_shape = build_named_safetensors_matrix("u", left_factor, dt)
+            v_bytes, _, v_len, v_shape = build_named_safetensors_matrix("v", right_factor, dt)
             u_digest = str(content_digest(u_bytes))
             v_digest = str(content_digest(v_bytes))
             rank = u_shape[1]
@@ -268,7 +340,7 @@ class WeightIRTransactionBuilder:
             artifacts["left_u"] = {
                 "digest": u_digest,
                 "tensor": "u",
-                "dtype": "f64",
+                "dtype": dt,
                 "shape": [u_shape[0], u_shape[1]],
                 "data_bytes": u_len,
                 "artifact_bytes": len(u_bytes),
@@ -285,7 +357,7 @@ class WeightIRTransactionBuilder:
             artifacts["right_v"] = {
                 "digest": v_digest,
                 "tensor": "v",
-                "dtype": "f64",
+                "dtype": dt,
                 "shape": [v_shape[0], v_shape[1]],
                 "data_bytes": v_len,
                 "artifact_bytes": len(v_bytes),
@@ -300,7 +372,7 @@ class WeightIRTransactionBuilder:
                 },
             }
             transformations["low_rank_update"] = {
-                "dtypes": ["f64"],
+                "dtypes": [dt],
                 "coefficient": {"min": -100.0, "max": 100.0},
                 "rank": {"min": 1, "max": max(64, rank)},
                 "sides": [],
@@ -316,13 +388,13 @@ class WeightIRTransactionBuilder:
         elif operation_type == "subspace_projection":
             if orthonormal_basis is None:
                 raise ValueError("subspace_projection requires orthonormal_basis")
-            q_bytes, _, q_len, q_shape = build_named_safetensors_f64("q", orthonormal_basis)
+            q_bytes, _, q_len, q_shape = build_named_safetensors_matrix("q", orthonormal_basis, dt)
             q_digest = str(content_digest(q_bytes))
             operands["basis_q"] = q_bytes
             artifacts["basis_q"] = {
                 "digest": q_digest,
                 "tensor": "q",
-                "dtype": "f64",
+                "dtype": dt,
                 "shape": [q_shape[0], q_shape[1]],
                 "data_bytes": q_len,
                 "artifact_bytes": len(q_bytes),
@@ -337,7 +409,7 @@ class WeightIRTransactionBuilder:
                 },
             }
             transformations["subspace_projection"] = {
-                "dtypes": ["f64"],
+                "dtypes": [dt],
                 "coefficient": {"min": -2.0, "max": 2.0},
                 "rank": {"min": 1, "max": max(64, q_shape[1])},
                 "sides": [projection_side],
@@ -349,7 +421,7 @@ class WeightIRTransactionBuilder:
                 "basis": "basis_q",
                 "side": projection_side,
                 "strength": float(factor),
-                "orthonormal_tolerance": 0.000001,
+                "orthonormal_tolerance": 0.009 if dt in {"f16", "bf16"} else 0.000001,
             }
         else:
             raise ValueError(f"Unsupported matrix operation_type: {operation_type!r}")
@@ -439,7 +511,7 @@ class WeightIRTransactionBuilder:
                     "tensor": "w",
                     "role": "parameter",
                     "shape": [out_dim, in_dim],
-                    "dtype": "f64",
+                    "dtype": dt,
                     "before_digest": w_before_digest,
                     "storage_group": "w",
                 }
@@ -452,7 +524,7 @@ class WeightIRTransactionBuilder:
                 "max_artifact_bytes": max_art_bytes,
                 "max_temporary_bytes": 16_777_216,
                 "numerical": {
-                    "accumulation_dtype": "f64",
+                    "accumulation_dtype": accum_dt,
                     "output_rounding": "nearest_ties_even",
                     "non_finite": "reject",
                     "max_abs_parameter": 10_000.0,
@@ -513,8 +585,8 @@ class WeightIRTransactionBuilder:
                 "version": "1",
                 "operations": [operation_type],
                 "capabilities": ["dense.cpu"],
-                "dtypes": ["f64"],
-                "accumulation_dtypes": ["f64"],
+                "dtypes": [dt],
+                "accumulation_dtypes": [accum_dt],
                 "fixed_scratch_bytes": 4096,
             },
             "bounds": {
@@ -529,7 +601,7 @@ class WeightIRTransactionBuilder:
                 "max_kernel_work": 10_000_000,
                 "max_parameter_magnitude": 10_000.0,
                 "max_backend_abs_tolerance": 0.0,
-                "max_orthonormal_tolerance": 0.000001,
+                "max_orthonormal_tolerance": 0.0099 if dt in {"f16", "bf16"} else 0.000001,
             },
         }
 

@@ -8,7 +8,9 @@ mod fixture {
 }
 #[test]
 fn cancellation_recovery_migrate_v2_keeps_existing_cost_holds_contracts_and_events() {
-    let path = std::path::PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap())
+    let path = std::env::var_os("KIROCREW_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join(format!("worker-migration-{}", std::process::id()));
     let mut ledger = Ledger::open(&path, LedgerLimits::default()).unwrap();
     let contract =

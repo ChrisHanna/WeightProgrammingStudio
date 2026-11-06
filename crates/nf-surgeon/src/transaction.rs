@@ -88,6 +88,16 @@ impl Group {
         let mut hash = Sha256::new();
         match self {
             Self::Float(tensor) => {
+                if let Some(values) = tensor.f16_bits() {
+                    for value in values {
+                        hash.update(value.to_le_bytes());
+                    }
+                }
+                if let Some(values) = tensor.bf16_bits() {
+                    for value in values {
+                        hash.update(value.to_le_bytes());
+                    }
+                }
                 if let Some(values) = tensor.f32_values() {
                     for value in values {
                         hash.update(value.to_le_bytes());
@@ -166,6 +176,17 @@ impl Default for StateLoadLimits {
         }
     }
 }
+impl StateLoadLimits {
+    /// Limits suitable for multi-gigabyte open-weight checkpoints (up to 64 GiB).
+    pub fn large_model() -> Self {
+        Self {
+            max_checkpoint_bytes: usize::try_from(68_719_476_736u64).unwrap_or(usize::MAX),
+            max_tensor_bytes: 68_719_476_736,
+            max_tensors: 16_384,
+            max_asset_bytes: 268_435_456,
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct SourceState {
     state: ModelState,
@@ -186,7 +207,7 @@ impl SourceState {
         if limits.max_checkpoint_bytes == 0
             || limits.max_tensor_bytes == 0
             || limits.max_tensors == 0
-            || limits.max_tensors > 1024
+            || limits.max_tensors > 65_536
             || limits.max_asset_bytes == 0
         {
             return Err(failure(
@@ -200,14 +221,15 @@ impl SourceState {
                 "native source state requires dense storage",
             ));
         }
-        if manifest
-            .parameters
-            .values()
-            .any(|spec| !matches!(spec.dtype, DType::F32 | DType::F64))
-        {
+        if manifest.parameters.values().any(|spec| {
+            !matches!(
+                spec.dtype,
+                DType::F16 | DType::Bf16 | DType::F32 | DType::F64
+            )
+        }) {
             return Err(failure(
                 ErrorCode::UnsupportedCapability,
-                "native source parameters must be f32/f64; other state needs a qualified adapter",
+                "native source parameters must be f16/bf16/f32/f64; other state needs a qualified adapter",
             ));
         }
         if manifest.parameters.len() + manifest.buffers.len() > limits.max_tensors
@@ -331,6 +353,26 @@ impl SourceState {
             })?;
             let bytes = &checkpoint[range.clone()];
             let group = match spec.dtype {
+                DType::F16 => Group::Float(CpuTensor::from_f16_bits(
+                    canonical,
+                    spec.shape.clone(),
+                    bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|value| u16::from_le_bytes(*value))
+                        .collect(),
+                )?),
+                DType::Bf16 => Group::Float(CpuTensor::from_bf16_bits(
+                    canonical,
+                    spec.shape.clone(),
+                    bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|value| u16::from_le_bytes(*value))
+                        .collect(),
+                )?),
                 DType::F32 => Group::Float(CpuTensor::from_f32(
                     canonical,
                     spec.shape.clone(),
@@ -915,7 +957,10 @@ fn check_source_definition(source: &SourceState) -> Result<()> {
         if group.dtype() != spec.dtype
             || group.shape() != spec.shape
             || group.byte_len()? != spec.byte_len()?
-            || matches!(spec.dtype, DType::F32 | DType::F64) != matches!(group, Group::Float(_))
+            || matches!(
+                spec.dtype,
+                DType::F16 | DType::Bf16 | DType::F32 | DType::F64
+            ) != matches!(group, Group::Float(_))
         {
             return Err(failure(
                 ErrorCode::SourceMismatch,
@@ -1022,6 +1067,12 @@ fn outside_hash(tensor: &CpuTensor, region: &TensorRegion) -> Result<ContentDige
     let mut hash = Sha256::new();
     for index in 0..count {
         if !inside(index, tensor.shape(), region) {
+            if let Some(values) = tensor.f16_bits() {
+                hash.update(values[index as usize].to_le_bytes());
+            }
+            if let Some(values) = tensor.bf16_bits() {
+                hash.update(values[index as usize].to_le_bytes());
+            }
             if let Some(values) = tensor.f32_values() {
                 hash.update(values[index as usize].to_le_bytes());
             }

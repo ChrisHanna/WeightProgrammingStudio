@@ -45,6 +45,37 @@ fn json_digest<T: Serialize>(value: &T) -> Result<ContentDigest> {
     Ok(CanonicalDocument::parse(&raw, Limits::default())?.digest())
 }
 
+/// Exact IEEE-754 binary16 to binary32 conversion.
+pub fn f16_to_f32(bits: u16) -> f32 {
+    let sign = ((bits as u32) & 0x8000) << 16;
+    let exp = ((bits as u32) >> 10) & 0x1F;
+    let mant = (bits as u32) & 0x03FF;
+    let f32_bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            let mut m = mant;
+            let mut e = 113u32;
+            while (m & 0x0400) == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x03FF;
+            sign | (e << 23) | (m << 13)
+        }
+    } else if exp == 0x1F {
+        sign | 0x7F80_0000 | (mant << 13)
+    } else {
+        sign | ((exp + 112) << 23) | (mant << 13)
+    };
+    f32::from_bits(f32_bits)
+}
+
+/// Exact brain floating point 16 (bf16) to binary32 conversion.
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendProfile {
@@ -71,6 +102,25 @@ pub struct CompilerBounds {
     pub max_parameter_magnitude: f64,
     pub max_backend_abs_tolerance: f64,
     pub max_orthonormal_tolerance: f64,
+}
+impl CompilerBounds {
+    /// Bounds profile suitable for multi-gigabyte open-weight checkpoints (e.g., 7B-70B parameters).
+    pub fn large_model() -> Self {
+        Self {
+            max_metadata_bytes: 1_048_576,
+            max_source_checkpoint_bytes: 68_719_476_736, // 64 GiB
+            max_source_asset_bytes: 268_435_456,         // 256 MiB
+            max_source_tensors: 16_384,
+            max_observed_source_bytes: 68_719_476_736,
+            max_temporary_bytes: 17_179_869_184, // 16 GiB
+            max_output_tensor_bytes: 17_179_869_184,
+            max_validation_work: 100_000_000_000,
+            max_kernel_work: 100_000_000_000,
+            max_parameter_magnitude: 65_504.0,
+            max_backend_abs_tolerance: 1e-3,
+            max_orthonormal_tolerance: 1e-4,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,13 +177,11 @@ impl Validate for CompilePolicy {
         }
         if self.backend.dtypes.is_empty()
             || self.backend.accumulation_dtypes.is_empty()
-            || self.backend.dtypes.iter().any(|dtype| {
-                if is_cuda {
-                    !matches!(dtype, DType::F16 | DType::Bf16 | DType::F32 | DType::F64)
-                } else {
-                    !matches!(dtype, DType::F32 | DType::F64)
-                }
-            })
+            || self
+                .backend
+                .dtypes
+                .iter()
+                .any(|dtype| !matches!(dtype, DType::F16 | DType::Bf16 | DType::F32 | DType::F64))
             || self
                 .backend
                 .accumulation_dtypes
@@ -143,7 +191,7 @@ impl Validate for CompilePolicy {
             return Err(failure(
                 ErrorCode::UnsupportedCapability,
                 "/backend",
-                "compiler supports explicit f32/f64 CPU or f16/bf16/f32/f64 CUDA profiles with f32/f64 accumulation",
+                "compiler supports explicit f16/bf16/f32/f64 CPU or CUDA profiles with f32/f64 accumulation",
             ));
         }
         let b = &self.bounds;
@@ -152,7 +200,7 @@ impl Validate for CompilePolicy {
             || b.max_source_checkpoint_bytes == 0
             || b.max_source_asset_bytes == 0
             || b.max_source_tensors == 0
-            || b.max_source_tensors > 1024
+            || b.max_source_tensors > 65_536
             || b.max_observed_source_bytes == 0
             || b.max_temporary_bytes == 0
             || b.max_output_tensor_bytes == 0
@@ -252,6 +300,8 @@ impl VerifiedOperand {
         match self.descriptor.dtype {
             DType::F64 => Ok(f64::from_le_bytes(raw.try_into().unwrap())),
             DType::F32 => Ok(f32::from_le_bytes(raw.try_into().unwrap()) as f64),
+            DType::F16 => Ok(f16_to_f32(u16::from_le_bytes(raw.try_into().unwrap())) as f64),
+            DType::Bf16 => Ok(bf16_to_f32(u16::from_le_bytes(raw.try_into().unwrap())) as f64),
             DType::U8 => Ok(raw[0] as f64),
             _ => Err(failure(
                 ErrorCode::UnsupportedCapability,
@@ -702,7 +752,10 @@ fn operands(
                 "operand hash/shape/dtype declaration differs",
             ));
         }
-        if !matches!(descriptor.dtype, DType::F32 | DType::F64 | DType::U8) {
+        if !matches!(
+            descriptor.dtype,
+            DType::F16 | DType::Bf16 | DType::F32 | DType::F64 | DType::U8
+        ) {
             return Err(failure(
                 ErrorCode::UnsupportedCapability,
                 "/artifacts",

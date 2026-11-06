@@ -148,10 +148,10 @@ pub(super) fn shape(
             )
         })?;
     let dtype = embed.dtype;
-    if !matches!(dtype, DType::F32 | DType::F64) {
+    if !matches!(dtype, DType::F16 | DType::Bf16 | DType::F32 | DType::F64) {
         return Err(failure(
             ErrorCode::UnsupportedCapability,
-            "native Qwen2 CPU smoke requires f32 or f64 parameters",
+            "native Qwen2 CPU smoke requires f16, bf16, f32, or f64 parameters",
         ));
     }
     let h = cfg.hidden_size as u64;

@@ -33,7 +33,7 @@ pub fn representation_cost(
     rank: Option<u64>,
 ) -> Result<RepresentationCost> {
     let count = element_count(shape, "/operations")?;
-    if !matches!(dtype, DType::F32 | DType::F64)
+    if !matches!(dtype, DType::F16 | DType::Bf16 | DType::F32 | DType::F64)
         || !matches!(accumulation, DType::F32 | DType::F64)
         || (dtype == DType::F64 && accumulation != DType::F64)
     {

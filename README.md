@@ -207,12 +207,17 @@ weightctl eval run --model MODEL.json --suite SUITE.json --compare-to BASELINE.j
 weightctl eval compare BASELINE_RUN.json CANDIDATE_RUN.json
 weightctl eval verify --model CANDIDATE_RUN.json --policy production
 
-# Low-level Rust Weight IR, Search Space, Patch Replay & Checkpoint CLI
+# Low-level Rust Weight IR, Search Space, Patch Diff/Sign/Audit/Rollback & Checkpoint CLI
 nf core capabilities
 nf model inspect CHECKPOINT.safetensors
 nf ir validate PROGRAM.json
 nf search-space validate SPACE.json
 nf ir compile|explain|apply REQUEST.json
+nf patch diff PATCH.json
+nf patch sign PATCH.json --signer operator.v1 --key SECRET_KEY
+nf patch verify-signature SIGNED_PATCH.json --key SECRET_KEY
+nf patch audit SIGNED_PATCH.json
+nf patch rollback SIGNED_PATCH.json
 nf patch replay REQUEST.json
 nf checkpoint restore REQUEST.json
 ```

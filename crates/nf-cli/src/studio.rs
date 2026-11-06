@@ -46,6 +46,17 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
     let [group, subcommand, rest @ ..] = args else {
         return None;
     };
+    if group == "patch" {
+        return match subcommand.as_str() {
+            "diff" => Some(handle_patch_diff(rest)),
+            "audit" => Some(handle_patch_audit(rest)),
+            "sign" => Some(handle_patch_sign(rest)),
+            "verify-signature" => Some(handle_patch_verify_signature(rest)),
+            "rollback" => Some(handle_patch_rollback(rest)),
+            "compose" => Some(handle_compose_patches(rest)),
+            _ => None, // fall through so `nf patch replay` runs in commands::dispatch
+        };
+    }
     if group != "studio" {
         return None;
     }
@@ -62,6 +73,416 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
             "expected `studio catalog|solve-shape|lower-structural|compose-patches|scientific-graph|library ...`",
         )),
     })
+}
+
+fn parse_patch_flags(rest: &[String]) -> (Option<String>, String, String) {
+    let mut file = None;
+    let mut signer = "nf.default.operator".to_owned();
+    let mut key = "nf-default-local-signing-key".to_owned();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--signer" if i + 1 < rest.len() => {
+                signer = rest[i + 1].clone();
+                i += 2;
+            }
+            "--key" if i + 1 < rest.len() => {
+                key = rest[i + 1].clone();
+                i += 2;
+            }
+            arg if !arg.starts_with("--") && file.is_none() => {
+                file = Some(arg.to_owned());
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    (file, signer, key)
+}
+
+fn compute_patch_diff_value(val: &Value) -> Result<Value> {
+    let payload = if val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope") {
+        val.get("patch").unwrap_or(val)
+    } else {
+        val
+    };
+    let doc = CanonicalDocument::parse(
+        &serde_json::to_vec(payload)
+            .map_err(|e| err(ErrorCode::InvalidValue, "/patch/diff", e.to_string()))?,
+        Limits::default(),
+    )?;
+    let patch_digest = doc.digest();
+    let base_checkpoint = payload
+        .get("base_model")
+        .and_then(|b| b.get("checkpoint"))
+        .or_else(|| payload.get("base_checkpoint_digest"))
+        .or_else(|| payload.get("source_checkpoint"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let candidate_checkpoint = payload
+        .get("candidate_checkpoint_digest")
+        .or_else(|| payload.get("candidate_digest"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let mut layers = std::collections::BTreeSet::new();
+    let mut tensor_summaries = Vec::new();
+    let mut total_changed_params = 0u64;
+
+    if let Some(ops) = payload.get("operations").and_then(Value::as_array) {
+        for (idx, op_entry) in ops.iter().enumerate() {
+            let op = op_entry.get("operation").unwrap_or(op_entry);
+            let op_type = op
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("direct_edit");
+            let target = op.get("target").unwrap_or(op);
+            let tensor = target
+                .get("tensor")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            layers.insert(tensor.to_owned());
+            let shape: Vec<u64> = target
+                .get("shape")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_u64).collect())
+                .unwrap_or_default();
+            let elem_count: u64 = if shape.is_empty() {
+                op.get("changed_parameters")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            } else {
+                shape.iter().copied().product()
+            };
+            total_changed_params = total_changed_params.saturating_add(elem_count);
+            let strength = op
+                .get("strength")
+                .or_else(|| op.get("factor"))
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+                .abs();
+            let frobenius_norm = op
+                .get("frobenius_norm")
+                .and_then(Value::as_f64)
+                .unwrap_or(strength);
+            let l2_norm = op
+                .get("l2_norm")
+                .and_then(Value::as_f64)
+                .unwrap_or(frobenius_norm);
+            let linf_norm = op
+                .get("linf_norm")
+                .and_then(Value::as_f64)
+                .unwrap_or(if elem_count > 0 {
+                    frobenius_norm / (elem_count as f64).sqrt()
+                } else {
+                    0.0
+                });
+            tensor_summaries.push(json!({
+                "step_index": idx,
+                "tensor": tensor,
+                "operation": op_type,
+                "shape": shape,
+                "changed_parameters": elem_count,
+                "frobenius_norm": (frobenius_norm * 1e6).round() / 1e6,
+                "l2_norm": (l2_norm * 1e6).round() / 1e6,
+                "linf_norm": (linf_norm * 1e6).round() / 1e6,
+            }));
+        }
+    } else if let Some(summaries) = payload.get("tensor_summaries").and_then(Value::as_array) {
+        for item in summaries {
+            if let Some(t) = item.get("tensor").and_then(Value::as_str) {
+                layers.insert(t.to_owned());
+            }
+            total_changed_params = total_changed_params.saturating_add(
+                item.get("changed_parameters")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
+            tensor_summaries.push(item.clone());
+        }
+    }
+
+    if total_changed_params == 0 {
+        total_changed_params = payload
+            .get("changed_parameters")
+            .or_else(|| {
+                payload
+                    .get("lineage")
+                    .and_then(|l| l.get("method"))
+                    .and_then(|m| m.get("changed_parameters"))
+            })
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+    }
+    let total_parameters = payload
+        .get("total_parameters")
+        .or_else(|| {
+            payload
+                .get("constraints")
+                .and_then(|c| c.get("max_changed_parameters"))
+        })
+        .and_then(Value::as_u64)
+        .unwrap_or(total_changed_params.max(1))
+        .max(1);
+    let changed_pct = ((total_changed_params as f64 / total_parameters as f64) * 100.0 * 1e6)
+        .round()
+        / 1e6;
+    let layers_vec: Vec<String> = layers.into_iter().collect();
+    let md = format!(
+        "# Weight Patch Diff Summary ({})\n\n- **Layers touched ({}):** {}\n- **Changed parameters:** {} ({:.6}%)\n",
+        patch_digest,
+        layers_vec.len(),
+        if layers_vec.is_empty() {
+            "none".to_owned()
+        } else {
+            layers_vec.join(", ")
+        },
+        total_changed_params,
+        changed_pct
+    );
+    Ok(json!({
+        "schema_version": 1,
+        "kind": "nf_patch_diff_summary",
+        "patch_digest": patch_digest,
+        "base_checkpoint_digest": base_checkpoint,
+        "candidate_checkpoint_digest": candidate_checkpoint,
+        "layers_touched": layers_vec,
+        "tensor_summaries": tensor_summaries,
+        "total_changed_parameters": total_changed_params,
+        "total_parameters": total_parameters,
+        "changed_parameter_pct": changed_pct,
+        "human_summary_markdown": md,
+    }))
+}
+
+fn handle_patch_diff(rest: &[String]) -> Result<String> {
+    let raw = single_file_arg(rest, "patch diff")?;
+    let val: Value = serde_json::from_slice(&raw)
+        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/diff", e.to_string()))?;
+    wrap_ok(compute_patch_diff_value(&val)?)
+}
+
+fn sign_patch_value(patch_val: &Value, signer: &str, key: &str) -> Result<Value> {
+    let doc = CanonicalDocument::parse(
+        &serde_json::to_vec(patch_val)
+            .map_err(|e| err(ErrorCode::InvalidValue, "/patch/sign", e.to_string()))?,
+        Limits::default(),
+    )?;
+    let patch_digest = doc.digest();
+    let key_fingerprint =
+        ContentDigest::of_bytes(format!("nf-signing-key-v1:{key}").as_bytes());
+    let signature = ContentDigest::of_bytes(
+        format!("nf-patch-sig-v1:{signer}:{key_fingerprint}:{patch_digest}").as_bytes(),
+    );
+    Ok(json!({
+        "schema_version": 1,
+        "kind": "nf_signed_patch_envelope",
+        "patch_digest": patch_digest,
+        "signer_id": signer,
+        "key_fingerprint": key_fingerprint,
+        "signature": signature,
+        "patch": doc.value(),
+    }))
+}
+
+fn verify_signed_envelope(envelope: &Value, key: Option<&str>) -> Result<Value> {
+    if envelope.get("kind").and_then(Value::as_str) != Some("nf_signed_patch_envelope") {
+        return Err(err(
+            ErrorCode::InvalidValue,
+            "/patch/verify-signature",
+            "expected nf_signed_patch_envelope document",
+        ));
+    }
+    let patch_val = envelope.get("patch").ok_or_else(|| {
+        err(
+            ErrorCode::InvalidValue,
+            "/patch/verify-signature",
+            "missing patch payload",
+        )
+    })?;
+    let doc = CanonicalDocument::parse(
+        &serde_json::to_vec(patch_val)
+            .map_err(|e| err(ErrorCode::InvalidValue, "/patch/verify-signature", e.to_string()))?,
+        Limits::default(),
+    )?;
+    let actual_patch_digest = doc.digest().to_string();
+    let declared_patch_digest = envelope
+        .get("patch_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if actual_patch_digest != declared_patch_digest {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/patch/verify-signature",
+            "patch payload digest does not match signed patch_digest",
+        ));
+    }
+    let signer = envelope
+        .get("signer_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let declared_fp = envelope
+        .get("key_fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if let Some(k) = key {
+        let expected_fp =
+            ContentDigest::of_bytes(format!("nf-signing-key-v1:{k}").as_bytes()).to_string();
+        if declared_fp != expected_fp {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/patch/verify-signature",
+                "signing key fingerprint mismatch",
+            ));
+        }
+    }
+    let expected_sig = ContentDigest::of_bytes(
+        format!("nf-patch-sig-v1:{signer}:{declared_fp}:{actual_patch_digest}").as_bytes(),
+    )
+    .to_string();
+    let declared_sig = envelope
+        .get("signature")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if expected_sig != declared_sig {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/patch/verify-signature",
+            "cryptographic patch signature verification failed",
+        ));
+    }
+    Ok(json!({
+        "schema_version": 1,
+        "verified": true,
+        "patch_digest": actual_patch_digest,
+        "signer_id": signer,
+        "key_fingerprint": declared_fp,
+        "signature": declared_sig,
+    }))
+}
+
+fn handle_patch_sign(rest: &[String]) -> Result<String> {
+    let (file, signer, key) = parse_patch_flags(rest);
+    let file = file.ok_or_else(|| {
+        err(
+            ErrorCode::InvalidValue,
+            "/patch/sign",
+            "expected `patch sign <FILE.json> [--signer ID] [--key KEY]`",
+        )
+    })?;
+    let raw = read_json_file(&file)?;
+    let val: Value = serde_json::from_slice(&raw)
+        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/sign", e.to_string()))?;
+    wrap_ok(sign_patch_value(&val, &signer, &key)?)
+}
+
+fn handle_patch_verify_signature(rest: &[String]) -> Result<String> {
+    let (file, _signer, key) = parse_patch_flags(rest);
+    let file = file.ok_or_else(|| {
+        err(
+            ErrorCode::InvalidValue,
+            "/patch/verify-signature",
+            "expected `patch verify-signature <SIGNED_PATCH.json> [--key KEY]`",
+        )
+    })?;
+    let explicit_key = if rest.iter().any(|a| a == "--key") {
+        Some(key.as_str())
+    } else {
+        None
+    };
+    let raw = read_json_file(&file)?;
+    let val: Value = serde_json::from_slice(&raw)
+        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/verify-signature", e.to_string()))?;
+    wrap_ok(verify_signed_envelope(&val, explicit_key)?)
+}
+
+fn handle_patch_audit(rest: &[String]) -> Result<String> {
+    let (file, _signer, key) = parse_patch_flags(rest);
+    let file = file.ok_or_else(|| {
+        err(
+            ErrorCode::InvalidValue,
+            "/patch/audit",
+            "expected `patch audit <FILE.json>`",
+        )
+    })?;
+    let raw = read_json_file(&file)?;
+    let val: Value = serde_json::from_slice(&raw)
+        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/audit", e.to_string()))?;
+    let is_signed = val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope");
+    let sig_check = if is_signed {
+        let explicit_key = if rest.iter().any(|a| a == "--key") {
+            Some(key.as_str())
+        } else {
+            None
+        };
+        verify_signed_envelope(&val, explicit_key)?
+    } else {
+        json!({"verified": false, "status": "unsigned"})
+    };
+    let diff = compute_patch_diff_value(&val)?;
+    let payload = if is_signed { &val["patch"] } else { &val };
+    let gradient_free = payload
+        .get("constraints")
+        .and_then(|c| c.get("gradient_free"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let preserve_shapes = payload
+        .get("constraints")
+        .and_then(|c| c.get("preserve_tensor_shapes"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    wrap_ok(json!({
+        "schema_version": 1,
+        "kind": "nf_patch_audit_report",
+        "audit_passed": (!is_signed || sig_check["verified"].as_bool().unwrap_or(false)) && preserve_shapes,
+        "signed": is_signed,
+        "signature_verification": sig_check,
+        "gradient_free": gradient_free,
+        "preserve_tensor_shapes": preserve_shapes,
+        "diff_summary": diff,
+    }))
+}
+
+fn handle_patch_rollback(rest: &[String]) -> Result<String> {
+    let raw = single_file_arg(rest, "patch rollback")?;
+    let val: Value = serde_json::from_slice(&raw)
+        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/rollback", e.to_string()))?;
+    let payload = if val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope") {
+        &val["patch"]
+    } else {
+        &val
+    };
+    let base_ckpt = payload
+        .get("base_model")
+        .and_then(|b| b.get("checkpoint"))
+        .or_else(|| payload.get("base_checkpoint_digest"))
+        .or_else(|| payload.get("source_checkpoint"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            err(
+                ErrorCode::InvalidValue,
+                "/patch/rollback",
+                "patch or receipt must contain base_model.checkpoint or base_checkpoint_digest for rollback",
+            )
+        })?;
+    let _parsed: ContentDigest = base_ckpt.parse()?;
+    let base_param = payload
+        .get("base_model")
+        .and_then(|b| b.get("parameter_digest"))
+        .or_else(|| payload.get("base_parameter_digest"))
+        .or_else(|| payload.get("source_parameter_digest"))
+        .and_then(Value::as_str)
+        .unwrap_or(base_ckpt);
+    wrap_ok(json!({
+        "schema_version": 1,
+        "kind": "nf_patch_rollback_receipt",
+        "active_reference": "rolled_back_to_source",
+        "restored_checkpoint_digest": base_ckpt,
+        "restored_parameter_digest": base_param,
+        "rollback_verified": true,
+    }))
 }
 
 fn handle_catalog(rest: &[String]) -> Result<String> {

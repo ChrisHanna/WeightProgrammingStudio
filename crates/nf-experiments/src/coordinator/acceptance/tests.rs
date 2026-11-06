@@ -92,11 +92,14 @@ fn setup_contract_with_holdout(
     change(&mut protocol);
     let plan = Plan::freeze(&bytes(&protocol)).unwrap();
     let root = Root(
-        std::path::PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap()).join(format!(
-            "acceptance-gate-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )),
+        std::env::var_os("KIROCREW_SCRATCH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "acceptance-gate-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
     );
     std::fs::create_dir(&root.0).unwrap();
     let mut ledger = Ledger::open(&root.0.join("ledger"), LedgerLimits::default()).unwrap();

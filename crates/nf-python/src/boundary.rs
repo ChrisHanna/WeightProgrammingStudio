@@ -261,20 +261,28 @@ impl SourceHandle {
         Ok(PyBytes::new(py, &bytes))
     }
 }
-#[pyfunction(signature=(manifest_json, checkpoint, assets, cancellation=None))]
+#[pyfunction(signature=(manifest_json, checkpoint, assets, cancellation=None, *, max_checkpoint_bytes=67_108_864, max_tensors=1024))]
 pub fn load_source(
     py: Python<'_>,
     manifest_json: &Bound<'_, PyBytes>,
     checkpoint: &Bound<'_, PyBytes>,
     assets: &Bound<'_, PyDict>,
     cancellation: Option<PyRef<'_, CancellationHandle>>,
+    max_checkpoint_bytes: usize,
+    max_tensors: usize,
 ) -> PyResult<SourceHandle> {
     let token = token_for(py, cancellation)?;
     let manifest = document(py, manifest_json)?;
-    if checkpoint.as_bytes().len() > 67_108_864 {
+    if max_checkpoint_bytes == 0 || max_checkpoint_bytes > StateLoadLimits::large_model().max_checkpoint_bytes {
         return Err(python_error(
             py,
-            error(ErrorCode::LimitExceeded, "checkpoint exceeds 64 MiB"),
+            error(ErrorCode::LimitExceeded, "max_checkpoint_bytes exceeds large-model ceiling"),
+        ));
+    }
+    if checkpoint.as_bytes().len() > max_checkpoint_bytes {
+        return Err(python_error(
+            py,
+            error(ErrorCode::LimitExceeded, "checkpoint exceeds configured max_checkpoint_bytes"),
         ));
     }
     let assets = blobs(py, assets, 4_194_304)?;
@@ -286,8 +294,10 @@ pub fn load_source(
                 checkpoint,
                 assets,
                 StateLoadLimits {
+                    max_checkpoint_bytes,
+                    max_tensor_bytes: max_checkpoint_bytes as u64,
+                    max_tensors,
                     max_asset_bytes: 4_194_304,
-                    ..StateLoadLimits::default()
                 },
             )?),
         })
@@ -549,6 +559,14 @@ pub fn capabilities_json<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> 
     Ok(PyBytes::new(py, &output))
 }
 
+#[pyfunction]
+pub fn m2_capabilities_json<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+    let output = worker(py, CancellationToken::default(), || {
+        canonical(&nf_core::capabilities::m2_manifest())
+    })?;
+    Ok(PyBytes::new(py, &output))
+}
+
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("NativeError", module.py().get_type::<NativeError>())?;
     module.add("CancelledError", module.py().get_type::<CancelledError>())?;
@@ -569,6 +587,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(apply_plan, module)?)?;
     module.add_function(wrap_pyfunction!(canonical_json, module)?)?;
     module.add_function(wrap_pyfunction!(capabilities_json, module)?)?;
+    module.add_function(wrap_pyfunction!(m2_capabilities_json, module)?)?;
     module.add_function(wrap_pyfunction!(content_digest, module)?)?;
     module.add_function(wrap_pyfunction!(negotiate_protocols, module)?)?;
     Ok(())

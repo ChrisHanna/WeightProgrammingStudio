@@ -7,7 +7,9 @@ mod fixture {
     ));
 }
 fn root(tag: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap())
+    std::env::var_os("KIROCREW_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join(format!("exposure-{tag}-{}", std::process::id()))
 }
 fn setup(path: &Path) -> (Ledger, Validated<StudyContract>, ContentDigest, Lease) {

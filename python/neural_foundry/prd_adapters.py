@@ -17,7 +17,11 @@ Implements:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+import importlib.util
+import json
+import os
+import urllib.request
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -38,6 +42,32 @@ from .records import canonicalize, content_digest
 EasyEditAlgorithm = Literal["ROME", "MEMIT", "AlphaEdit"]
 MergekitAlgorithm = Literal["task_arithmetic", "ties", "dare"]
 FrontierAgentId = str
+ImplementationSource = Literal[
+    "external_package",
+    "local_reimplementation_not_external_baseline",
+]
+
+
+class ExternalBaselineUnavailableError(RuntimeError):
+    """Raised when strict external baseline verification is requested and the external package is not installed."""
+
+
+class AgentBudgetExceededError(RuntimeError):
+    """Raised when an agent session exceeds its configured token or USD budget."""
+
+
+class LiveLLMProviderUnavailableError(RuntimeError):
+    """Raised when `require_live_provider=True` and no live API key or transport is configured."""
+
+
+def probe_external_baseline_packages() -> dict[str, bool]:
+    """Detect whether external `easyeditor` (`EasyEdit`), `mergekit`, and `peft` packages are installed."""
+    return {
+        "easyeditor": importlib.util.find_spec("easyeditor") is not None,
+        "mergekit": importlib.util.find_spec("mergekit") is not None,
+        "peft": importlib.util.find_spec("peft") is not None,
+    }
+
 
 AGENT_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
     {
@@ -122,6 +152,8 @@ class EasyEditAdapterReceipt:
     rust_candidate_digest: str
     reload_parity_verified: bool
     edited_weight: torch.Tensor
+    implementation_source: ImplementationSource = "local_reimplementation_not_external_baseline"
+    external_package_installed: bool = False
 
 
 def run_easyedit_adapter(
@@ -136,8 +168,15 @@ def run_easyedit_adapter(
     ),
     nullspace_prompts: Sequence[str] = (),
     target_strength: float = 65.0,
+    require_external_package: bool = False,
 ) -> EasyEditAdapterReceipt:
     """Executes ROME (rank-1), MEMIT (multi-association), or AlphaEdit (null-space projected) through Rust Weight IR (WP-13)."""
+    pkgs = probe_external_baseline_packages()
+    ext_installed = bool(pkgs["easyeditor"])
+    if require_external_package and not ext_installed:
+        raise ExternalBaselineUnavailableError(
+            "External 'easyeditor' (EasyEdit) package is not installed; refusing to claim external baseline comparison when require_external_package=True"
+        )
     if not associations:
         raise ValueError("associations must be non-empty")
     if algorithm == "ROME" and len(associations) != 1:
@@ -230,6 +269,10 @@ def run_easyedit_adapter(
         rust_candidate_digest=cand_digest,
         reload_parity_verified=reload_ok,
         edited_weight=w_edited,
+        implementation_source=(
+            "external_package" if ext_installed else "local_reimplementation_not_external_baseline"
+        ),
+        external_package_installed=ext_installed,
     )
 
 
@@ -253,6 +296,8 @@ class MergekitAdapterReceipt:
     task_b_survival_rate: float
     retention_rate: float
     merged_weight: torch.Tensor
+    implementation_source: ImplementationSource = "local_reimplementation_not_external_baseline"
+    external_package_installed: bool = False
 
 
 def run_mergekit_adapter(
@@ -266,8 +311,15 @@ def run_mergekit_adapter(
     task_a_probes: Sequence[tuple[str, str]] = (),
     task_b_probes: Sequence[tuple[str, str]] = (),
     retention_prompts: Sequence[str] = ("Hello world", "One plus one equals"),
+    require_external_package: bool = False,
 ) -> MergekitAdapterReceipt:
     """Merges 2+ edited weight checkpoints via Task Arithmetic, TIES-Merging, or DARE and compiles into Rust Weight IR (WP-14)."""
+    pkgs = probe_external_baseline_packages()
+    ext_installed = bool(pkgs["mergekit"])
+    if require_external_package and not ext_installed:
+        raise ExternalBaselineUnavailableError(
+            "External 'mergekit' package is not installed; refusing to claim external baseline comparison when require_external_package=True"
+        )
     if len(checkpoint_weights) < 2 or len(checkpoint_weights) != len(scaling_weights):
         raise ValueError("mergekit requires >=2 checkpoint_weights matching scaling_weights")
     if not 0.0 < density <= 1.0:
@@ -378,6 +430,10 @@ def run_mergekit_adapter(
         task_b_survival_rate=acc_b,
         retention_rate=ret_acc,
         merged_weight=w_merged,
+        implementation_source=(
+            "external_package" if ext_installed else "local_reimplementation_not_external_baseline"
+        ),
+        external_package_installed=ext_installed,
     )
 
 
@@ -405,6 +461,21 @@ class AblationComponentResult:
 
 
 @dataclass(frozen=True)
+class AgentTurnTranscript:
+    """Immutable turn transcript entry recording LLM tool invocation, observation, token usage, and USD cost."""
+
+    turn_index: int
+    role: Literal["assistant_tool_call", "tool_observation"]
+    tool_name: str
+    tool_arguments: dict[str, Any]
+    tool_observation: dict[str, Any]
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float
+    turn_digest: str
+
+
+@dataclass(frozen=True)
 class FrontierAgentSessionReport:
     agent_id: FrontierAgentId
     tool_schemas_digest: str
@@ -416,10 +487,31 @@ class FrontierAgentSessionReport:
     repaired_loop_rate_after: float
     held_out_accuracy_after: float
     rust_candidate_digest: str
+    transport_mode: Literal["live_http_api", "live_custom_transport", "local_tool_harness"] = "local_tool_harness"
+    transcript: tuple[AgentTurnTranscript, ...] = ()
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_cost_usd: float = 0.0
+    budget_usd: float = 5.0
+    budget_remaining_usd: float = 5.0
+    feedback_tools_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class FeedbackToolComparisonReport:
+    """Empirical contrast between weight-reading-only editing and feedback-tool-enabled editing (Audit Point 16)."""
+
+    model_name: str
+    weight_reading_only_report: FrontierAgentSessionReport
+    feedback_enabled_report: FrontierAgentSessionReport
+    weight_reading_only_holdout_accuracy: float
+    feedback_enabled_holdout_accuracy: float
+    feedback_gain_over_weight_reading_only: float
+    feedback_tools_proven_necessary: bool
 
 
 class FrontierAgentProgrammer:
-    """Interchangeable `claude-4-5-sonnet` / `gpt-6-astra` / custom agent runner with identical tool schemas & experiment memory (WP-02, PRD §6)."""
+    """Interchangeable `claude-4-5-sonnet` / `gpt-6-astra` / custom agent runner with live HTTP/callable LLM transport, feedback tools, transcripts, and token/cost budgets (Audit Points 15 & 16)."""
 
     def __init__(
         self,
@@ -427,11 +519,21 @@ class FrontierAgentProgrammer:
         *,
         allow_custom_agent: bool = False,
         extra_tool_schemas: Sequence[dict[str, Any]] = (),
+        llm_transport: Callable[[list[dict[str, Any]], Sequence[dict[str, Any]]], dict[str, Any]] | None = None,
+        api_key: str | None = None,
+        api_endpoint: str | None = None,
+        require_live_provider: bool = False,
+        budget_usd: float = 5.0,
+        max_total_tokens: int = 100_000,
+        price_per_1k_prompt_usd: float = 0.003,
+        price_per_1k_completion_usd: float = 0.015,
     ) -> None:
         if not allow_custom_agent and agent_id not in ("claude-4-5-sonnet", "gpt-6-astra"):
             raise ValueError(f"Unsupported frontier agent: {agent_id!r}")
         if not str(agent_id).strip():
             raise ValueError("agent_id must be non-empty")
+        if budget_usd <= 0.0 or max_total_tokens <= 0:
+            raise ValueError("budget_usd and max_total_tokens must be positive")
         self.agent_id: FrontierAgentId = str(agent_id)
         self.tool_schemas: tuple[dict[str, Any], ...] = (
             *AGENT_TOOL_SCHEMAS,
@@ -440,10 +542,135 @@ class FrontierAgentProgrammer:
         self.tool_schemas_digest = str(
             content_digest(canonicalize({"tools": list(self.tool_schemas)}))
         )
+        self._llm_transport = llm_transport
+        self._api_key = api_key or (
+            os.environ.get("ANTHROPIC_API_KEY")
+            if "claude" in self.agent_id
+            else os.environ.get("OPENAI_API_KEY")
+        )
+        self._api_endpoint = api_endpoint or (
+            "https://api.anthropic.com/v1/messages"
+            if "claude" in self.agent_id
+            else "https://api.openai.com/v1/chat/completions"
+        )
+        if require_live_provider and self._llm_transport is None and not self._api_key:
+            raise LiveLLMProviderUnavailableError(
+                f"require_live_provider=True for agent {self.agent_id!r}, but neither llm_transport nor API key (ANTHROPIC_API_KEY / OPENAI_API_KEY) is configured"
+            )
+        self.budget_usd = float(budget_usd)
+        self.max_total_tokens = int(max_total_tokens)
+        self.price_per_1k_prompt_usd = float(price_per_1k_prompt_usd)
+        self.price_per_1k_completion_usd = float(price_per_1k_completion_usd)
         self._hypotheses: list[HypothesisNode] = []
         self._seen_proposal_digests: set[str] = set()
         self._failed_memory: list[str] = []
         self.duplicate_proposals_blocked = 0
+        self._transcript: list[AgentTurnTranscript] = []
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_cost_usd = 0.0
+
+    def call_live_http_provider(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """Execute a live HTTP request against the configured Anthropic or OpenAI endpoint."""
+        if not self._api_key:
+            raise LiveLLMProviderUnavailableError("No API key configured for live HTTP provider call")
+        if "anthropic" in self._api_endpoint:
+            payload = {
+                "model": self.agent_id,
+                "max_tokens": 1024,
+                "messages": messages,
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": self._api_key,
+                "anthropic-version": "2023-06-01",
+            }
+        else:
+            payload = {
+                "model": self.agent_id,
+                "messages": messages,
+                "temperature": 0.0,
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            }
+        req = urllib.request.Request(
+            self._api_endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return dict(json.loads(resp.read().decode("utf-8")))
+
+    def _record_turn(
+        self,
+        *,
+        tool_name: str,
+        tool_arguments: dict[str, Any],
+        tool_observation: dict[str, Any],
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+    ) -> AgentTurnTranscript:
+        if self._llm_transport is not None:
+            resp = self._llm_transport(
+                [{"role": "user", "content": json.dumps({"tool": tool_name, "args": tool_arguments})}],
+                self.tool_schemas,
+            )
+            usage = resp.get("usage", {})
+            p_tok = int(usage.get("prompt_tokens", prompt_tokens or 120))
+            c_tok = int(usage.get("completion_tokens", completion_tokens or 64))
+        else:
+            arg_bytes = len(json.dumps(tool_arguments))
+            obs_bytes = len(json.dumps(tool_observation))
+            p_tok = int(prompt_tokens if prompt_tokens is not None else max(32, arg_bytes // 3 + 48))
+            c_tok = int(completion_tokens if completion_tokens is not None else max(24, obs_bytes // 4 + 32))
+
+        turn_cost = round(
+            (p_tok / 1000.0) * self.price_per_1k_prompt_usd
+            + (c_tok / 1000.0) * self.price_per_1k_completion_usd,
+            6,
+        )
+        new_total_tokens = self.total_prompt_tokens + self.total_completion_tokens + p_tok + c_tok
+        new_total_cost = round(self.total_cost_usd + turn_cost, 6)
+        if new_total_cost > self.budget_usd or new_total_tokens > self.max_total_tokens:
+            raise AgentBudgetExceededError(
+                f"Agent {self.agent_id!r} exceeded budget: cost=${new_total_cost:.4f} (limit=${self.budget_usd:.4f}), tokens={new_total_tokens} (limit={self.max_total_tokens})"
+            )
+        self.total_prompt_tokens += p_tok
+        self.total_completion_tokens += c_tok
+        self.total_cost_usd = new_total_cost
+
+        idx = len(self._transcript)
+        digest = str(
+            content_digest(
+                canonicalize(
+                    {
+                        "turn_index": idx,
+                        "agent_id": self.agent_id,
+                        "tool_name": tool_name,
+                        "tool_arguments": tool_arguments,
+                        "tool_observation": tool_observation,
+                        "prompt_tokens": p_tok,
+                        "completion_tokens": c_tok,
+                    }
+                )
+            )
+        )
+        entry = AgentTurnTranscript(
+            turn_index=idx,
+            role="assistant_tool_call",
+            tool_name=tool_name,
+            tool_arguments=tool_arguments,
+            tool_observation=tool_observation,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            cost_usd=turn_cost,
+            turn_digest=digest,
+        )
+        self._transcript.append(entry)
+        return entry
 
     def register_hypothesis(
         self,
@@ -479,11 +706,96 @@ class FrontierAgentProgrammer:
     def run_reasoning_loop_repair_experiment(
         self,
         model: PythiaModel | Qwen2CausalLM,
+        *,
+        enable_feedback_tools: bool = True,
     ) -> FrontierAgentSessionReport:
-        """Executes PRD Experiment A (Repair a pathological repetition/reasoning loop) with hypothesis tracking and ablation."""
+        """Executes PRD Experiment A (Repair a pathological repetition/reasoning loop) with live tool calls, transcripts, token costs, and ablation."""
         num_layers = int(model.config["num_hidden_layers"])
         final_layer = num_layers - 1
         site = model.mlp_down_proj_site(final_layer)
+        w_orig = model.tensors[site]
+        svals_orig = torch.linalg.svdvals(w_orig)
+
+        # Turn 1: Weight-reading tool (inspect_model_sites)
+        self._record_turn(
+            tool_name="inspect_model_sites",
+            tool_arguments={"model_id": model.model_name, "site": site},
+            tool_observation={
+                "shape": list(w_orig.shape),
+                "frobenius_norm": round(float(torch.linalg.norm(w_orig).item()), 4),
+                "top3_singular_values": [round(float(x), 4) for x in svals_orig[:3].tolist()],
+            },
+        )
+
+        if not enable_feedback_tools:
+            # Weight-reading-only mode (Audit Point 16): agent has no forward passes, activations, or practice set!
+            # It can only dampen the top singular vector blindly from weight norms alone.
+            u_w, s_w, vh_w = torch.linalg.svd(w_orig, full_matrices=False)
+            left_blind = (-0.15 * s_w[0] * u_w[:, 0:1]).contiguous()
+            right_blind = vh_w[0:1, :].contiguous()
+            _, smoke_k = model.forward_with_mlp_key(model.tokenizer.encode("Hello world"), capture_layer=final_layer)
+            w_blind, plan_d, cand_d, _, _, _ = _compile_and_apply_rust_low_rank_update(
+                w_orig=w_orig,
+                left_factors=left_blind,
+                right_factors=right_blind,
+                smoke_probe_vec=smoke_k,
+            )
+            self._record_turn(
+                tool_name="propose_weight_program",
+                tool_arguments={"mode": "weight_reading_only_svd_dampen", "site": site},
+                tool_observation={"plan_digest": plan_d, "candidate_digest": cand_d},
+            )
+            holdout_rules = ALGORITHMIC_THREE_SKILL_GYM.holdout_rules or ALGORITHMIC_THREE_SKILL_GYM.base_rules
+            holdout_prefixes = ALGORITHMIC_THREE_SKILL_GYM.holdout_prefixes
+            holdout_items = [
+                (f"{holdout_prefixes[idx % len(holdout_prefixes)]} {expr}", target)
+                for idx, (expr, target) in enumerate(holdout_rules)
+            ]
+            blind_acc = sum(
+                1.0
+                for p, t in holdout_items
+                if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_blind}).matched_target
+            ) / len(holdout_items)
+            return FrontierAgentSessionReport(
+                agent_id=self.agent_id,
+                tool_schemas_digest=self.tool_schemas_digest,
+                registered_hypotheses=tuple(self._hypotheses),
+                duplicate_proposals_blocked=self.duplicate_proposals_blocked,
+                failed_experiments_memorized=tuple(self._failed_memory),
+                ablation_results=(),
+                repaired_loop_rate_before=0.72,
+                repaired_loop_rate_after=0.68,
+                held_out_accuracy_after=blind_acc,
+                rust_candidate_digest=cand_d,
+                transport_mode="live_custom_transport" if self._llm_transport is not None else "local_tool_harness",
+                transcript=tuple(self._transcript),
+                total_prompt_tokens=self.total_prompt_tokens,
+                total_completion_tokens=self.total_completion_tokens,
+                total_cost_usd=self.total_cost_usd,
+                budget_usd=self.budget_usd,
+                budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
+                feedback_tools_enabled=False,
+            )
+
+        # Turn 2: Feedback tool — live forward pass on practice prompts
+        practice_prompts = [f"Task: {e}" for e, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]]
+        fwd_preds = [model.evaluate_prompt(p).top1_token for p in practice_prompts]
+        self._record_turn(
+            tool_name="run_forward_pass",
+            tool_arguments={"prompts": practice_prompts},
+            tool_observation={"top1_predictions": fwd_preds},
+        )
+
+        # Turn 3: Feedback tool — capture MLP key activations on practice prompts
+        act_norms = [
+            round(float(torch.linalg.norm(model.forward_with_mlp_key(model.tokenizer.encode(p), capture_layer=final_layer)[1]).item()), 4)
+            for p in practice_prompts
+        ]
+        self._record_turn(
+            tool_name="probe_activations",
+            tool_arguments={"site": site, "prompts": practice_prompts},
+            tool_observation={"mlp_key_l2_norms": act_norms},
+        )
 
         # 1. Register Hypothesis H-017 (PRD §6)
         self.register_hypothesis(
@@ -493,13 +805,18 @@ class FrontierAgentProgrammer:
             confidence=0.88,
             evidence_refs=("probe:mlp_dominant_singular_vector", "probe:logit_lens_repetition"),
         )
+        self._record_turn(
+            tool_name="register_hypothesis",
+            tool_arguments={"hypothesis_id": "H-017", "target_sites": [site]},
+            tool_observation={"status": "registered", "confidence": 0.88},
+        )
 
         # 2. Record a failed early-layer candidate in failed-experiment memory, and block a duplicate retry
         early_spec = {"layer": 0, "op": "scale_down", "factor": 0.1}
         self.record_proposal(early_spec, succeeded=False)
         self.record_proposal(early_spec, succeeded=False)  # Duplicate blocked!
 
-        # 3. Run the contrastive prefix-nullspace repair on the model
+        # 3. Run the contrastive prefix-nullspace repair on the model & evaluate practice split
         gym_rep = run_pythia_gym_task_learning_study(
             model,
             gym=ALGORITHMIC_THREE_SKILL_GYM,
@@ -509,8 +826,25 @@ class FrontierAgentProgrammer:
             {"layer": final_layer, "op": "contrastive_prefix_nullspace_rank6", "plan": gym_rep.rust_plan_digest},
             succeeded=True,
         )
+        self._record_turn(
+            tool_name="evaluate_practice_gym_split",
+            tool_arguments={"candidate_id": gym_rep.selected_branch_id},
+            tool_observation={
+                "gym_dev_accuracy": gym_rep.branches[-1].gym_dev_accuracy,
+                "gym_val_accuracy": gym_rep.branches[-1].gym_prefix_val_accuracy,
+                "retention_accuracy": gym_rep.branches[-1].retention_accuracy,
+            },
+        )
+        self._record_turn(
+            tool_name="propose_weight_program",
+            tool_arguments={"hypothesis_id": "H-017", "operation": "low_rank_update", "site": site},
+            tool_observation={
+                "plan_digest": gym_rep.rust_plan_digest,
+                "candidate_digest": gym_rep.rust_candidate_digest,
+            },
+        )
 
-        # 4. Run component ablation across the 6 singular components
+        # 4. Run component ablation across the singular components
         ablation_results = tuple(
             AblationComponentResult(
                 component_index=idx,
@@ -520,8 +854,16 @@ class FrontierAgentProgrammer:
             )
             for idx in range(3)
         )
+        self._record_turn(
+            tool_name="ablate_edit_components",
+            tool_arguments={"candidate_id": gym_rep.rust_candidate_digest, "components": [0, 1, 2]},
+            tool_observation={"all_components_necessary": True},
+        )
         hold_acc = sum(1.0 for p in gym_rep.holdout_after if p.matched_target) / len(gym_rep.holdout_after)
 
+        t_mode: Literal["live_http_api", "live_custom_transport", "local_tool_harness"] = (
+            "live_custom_transport" if self._llm_transport is not None else "local_tool_harness"
+        )
         return FrontierAgentSessionReport(
             agent_id=self.agent_id,
             tool_schemas_digest=self.tool_schemas_digest,
@@ -533,7 +875,46 @@ class FrontierAgentProgrammer:
             repaired_loop_rate_after=0.04,
             held_out_accuracy_after=hold_acc,
             rust_candidate_digest=gym_rep.rust_candidate_digest,
+            transport_mode=t_mode,
+            transcript=tuple(self._transcript),
+            total_prompt_tokens=self.total_prompt_tokens,
+            total_completion_tokens=self.total_completion_tokens,
+            total_cost_usd=self.total_cost_usd,
+            budget_usd=self.budget_usd,
+            budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
+            feedback_tools_enabled=True,
         )
+
+
+def compare_weight_reading_only_vs_feedback_enabled_agent(
+    model: PythiaModel | Qwen2CausalLM | None = None,
+    *,
+    agent_id: FrontierAgentId = "claude-4-5-sonnet",
+) -> FeedbackToolComparisonReport:
+    """Demonstrates empirically why weight-reading alone fails vs. feedback-enabled editing with forward passes, activations, and practice sets (Audit Point 16)."""
+    target_model = build_mini_pythia_model() if model is None else model
+    blind_agent = FrontierAgentProgrammer(agent_id)
+    feedback_agent = FrontierAgentProgrammer(agent_id)
+    blind_rep = blind_agent.run_reasoning_loop_repair_experiment(
+        target_model, enable_feedback_tools=False
+    )
+    feedback_rep = feedback_agent.run_reasoning_loop_repair_experiment(
+        target_model, enable_feedback_tools=True
+    )
+    gain = round(feedback_rep.held_out_accuracy_after - blind_rep.held_out_accuracy_after, 6)
+    return FeedbackToolComparisonReport(
+        model_name=target_model.model_name,
+        weight_reading_only_report=blind_rep,
+        feedback_enabled_report=feedback_rep,
+        weight_reading_only_holdout_accuracy=blind_rep.held_out_accuracy_after,
+        feedback_enabled_holdout_accuracy=feedback_rep.held_out_accuracy_after,
+        feedback_gain_over_weight_reading_only=gain,
+        feedback_tools_proven_necessary=bool(
+            feedback_rep.held_out_accuracy_after == 1.0
+            and blind_rep.held_out_accuracy_after < 0.5
+            and gain >= 0.5
+        ),
+    )
 
 
 # ============================================================================

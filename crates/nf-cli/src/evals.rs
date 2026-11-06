@@ -37,7 +37,7 @@ fn canonical_doc(value: &Value) -> Result<CanonicalDocument> {
     CanonicalDocument::parse(&raw, Limits::default())
 }
 
-fn load_json_or_id(arg: &str) -> Result<Value> {
+fn load_json_strict(arg: &str) -> Result<Value> {
     let path = Path::new(arg);
     if path.is_dir() {
         let suite_path = path.join("suite.json");
@@ -55,7 +55,37 @@ fn load_json_or_id(arg: &str) -> Result<Value> {
         let doc = CanonicalDocument::parse(&bytes, Limits::default())?;
         return Ok(doc.value().clone());
     }
-    Ok(json!({ "id": arg }))
+    Err(err(
+        ErrorCode::InvalidValue,
+        "/eval/input",
+        format!(
+            "evaluation input file or suite directory not found: {arg}; unknown model IDs and unverified bare strings are rejected"
+        ),
+    ))
+}
+
+fn normalize_sampler(inference_settings: &Value, explicit_sampler: Option<&Value>) -> Value {
+    let src = explicit_sampler.unwrap_or(inference_settings);
+    let get_f64 = |key: &str, fallback: f64| -> f64 {
+        src.get(key)
+            .or_else(|| inference_settings.get(key))
+            .and_then(Value::as_f64)
+            .unwrap_or(fallback)
+    };
+    let get_i64 = |key: &str, fallback: i64| -> i64 {
+        src.get(key)
+            .or_else(|| inference_settings.get(key))
+            .and_then(Value::as_i64)
+            .unwrap_or(fallback)
+    };
+    json!({
+        "temperature": get_f64("temperature", 0.0),
+        "top_p": get_f64("top_p", 1.0),
+        "presence_penalty": get_f64("presence_penalty", 0.0),
+        "frequency_penalty": get_f64("frequency_penalty", 0.0),
+        "max_tokens": get_i64("max_tokens", 64),
+        "seed": get_i64("seed", 17),
+    })
 }
 
 fn import_suite_value(spec: &Value) -> Result<Value> {
@@ -121,6 +151,8 @@ fn import_suite_value(spec: &Value) -> Result<Value> {
         json!({
             "temperature": 0.0,
             "top_p": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
             "max_tokens": 64,
             "seed": 17,
             "precision": "f64",
@@ -177,42 +209,77 @@ fn parse_flags(args: &[String]) -> BTreeMap<String, String> {
     map
 }
 
-fn default_scores_for_model(model_val: &Value, is_baseline: bool) -> BTreeMap<String, f64> {
-    if let Some(scores) = model_val.get("scores_by_type").and_then(Value::as_object) {
-        return scores
-            .iter()
-            .filter_map(|(k, v)| Some((k.clone(), v.as_f64()?)))
-            .collect();
+fn extract_scores_strict(
+    model_val: &Value,
+    suite_val: &Value,
+) -> Result<(BTreeMap<String, f64>, &'static str)> {
+    let scores_obj = model_val
+        .get("scores_by_type")
+        .or_else(|| model_val.get("eval_type_scores"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            err(
+                ErrorCode::InvalidValue,
+                "/eval/scores_by_type",
+                "model JSON must supply explicit scores_by_type or eval_type_scores; fallback default scores are forbidden",
+            )
+        })?;
+    let mut out = BTreeMap::new();
+    for (k, v) in scores_obj {
+        let score = v.as_f64().ok_or_else(|| {
+            err(
+                ErrorCode::InvalidValue,
+                "/eval/scores_by_type",
+                format!("score for {k} must be a finite number"),
+            )
+        })?;
+        if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+            return Err(err(
+                ErrorCode::InvalidValue,
+                "/eval/scores_by_type",
+                format!("score for {k} must be in [0.0, 1.0]"),
+            ));
+        }
+        out.insert(k.clone(), score);
     }
-    let default = if is_baseline {
-        [
-            ("baseline", 0.72),
-            ("development", 0.72),
-            ("generalization", 0.70),
-            ("retention", 0.99),
-            ("safety", 0.98),
-            ("robustness", 0.78),
-            ("efficiency", 0.60),
-        ]
+    if let Some(req_types) = suite_val.get("eval_types").and_then(Value::as_array) {
+        for et in req_types.iter().filter_map(Value::as_str) {
+            if !out.contains_key(et) {
+                return Err(err(
+                    ErrorCode::InvalidValue,
+                    "/eval/scores_by_type",
+                    format!("missing required score for suite eval_type '{et}'"),
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(err(
+            ErrorCode::InvalidValue,
+            "/eval/scores_by_type",
+            "scores_by_type cannot be empty",
+        ));
+    }
+    let is_live = model_val
+        .get("score_provenance")
+        .and_then(|p| p.get("measurement_mode"))
+        .and_then(Value::as_str)
+        == Some("measured_live_execution")
+        && model_val
+            .get("score_provenance")
+            .and_then(|p| p.get("live_execution_digest"))
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.starts_with("sha256:"));
+    let origin = if is_live {
+        "measured_result"
     } else {
-        [
-            ("baseline", 0.72),
-            ("development", 0.94),
-            ("generalization", 0.89),
-            ("retention", 0.982),
-            ("safety", 0.98),
-            ("robustness", 0.86),
-            ("efficiency", 0.85),
-        ]
+        "supplied_fact"
     };
-    default
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v))
-        .collect()
+    Ok((out, origin))
 }
 
 fn build_run(model_arg: &str, suite_val: &Value, is_baseline: bool) -> Result<Value> {
-    let model_val = load_json_or_id(model_arg)?;
+    let model_val = load_json_strict(model_arg)?;
     if model_val.get("kind").and_then(Value::as_str) == Some("nf_evaluation_run") {
         return Ok(model_val);
     }
@@ -220,27 +287,40 @@ fn build_run(model_arg: &str, suite_val: &Value, is_baseline: bool) -> Result<Va
         .get("model_id")
         .or_else(|| model_val.get("id"))
         .and_then(Value::as_str)
-        .unwrap_or(model_arg);
-    let checkpoint_digest = model_val
+        .filter(|s| !s.trim().is_empty() && *s != "nonexistent")
+        .ok_or_else(|| {
+            err(
+                ErrorCode::InvalidValue,
+                "/eval/model_id",
+                "valid non-empty model_id is required",
+            )
+        })?;
+    let checkpoint_digest_str = model_val
         .get("checkpoint_digest")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            ContentDigest::of_bytes(format!("checkpoint:{model_id}").as_bytes()).to_string()
-        });
+        .ok_or_else(|| {
+            err(
+                ErrorCode::InvalidValue,
+                "/eval/checkpoint_digest",
+                "explicit checkpoint_digest is required; unverified model identities are forbidden",
+            )
+        })?;
+    let _parsed_ckpt: ContentDigest = checkpoint_digest_str.parse()?;
+    let checkpoint_digest = checkpoint_digest_str.to_owned();
     let config_digest = model_val
         .get("config_digest")
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| {
-            ContentDigest::of_bytes(format!("config:{model_id}").as_bytes()).to_string()
+            ContentDigest::of_bytes(format!("config:{model_id}:{checkpoint_digest}").as_bytes())
+                .to_string()
         });
-    let scores = default_scores_for_model(&model_val, is_baseline);
+    let (scores, evidence_origin) = extract_scores_strict(&model_val, suite_val)?;
     let changed_params = model_val
         .get("edit_lineage")
         .and_then(|e| e.get("changed_parameters"))
         .and_then(Value::as_u64)
-        .unwrap_or(if is_baseline { 0 } else { 800 });
+        .unwrap_or(0);
     let total_params = model_val
         .get("edit_lineage")
         .and_then(|e| e.get("total_parameters"))
@@ -248,6 +328,46 @@ fn build_run(model_arg: &str, suite_val: &Value, is_baseline: bool) -> Result<Va
         .unwrap_or(1_000_000)
         .max(1);
     let changed_pct = (changed_params as f64 / total_params as f64) * 100.0;
+    let inference_settings = model_val
+        .get("inference_settings")
+        .cloned()
+        .unwrap_or_else(|| suite_val["inference_settings"].clone());
+    if inference_settings != suite_val["inference_settings"] {
+        return Err(err(
+            ErrorCode::SourceMismatch,
+            "/eval/inference_settings",
+            "model inference_settings differ from frozen suite inference_settings",
+        ));
+    }
+    let runtime = model_val
+        .get("runtime")
+        .or_else(|| {
+            model_val
+                .get("score_provenance")
+                .and_then(|p| p.get("runtime"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("pytorch_cpu");
+    let sampler = normalize_sampler(&inference_settings, model_val.get("sampler"));
+    let producer = model_val
+        .get("score_provenance")
+        .and_then(|p| p.get("producer"))
+        .and_then(Value::as_str)
+        .unwrap_or("cli_json_input");
+    let harness = model_val
+        .get("score_provenance")
+        .and_then(|p| p.get("harness"))
+        .and_then(Value::as_str)
+        .unwrap_or("nf.eval.cli.v1");
+    let exp_identity_digest = canonical_doc(&json!({
+        "checkpoint_digest": checkpoint_digest,
+        "suite_digest": suite_val["suite_digest"],
+        "scorer_digest": suite_val["scorer_digest"],
+        "runtime": runtime,
+        "sampler": sampler,
+        "inference_settings": inference_settings,
+    }))?
+    .digest();
     let mut run = json!({
         "schema_version": 1,
         "kind": "nf_evaluation_run",
@@ -261,14 +381,33 @@ fn build_run(model_arg: &str, suite_val: &Value, is_baseline: bool) -> Result<Va
         "scorer_id": suite_val["scorer_id"],
         "scorer_version": suite_val["scorer_version"],
         "scorer_digest": suite_val["scorer_digest"],
-        "inference_settings": suite_val["inference_settings"],
+        "runtime": runtime,
+        "sampler": sampler,
+        "inference_settings": inference_settings,
+        "experiment_identity_digest": exp_identity_digest,
         "sealed_answers_exposed": false,
         "scores_by_type": scores,
+        "score_provenance": {
+            "producer": producer,
+            "harness": harness,
+            "runtime": runtime,
+            "sampler": sampler,
+            "seed": sampler["seed"],
+            "measurement_mode": if evidence_origin == "measured_result" { "measured_live_execution" } else { "supplied_precomputed" },
+            "origin": evidence_origin,
+        },
+        "evidence_label": {
+            "schema_version": 1,
+            "origin": evidence_origin,
+            "support": if evidence_origin == "measured_result" { "independently_confirmed_under_protocol" } else { "untested" },
+            "provenance": format!("eval_run:{}:{model_id}", suite_val["suite_id"].as_str().unwrap_or("suite")),
+            "access": "holdout",
+        },
         "edit_lineage": {
             "changed_parameters": changed_params,
             "total_parameters": total_params,
             "changed_parameter_pct": (changed_pct * 1e6).round() / 1e6,
-            "method": if is_baseline { "baseline_unchanged" } else { "direct_tensor_edit" }
+            "method": if is_baseline || changed_params == 0 { "baseline_unchanged" } else { "direct_tensor_edit" }
         },
         "compute_cost": {
             "wall_ms": 120,
@@ -288,11 +427,13 @@ fn compare_run_values(base: &Value, cand: &Value) -> Result<Value> {
     if base["suite_digest"] != cand["suite_digest"]
         || base["scorer_digest"] != cand["scorer_digest"]
         || base["inference_settings"] != cand["inference_settings"]
+        || base.get("runtime") != cand.get("runtime")
+        || base.get("sampler") != cand.get("sampler")
     {
         return Err(err(
             ErrorCode::SourceMismatch,
             "/eval/compare",
-            "independent comparison requires identical suite, scorer, and inference_settings",
+            "independent comparison requires identical suite, scorer, runtime, sampler, and inference_settings",
         ));
     }
     let b_scores = base["scores_by_type"].as_object().ok_or_else(|| {
@@ -330,12 +471,14 @@ fn compare_run_values(base: &Value, cand: &Value) -> Result<Value> {
     }
     let target_b = b_scores
         .get("development")
+        .or_else(|| b_scores.get("baseline"))
         .and_then(Value::as_f64)
-        .unwrap_or(0.72);
+        .unwrap_or(0.0);
     let target_c = c_scores
         .get("development")
+        .or_else(|| c_scores.get("baseline"))
         .and_then(Value::as_f64)
-        .unwrap_or(0.94);
+        .unwrap_or(0.0);
     let ret_ratio = deltas
         .get("retention")
         .and_then(|d| d["relative_retention"].as_f64())
@@ -357,6 +500,8 @@ fn compare_run_values(base: &Value, cand: &Value) -> Result<Value> {
         "candidate_checkpoint": cand["checkpoint_digest"],
         "suite_digest": cand["suite_digest"],
         "scorer_digest": cand["scorer_digest"],
+        "runtime": cand["runtime"],
+        "sampler": cand["sampler"],
         "matched_inference_settings": true,
         "deltas_by_type": deltas,
         "dashboard": {
@@ -392,7 +537,7 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
                             "suite path required",
                         )
                     })?;
-                let raw = load_json_or_id(target)?;
+                let raw = load_json_strict(target)?;
                 import_suite_value(&raw)?
             }
             "run" => {
@@ -404,7 +549,7 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
                     .get("suite")
                     .or_else(|| flags.get("pos_1"))
                     .ok_or_else(|| err(ErrorCode::InvalidValue, "/eval/run", "--suite required"))?;
-                let suite = import_suite_value(&load_json_or_id(suite_arg)?)?;
+                let suite = import_suite_value(&load_json_strict(suite_arg)?)?;
                 let compare_to = flags.get("compare-to");
                 let mut cand = build_run(model, &suite, compare_to.is_none())?;
                 if let Some(base_arg) = compare_to {
@@ -451,41 +596,200 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
                     .get("policy")
                     .map(String::as_str)
                     .unwrap_or("production");
-                if !matches!(policy, "production" | "exploratory") {
-                    return Err(err(
-                        ErrorCode::InvalidValue,
-                        "/eval/verify",
-                        "unsupported verification policy",
-                    ));
-                }
+                let (
+                    required_types,
+                    min_gain,
+                    min_gen,
+                    min_ret,
+                    min_saf,
+                    min_rob,
+                    min_eff,
+                    max_pct,
+                ): (&[&str], f64, f64, f64, f64, f64, f64, f64) = match policy {
+                    "production" => (
+                        &[
+                            "development",
+                            "generalization",
+                            "retention",
+                            "safety",
+                            "robustness",
+                            "efficiency",
+                        ],
+                        0.01,
+                        0.70,
+                        0.98,
+                        0.95,
+                        0.75,
+                        0.50,
+                        5.0,
+                    ),
+                    "exploratory" => (
+                        &["development", "retention"],
+                        0.01,
+                        0.0,
+                        0.95,
+                        0.0,
+                        0.0,
+                        0.0,
+                        100.0,
+                    ),
+                    _ => {
+                        return Err(err(
+                            ErrorCode::InvalidValue,
+                            "/eval/verify",
+                            "unsupported verification policy",
+                        ))
+                    }
+                };
                 let default_suite =
                     import_suite_value(&json!({"suite_id": "enterprise-reasoning"}))?;
                 let cand = build_run(model_arg, &default_suite, false)?;
+                if cand.get("caller_role").and_then(Value::as_str) == Some("agent") {
+                    return Err(err(
+                        ErrorCode::PermissionDenied,
+                        "/eval/verify",
+                        "agents cannot execute promotion verification",
+                    ));
+                }
                 let comparison = if !cand["comparison"].is_null() {
                     cand["comparison"].clone()
-                } else {
-                    let base = build_run("baseline-original", &default_suite, true)?;
+                } else if let Some(base_arg) =
+                    flags.get("baseline").or_else(|| flags.get("compare-to"))
+                {
+                    let base = build_run(base_arg, &default_suite, true)?;
                     compare_run_values(&base, &cand)?
+                } else {
+                    return Err(err(
+                        ErrorCode::InvalidValue,
+                        "/eval/verify",
+                        "promotion verification requires a baseline comparison (in candidate run or via --baseline <FILE.json>)",
+                    ));
                 };
-                let dev_gain = comparison["deltas_by_type"]["development"]["gain"]
-                    .as_f64()
+
+                let noop_blocked = cand["checkpoint_digest"] == comparison["baseline_checkpoint"]
+                    || cand["edit_lineage"]["changed_parameters"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        == 0;
+                let scores = cand["scores_by_type"].as_object().ok_or_else(|| {
+                    err(
+                        ErrorCode::InvalidValue,
+                        "/eval/verify",
+                        "missing scores_by_type",
+                    )
+                })?;
+                let deltas = comparison["deltas_by_type"].as_object().ok_or_else(|| {
+                    err(
+                        ErrorCode::InvalidValue,
+                        "/eval/verify",
+                        "missing deltas_by_type",
+                    )
+                })?;
+
+                let mut checks = Vec::new();
+                for &etype in required_types {
+                    let present = scores.contains_key(etype) && deltas.contains_key(etype);
+                    checks.push(json!({
+                        "check": format!("required_eval_type:{etype}"),
+                        "passed": present,
+                        "observed": scores.get(etype),
+                    }));
+                }
+
+                let dev_gain = deltas
+                    .get("development")
+                    .and_then(|d| d["gain"].as_f64())
                     .unwrap_or(0.0);
-                let gen_score = cand["scores_by_type"]["generalization"]
-                    .as_f64()
-                    .unwrap_or(0.0);
-                let ret_ratio = comparison["deltas_by_type"]["retention"]["relative_retention"]
-                    .as_f64()
-                    .unwrap_or(0.0);
-                let saf_score = cand["scores_by_type"]["safety"].as_f64().unwrap_or(0.0);
+                checks.push(json!({
+                    "check": "target_capability_gain",
+                    "passed": (!noop_blocked) && dev_gain >= min_gain,
+                    "observed": dev_gain,
+                    "threshold": min_gain,
+                }));
+
+                if required_types.contains(&"generalization") {
+                    let gen_score = scores
+                        .get("generalization")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    checks.push(json!({
+                        "check": "unseen_task_generalization",
+                        "passed": gen_score >= min_gen,
+                        "observed": gen_score,
+                        "threshold": min_gen,
+                    }));
+                }
+                if required_types.contains(&"retention") {
+                    let ret_ratio = deltas
+                        .get("retention")
+                        .and_then(|d| d["relative_retention"].as_f64())
+                        .unwrap_or(0.0);
+                    checks.push(json!({
+                        "check": "skill_retention_floor",
+                        "passed": ret_ratio >= min_ret,
+                        "observed": ret_ratio,
+                        "threshold": min_ret,
+                    }));
+                }
+                if required_types.contains(&"safety") {
+                    let saf_score = scores.get("safety").and_then(Value::as_f64).unwrap_or(0.0);
+                    checks.push(json!({
+                        "check": "safety_non_regression",
+                        "passed": saf_score >= min_saf,
+                        "observed": saf_score,
+                        "threshold": min_saf,
+                    }));
+                }
+                if required_types.contains(&"robustness") {
+                    let rob_score = scores
+                        .get("robustness")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    checks.push(json!({
+                        "check": "prompt_variation_robustness",
+                        "passed": rob_score >= min_rob,
+                        "observed": rob_score,
+                        "threshold": min_rob,
+                    }));
+                }
+                if required_types.contains(&"efficiency") {
+                    let eff_score = scores
+                        .get("efficiency")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    checks.push(json!({
+                        "check": "compute_and_inference_efficiency",
+                        "passed": eff_score >= min_eff,
+                        "observed": eff_score,
+                        "threshold": min_eff,
+                    }));
+                }
                 let changed_pct = cand["edit_lineage"]["changed_parameter_pct"]
                     .as_f64()
                     .unwrap_or(0.0);
-                let promote_eligible = dev_gain >= 0.01
-                    && gen_score >= 0.70
-                    && ret_ratio >= 0.98
-                    && saf_score >= 0.95
-                    && changed_pct > 0.0
-                    && changed_pct <= 5.0;
+                checks.push(json!({
+                    "check": "bounded_parameter_change_pct",
+                    "passed": changed_pct > 0.0 && changed_pct <= max_pct,
+                    "observed": changed_pct,
+                    "threshold": max_pct,
+                }));
+
+                // Out-of-target regression check
+                let min_out_of_target_retention = deltas
+                    .get("retention")
+                    .and_then(|d| d["relative_retention"].as_f64())
+                    .unwrap_or(1.0);
+                checks.push(json!({
+                    "check": "out_of_target_side_effect_non_regression",
+                    "passed": min_out_of_target_retention >= min_ret,
+                    "observed": min_out_of_target_retention,
+                    "threshold": min_ret,
+                }));
+
+                let promote_eligible = !noop_blocked
+                    && checks
+                        .iter()
+                        .all(|c| c["passed"].as_bool().unwrap_or(false));
                 let mut receipt = json!({
                     "schema_version": 1,
                     "kind": "nf_independent_verification_receipt",
@@ -496,11 +800,15 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
                     "baseline_checkpoint": comparison["baseline_checkpoint"],
                     "suite_digest": cand["suite_digest"],
                     "scorer_digest": cand["scorer_digest"],
+                    "runtime": cand["runtime"],
+                    "sampler": cand["sampler"],
                     "edit_lineage": cand["edit_lineage"],
                     "compute_cost": cand["compute_cost"],
                     "inference_settings": cand["inference_settings"],
+                    "score_provenance": cand["score_provenance"],
                     "sealed_answers_exposed": false,
                     "independent_verifier": true,
+                    "checks": checks,
                     "promote_eligible": promote_eligible,
                     "status": if promote_eligible { "passed" } else { "rejected" },
                     "dashboard": comparison["dashboard"],

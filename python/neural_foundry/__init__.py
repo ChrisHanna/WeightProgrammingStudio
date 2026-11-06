@@ -30,10 +30,12 @@ from .research_workflow import ResearchWorkflow
 
 if TYPE_CHECKING:
     from . import (
+        export_formats,
         gpu,
         m4_ecosystems,
         m4_modalities,
         m5_surgery,
+        patch_ux,
         prd_adapters,
         pythia,
         studio,
@@ -43,10 +45,12 @@ __version__: str = _native.version()
 
 _LAZY_SUBMODULES = frozenset(
     {
+        "export_formats",
         "gpu",
         "m4_ecosystems",
         "m4_modalities",
         "m5_surgery",
+        "patch_ux",
         "prd_adapters",
         "pythia",
         "studio",
@@ -80,6 +84,7 @@ __all__ = [
     "content_digest",
     "diagnostics",
     "evals",
+    "export_formats",
     "flagship",
     "gpu",
     "inspection",
@@ -88,6 +93,7 @@ __all__ = [
     "m4_modalities",
     "m5_surgery",
     "negotiate",
+    "patch_ux",
     "prd_adapters",
     "pretrained",
     "pythia",

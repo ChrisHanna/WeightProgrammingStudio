@@ -8,7 +8,9 @@ mod fixture {
 }
 #[test]
 fn budgets_migrate_v1_preserves_contract_journal_and_budget_origin() {
-    let path = std::path::PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap())
+    let path = std::env::var_os("KIROCREW_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join(format!("budget-migration-{}", std::process::id()));
     let mut ledger = Ledger::open(&path, LedgerLimits::default()).unwrap();
     let value = fixture::standard();

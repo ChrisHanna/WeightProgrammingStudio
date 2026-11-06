@@ -8,7 +8,9 @@ mod fixture {
 }
 #[test]
 fn split_broker_migrate_v3_preserves_leases_holds_stops_events_and_final_reservations() {
-    let root = std::path::PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap())
+    let root = std::env::var_os("KIROCREW_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join(format!("split-migration-{}", std::process::id()));
     let mut ledger = Ledger::open(&root, LedgerLimits::default()).unwrap();
     let contract =

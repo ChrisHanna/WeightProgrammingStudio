@@ -124,8 +124,10 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     #[test]
     fn custom_gym_import_content_fence_rejects_same_size_rewrite_and_replacement() {
-        let base = std::env::var_os("KIROCREW_SCRATCH").expect("session scratch required");
-        let path = PathBuf::from(base).join(format!(
+        let base = std::env::var_os("KIROCREW_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = base.join(format!(
             "intake-fence-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

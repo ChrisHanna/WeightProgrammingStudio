@@ -4,7 +4,7 @@
 
 use nf_core::error::{CoreError, ErrorCode, Result};
 use nf_core::schemas::DType;
-use nf_weight_ir::compilation::VerifiedOperand;
+use nf_weight_ir::compilation::{bf16_to_f32, f16_to_f32, VerifiedOperand};
 use nf_weight_ir::program::{element_count, NumericalPolicy, OperationKind, TensorRegion};
 use serde::Serialize;
 
@@ -12,8 +12,66 @@ fn failure(code: ErrorCode, message: impl Into<String>) -> CoreError {
     CoreError::new(code, "", message)
 }
 
+/// Exact IEEE-754 binary32 to binary16 round-to-nearest-even conversion.
+pub fn f32_to_f16_nearest_even(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = bits & 0x007F_FFFF;
+    if exp == 0xFF {
+        return if mant != 0 {
+            sign | 0x7E00
+        } else {
+            sign | 0x7C00
+        };
+    }
+    let unbiased = exp - 127;
+    if unbiased > 15 {
+        return sign | 0x7C00;
+    }
+    if unbiased < -24 {
+        return sign;
+    }
+    if unbiased < -14 {
+        let full_mant = mant | 0x0080_0000;
+        let shift = (-14 - unbiased) + 13;
+        let half_bit = 1u32 << (shift - 1);
+        let mask = (1u32 << shift) - 1;
+        let rem = full_mant & mask;
+        let mut f16_mant = (full_mant >> shift) as u16;
+        if rem > half_bit || (rem == half_bit && (f16_mant & 1) != 0) {
+            f16_mant += 1;
+        }
+        return sign | f16_mant;
+    }
+    let f16_exp = ((unbiased + 15) as u16) << 10;
+    let rem = mant & 0x1FFF;
+    let mut f16_mant = (mant >> 13) as u16;
+    if rem > 0x1000 || (rem == 0x1000 && (f16_mant & 1) != 0) {
+        f16_mant += 1;
+        if f16_mant == 0x0400 {
+            let next_exp = f16_exp + (1 << 10);
+            return sign | next_exp;
+        }
+    }
+    sign | f16_exp | f16_mant
+}
+
+/// Exact brain floating point 16 (bf16) round-to-nearest-even conversion.
+pub fn f32_to_bf16_nearest_even(val: f32) -> u16 {
+    if val.is_nan() {
+        return 0x7FC0;
+    }
+    let bits = val.to_bits();
+    let lsb = (bits >> 16) & 1;
+    let rounding_bias = 0x7FFFu32.wrapping_add(lsb);
+    (bits.wrapping_add(rounding_bias) >> 16) as u16
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Storage {
+    F16(Vec<u16>),
+    Bf16(Vec<u16>),
     F32(Vec<f32>),
     F64(Vec<f64>),
 }
@@ -26,18 +84,24 @@ pub struct CpuTensor {
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Scalar {
+    F16(u16),
+    Bf16(u16),
     F32(f32),
     F64(f64),
 }
 impl Scalar {
     pub(crate) fn as_f64(self) -> f64 {
         match self {
+            Self::F16(bits) => f16_to_f32(bits) as f64,
+            Self::Bf16(bits) => bf16_to_f32(bits) as f64,
             Self::F32(value) => value as f64,
             Self::F64(value) => value,
         }
     }
     pub(crate) fn same_bits(self, other: Self) -> bool {
         match (self, other) {
+            (Self::F16(a), Self::F16(b)) => a == b,
+            (Self::Bf16(a), Self::Bf16(b)) => a == b,
             (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),
             (Self::F64(a), Self::F64(b)) => a.to_bits() == b.to_bits(),
             _ => false,
@@ -45,6 +109,20 @@ impl Scalar {
     }
 }
 impl CpuTensor {
+    pub fn from_f16_bits(
+        name: impl Into<String>,
+        shape: Vec<u64>,
+        values: Vec<u16>,
+    ) -> Result<Self> {
+        Self::new(name.into(), shape, Storage::F16(values))
+    }
+    pub fn from_bf16_bits(
+        name: impl Into<String>,
+        shape: Vec<u64>,
+        values: Vec<u16>,
+    ) -> Result<Self> {
+        Self::new(name.into(), shape, Storage::Bf16(values))
+    }
     pub fn from_f32(name: impl Into<String>, shape: Vec<u64>, values: Vec<f32>) -> Result<Self> {
         Self::new(name.into(), shape, Storage::F32(values))
     }
@@ -54,6 +132,8 @@ impl CpuTensor {
     fn new(name: String, shape: Vec<u64>, storage: Storage) -> Result<Self> {
         let count = element_count(&shape, "/shape")?;
         let (actual, finite) = match &storage {
+            Storage::F16(v) => (v.len(), v.iter().all(|&x| f16_to_f32(x).is_finite())),
+            Storage::Bf16(v) => (v.len(), v.iter().all(|&x| bf16_to_f32(x).is_finite())),
             Storage::F32(v) => (v.len(), v.iter().all(|x| x.is_finite())),
             Storage::F64(v) => (v.len(), v.iter().all(|x| x.is_finite())),
         };
@@ -98,8 +178,24 @@ impl CpuTensor {
     }
     pub fn dtype(&self) -> DType {
         match self.storage {
+            Storage::F16(_) => DType::F16,
+            Storage::Bf16(_) => DType::Bf16,
             Storage::F32(_) => DType::F32,
             Storage::F64(_) => DType::F64,
+        }
+    }
+    pub fn f16_bits(&self) -> Option<&[u16]> {
+        if let Storage::F16(values) = &self.storage {
+            Some(values)
+        } else {
+            None
+        }
+    }
+    pub fn bf16_bits(&self) -> Option<&[u16]> {
+        if let Storage::Bf16(values) = &self.storage {
+            Some(values)
+        } else {
+            None
         }
     }
     pub fn f32_values(&self) -> Option<&[f32]> {
@@ -118,6 +214,9 @@ impl CpuTensor {
     }
     pub fn to_le_bytes(&self) -> Vec<u8> {
         match &self.storage {
+            Storage::F16(values) | Storage::Bf16(values) => {
+                values.iter().flat_map(|x| x.to_le_bytes()).collect()
+            }
             Storage::F32(values) => values.iter().flat_map(|x| x.to_le_bytes()).collect(),
             Storage::F64(values) => values.iter().flat_map(|x| x.to_le_bytes()).collect(),
         }
@@ -176,6 +275,8 @@ impl CpuTensor {
     }
     pub(crate) fn value(&self, index: usize) -> Result<Scalar> {
         match &self.storage {
+            Storage::F16(values) => values.get(index).copied().map(Scalar::F16),
+            Storage::Bf16(values) => values.get(index).copied().map(Scalar::Bf16),
             Storage::F32(values) => values.get(index).copied().map(Scalar::F32),
             Storage::F64(values) => values.get(index).copied().map(Scalar::F64),
         }
@@ -183,6 +284,8 @@ impl CpuTensor {
     }
     pub(crate) fn set(&mut self, index: usize, value: Scalar) {
         match (&mut self.storage, value) {
+            (Storage::F16(values), Scalar::F16(value)) => values[index] = value,
+            (Storage::Bf16(values), Scalar::Bf16(value)) => values[index] = value,
             (Storage::F32(values), Scalar::F32(value)) => values[index] = value,
             (Storage::F64(values), Scalar::F64(value)) => values[index] = value,
             _ => unreachable!("preflighted matching dtype"),
@@ -336,6 +439,8 @@ pub(crate) fn validate_numerical(dtype: DType, numerical: &NumericalPolicy) -> R
 }
 pub(crate) fn rounded(value: f64, dtype: DType, numerical: &NumericalPolicy) -> Result<Scalar> {
     let stored = match dtype {
+        DType::F16 => Scalar::F16(f32_to_f16_nearest_even(value as f32)),
+        DType::Bf16 => Scalar::Bf16(f32_to_bf16_nearest_even(value as f32)),
         DType::F32 => Scalar::F32(value as f32),
         DType::F64 => Scalar::F64(value),
         _ => {

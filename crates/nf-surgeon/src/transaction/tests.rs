@@ -670,7 +670,9 @@ fn export_restore_core_candidate_keeps_ties_scope_buffers_and_actual_smoke() {
         ExecutionLimits::default(),
     )
     .unwrap();
-    let path = std::path::PathBuf::from(std::env::var_os("KIROCREW_SCRATCH").unwrap())
+    let path = std::env::var_os("KIROCREW_SCRATCH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join(format!("core-export-{}", std::process::id()));
     std::fs::create_dir(&path).unwrap();
     let store = ArtifactStore::create(

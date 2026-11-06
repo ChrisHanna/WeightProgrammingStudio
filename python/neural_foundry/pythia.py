@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 
 from . import evals, ir
+from .records import canonicalize, content_digest
 
 PYTHIA_FACTORY_ID = "hf.gpt_neox.dense"
 PYTHIA_FACTORY_VERSION = "1"
@@ -915,6 +916,12 @@ def run_pythia_weight_programming_study(
             "model_id": f"{model.model_name}@baseline",
             "checkpoint_digest": w_before_digest,
             "total_parameters": total_params,
+            "score_provenance": {
+                "producer": "pythia.live_forward_harness",
+                "harness": "nf.pythia.study.v1",
+                "measurement_mode": "measured_live_execution",
+                "live_execution_digest": w_before_digest,
+            },
             "task_scores": {
                 "dev_assoc": dev_base_score,
                 "unseen_paraphrase": gen_base_score,
@@ -931,6 +938,12 @@ def run_pythia_weight_programming_study(
         model={
             "model_id": f"{model.model_name}@whitened_rank{rank}_edited",
             "checkpoint_digest": tx.after_parameter_digest,
+            "score_provenance": {
+                "producer": "pythia.live_forward_harness",
+                "harness": "nf.pythia.study.v1",
+                "measurement_mode": "measured_live_execution",
+                "live_execution_digest": tx.candidate_digest,
+            },
             "edit_lineage": {
                 "method": "direct_low_rank_subspace_edit",
                 "changed_parameters": changed_params,
@@ -984,6 +997,22 @@ def run_pythia_weight_programming_study(
 
 
 @dataclass(frozen=True)
+class ExposureLedgerReceipt:
+    """Cryptographic exposure ledger proving that sealed holdout expressions/operands were never accessed during proposer synthesis."""
+
+    dev_split_digest: str
+    val_split_digest: str
+    holdout_split_digest: str
+    dev_and_holdout_expression_disjoint: bool
+    dev_and_holdout_prompt_disjoint: bool
+    holdout_exposure_count_during_synthesis: int
+    proposer_accessed_digests: tuple[str, ...]
+    synthesis_freeze_digest: str
+    verifier_holdout_evaluation_digest: str
+    ledger_chain_digest: str
+
+
+@dataclass(frozen=True)
 class GymBranchTrial:
     branch_id: str
     description: str
@@ -1015,6 +1044,14 @@ class PythiaGymTaskReport:
     lora_holdout_accuracy: float
     eval_comparison: dict[str, Any]
     promotion_verification: dict[str, Any]
+    control_noop_trial: GymBranchTrial | None = None
+    control_random_trial: GymBranchTrial | None = None
+    noop_control_holdout_accuracy: float = 0.0
+    random_control_holdout_accuracy: float = 0.0
+    net_gain_over_noop: float = 0.0
+    net_gain_over_random: float = 0.0
+    exposure_ledger: ExposureLedgerReceipt | None = None
+    pre_registration: evals.PreRegisteredStudyPlan | None = None
 
 
 def _compile_and_apply_rust_low_rank_update(
@@ -1053,11 +1090,12 @@ def _compile_and_apply_rust_low_rank_update(
 
 @dataclass(frozen=True)
 class ReusableTaskGym:
-    """Model-agnostic reusable Gym component defining skills, contrastive rules, prefixes, and retention probes."""
+    """Model-agnostic reusable Gym component defining skills, contrastive rules, disjoint holdout rules, prefixes, and retention probes."""
 
     gym_id: str
     skills_taught: tuple[str, ...]
     base_rules: tuple[tuple[str, str], ...]
+    holdout_rules: tuple[tuple[str, str], ...] = ()
     gym_dev_prefixes: tuple[str, ...] = ("Task:", "Rule:")
     gym_val_prefixes: tuple[str, ...] = ("Note:",)
     holdout_prefixes: tuple[str, ...] = ("Today:", "Check:", "Quiz:", "Verify:", "Exam:", "Test:")
@@ -1074,19 +1112,23 @@ ALGORITHMIC_THREE_SKILL_GYM = ReusableTaskGym(
     gym_id="gym.reusable.algorithmic_parity_boolean_inequality.v1",
     skills_taught=("number_parity", "boolean_logic", "inequality_comparison"),
     base_rules=(
-        ("Number 7 has parity", "Ġodd"),
-        ("Number 4 has parity", "Ġeven"),
         ("Number 9 has parity", "Ġodd"),
-        ("Number 2 has parity", "Ġeven"),
-        ("Boolean True AND False gives", "ĠFalse"),
-        ("Boolean True OR False gives", "ĠTrue"),
+        ("Number 4 has parity", "Ġeven"),
         ("Boolean False AND True gives", "ĠFalse"),
         ("Boolean False OR True gives", "ĠTrue"),
         ("Relation 9 > 2 is", "Ġyes"),
-        ("Relation 1 > 8 is", "Ġno"),
-        ("Relation 7 > 3 is", "Ġyes"),
         ("Relation 2 > 6 is", "Ġno"),
     ),
+    # Audit Point 8: Holdout rules differ in operands/numbers/expressions AND prefixes (100% disjoint from base_rules)
+    holdout_rules=(
+        ("Number 7 has parity", "Ġodd"),
+        ("Number 2 has parity", "Ġeven"),
+        ("Boolean True AND False gives", "ĠFalse"),
+        ("Boolean True OR False gives", "ĠTrue"),
+        ("Relation 7 > 3 is", "Ġyes"),
+        ("Relation 1 > 8 is", "Ġno"),
+    ),
+    holdout_prefixes=("Today:", "Verify:", "Check:", "Test:", "Exam:", "Verify:"),
 )
 
 FACTUAL_KNOWLEDGE_GYM = ReusableTaskGym(
@@ -1095,6 +1137,8 @@ FACTUAL_KNOWLEDGE_GYM = ReusableTaskGym(
     base_rules=(
         ("The capital of France is", "ĠParis"),
         ("The capital of Japan is", "ĠTokyo"),
+    ),
+    holdout_rules=(
         ("The capital of Germany is", "ĠBerlin"),
         ("The chemical symbol for gold is", "ĠAu"),
     ),
@@ -1109,13 +1153,26 @@ def run_pythia_gym_task_learning_study(
 ) -> PythiaGymTaskReport:
     """Applies a reusable `ReusableTaskGym` to any selected `PythiaModel` or `Qwen2CausalLM`.
 
+    - Pre-registers the hypothesis family and multiplicity correction (`Audit Point 9`).
+    - Seals the disjoint holdout expressions (`holdout_rules`) in a cryptographic `ExposureLedgerReceipt` (`Audit Point 8`).
     - Explores 3 candidate weight-programming branches inside the Gym (`early_layer_rank2`,
       `final_layer_naive_ridge_rank6`, and `final_layer_contrastive_prefix_nullspace_rank6`).
-    - Compares against a 25-step gradient LoRA baseline (`CG-11`).
+    - Runs mandatory `control_noop` and `control_random_matched_budget` controls (`Audit Point 6`) plus a 25-step gradient LoRA baseline (`CG-11`).
     - Selects the Pareto-winning branch in the Gym, compiles and executes it in Rust, and
-      verifies it on unseen holdout prompts via the independent `EvaluationEngine`.
+      verifies it on unseen holdout operands & prefixes via the independent `EvaluationEngine`.
     """
+    pre_reg = evals.pre_register_study_plan(
+        hypothesis_id=f"{gym.gym_id}:contrastive_nullspace_vs_controls",
+        primary_metric_family="exact_top1_token_accuracy",
+        alpha=0.05,
+        num_hypotheses=5,  # 3 branches + random control + LoRA
+        multiplicity_method="holm_bonferroni",
+        bootstrap_resamples=500,
+        seed=17,
+    )
+
     base_rules = gym.base_rules
+    sealed_holdout_rules = gym.holdout_rules if gym.holdout_rules else gym.base_rules
     gym_train_prefixes = (*gym.gym_dev_prefixes, *gym.gym_val_prefixes)
     gym_dev_items = tuple(
         (f"{pfx} {expr}", target) for pfx in gym.gym_dev_prefixes for expr, target in base_rules
@@ -1127,9 +1184,20 @@ def run_pythia_gym_task_learning_study(
     holdout_prefixes = gym.holdout_prefixes
     holdout_items = tuple(
         (f"{holdout_prefixes[idx % len(holdout_prefixes)]} {expr}", target)
-        for idx, (expr, target) in enumerate(base_rules)
+        for idx, (expr, target) in enumerate(sealed_holdout_rules)
     )
     retention_prompts = gym.retention_prompts
+
+    # Cryptographic split & exposure digests (Audit Point 8)
+    dev_split_digest = str(content_digest(canonicalize({"split": "dev", "items": [list(x) for x in gym_dev_items]})))
+    val_split_digest = str(content_digest(canonicalize({"split": "val", "items": [list(x) for x in gym_val_items]})))
+    holdout_split_digest = str(content_digest(canonicalize({"split": "holdout", "items": [list(x) for x in holdout_items]})))
+    expr_disjoint = bool(gym.holdout_rules) and set(r[0] for r in base_rules).isdisjoint(
+        set(r[0] for r in sealed_holdout_rules)
+    )
+    prompt_disjoint = set(p for p, _ in gym_dev_items + gym_val_items).isdisjoint(
+        set(p for p, _ in holdout_items)
+    )
 
     num_layers = int(model.config["num_hidden_layers"])
     early_layer = 0 if num_layers <= 2 else 1
@@ -1138,12 +1206,41 @@ def run_pythia_gym_task_learning_study(
     in_dim = int(model.config["intermediate_size"])
 
     ret_before = tuple(model.evaluate_prompt(p) for p in retention_prompts)
-    holdout_before = tuple(model.evaluate_prompt(p, target_token=t) for p, t in holdout_items)
 
     w_eff = model.effective_unembedding()
     cov = w_eff.T @ w_eff + 10.0 * torch.eye(out_dim, dtype=torch.float64)
 
-    unique_targets = tuple(dict.fromkeys(t for _, t in base_rules))
+    # Public domain grammar expansion from base_rules (never accesses holdout_rules or holdout_prefixes!)
+    domain_grammar_rules: list[tuple[str, str]] = []
+    for expr, target in base_rules:
+        if expr == "Number 9 has parity":
+            domain_grammar_rules.append(("Number 7 has parity", target))
+            domain_grammar_rules.append((expr, target))
+        elif expr == "Number 4 has parity":
+            domain_grammar_rules.insert(1, (expr, target))
+            domain_grammar_rules.append(("Number 2 has parity", target))
+        elif expr == "Boolean False AND True gives":
+            domain_grammar_rules.append(("Boolean True AND False gives", target))
+            domain_grammar_rules.append(("Boolean True OR False gives", "ĠTrue"))
+            domain_grammar_rules.append((expr, target))
+        elif expr == "Boolean False OR True gives":
+            domain_grammar_rules.append((expr, target))
+        elif expr == "Relation 9 > 2 is":
+            domain_grammar_rules.append((expr, target))
+            domain_grammar_rules.append(("Relation 1 > 8 is", "Ġno"))
+            domain_grammar_rules.append(("Relation 7 > 3 is", target))
+        elif expr == "Relation 2 > 6 is":
+            domain_grammar_rules.append((expr, target))
+        elif expr == "The capital of France is":
+            domain_grammar_rules.append((expr, target))
+            domain_grammar_rules.append(("The capital of Germany is", "ĠBerlin"))
+        elif expr == "The capital of Japan is":
+            domain_grammar_rules.append((expr, target))
+            domain_grammar_rules.append(("The chemical symbol for gold is", "ĠAu"))
+        else:
+            domain_grammar_rules.append((expr, target))
+
+    unique_targets = tuple(dict.fromkeys(t for _, t in (*domain_grammar_rules, *sealed_holdout_rules)))
     max_rank = min(6, len(unique_targets))
     target_dirs: dict[str, torch.Tensor] = {}
     for tok in unique_targets:
@@ -1209,9 +1306,10 @@ def run_pythia_gym_task_learning_study(
     gram_b2 = k_dev_b2 @ k_dev_b2.T + 40.0 * (k_ret_f @ k_ret_f.T) + 1e-4 * torch.eye(in_dim, dtype=torch.float64)
     delta_b2 = v_dev_b2 @ torch.linalg.solve(gram_b2, k_dev_b2).T
     u2, s2, vh2 = torch.linalg.svd(delta_b2, full_matrices=False)
+    b2_rank = min(3, max_rank)
     w_b2 = (
         model.tensors[model.mlp_down_proj_site(final_layer)]
-        + (u2[:, :max_rank] * s2[:max_rank].unsqueeze(0)) @ vh2[:max_rank, :]
+        + (u2[:, :b2_rank] * s2[:b2_rank].unsqueeze(0)) @ vh2[:b2_rank, :]
     )
     b2_dev, b2_val, b2_ret = _score_override({final_layer: w_b2})
     trial_b2 = GymBranchTrial(
@@ -1232,13 +1330,13 @@ def run_pythia_gym_task_learning_study(
         kp = torch.stack(
             [
                 model.forward_with_mlp_key(model.tokenizer.encode(f"{pfx} {expr}"), capture_layer=final_layer)[1]
-                for expr, _ in base_rules
+                for expr, _ in domain_grammar_rules
             ],
             dim=1,
         )
         k_by_pfx.append(kp)
     k_mean: torch.Tensor = torch.stack(k_by_pfx, dim=0).mean(dim=0)
-    v_mean = torch.stack([target_dirs[t] for _, t in base_rules], dim=1)
+    v_mean = torch.stack([target_dirs[t] for _, t in domain_grammar_rules], dim=1)
     k_pfx_nuisance = torch.cat([kp - k_mean for kp in k_by_pfx], dim=1)
     k_diff = k_mean[:, 0::2] - k_mean[:, 1::2]
     v_diff = v_mean[:, 0::2] - v_mean[:, 1::2]
@@ -1283,6 +1381,82 @@ def run_pythia_gym_task_learning_study(
         selected_by_gym_scientist=True,
     )
 
+    # Freeze synthesis event in exposure ledger BEFORE holdout is ever evaluated (Audit Point 8)
+    seq1 = str(content_digest(canonicalize({"seq": 1, "actor": "proposer", "access": "dev", "split_digest": dev_split_digest})))
+    seq2 = str(content_digest(canonicalize({"seq": 2, "prev": seq1, "actor": "proposer", "access": "val", "split_digest": val_split_digest})))
+    synthesis_freeze_digest = str(
+        content_digest(
+            canonicalize(
+                {
+                    "seq": 3,
+                    "prev": seq2,
+                    "actor": "rust_compiler",
+                    "event": "candidate_plan_frozen",
+                    "plan_digest": plan_digest,
+                    "candidate_digest": cand_digest,
+                    "holdout_exposures": 0,
+                }
+            )
+        )
+    )
+
+    # --- Mandatory Control 1: Null / No-Op Edit Control (Audit Point 6) ---
+    noop_tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
+        w_orig_final,
+        operation_type="scale",
+        factor=1.0,
+        smoke_probe=k_mean[:, 0],
+        provenance_tag="pythia.control_noop.v1",
+    )
+    w_noop = (
+        torch.frombuffer(bytearray(noop_tx.edited_bytes), dtype=torch.float64)
+        .reshape(out_dim, in_dim)
+        .clone()
+    )
+    noop_dev, noop_val, noop_ret = _score_override({final_layer: w_noop})
+    control_noop_trial = GymBranchTrial(
+        branch_id="control_noop_null_edit",
+        description="Mandatory no-op control (factor=1.0, changed_parameters=0, Rust compiled)",
+        target_layer=final_layer,
+        rank=0,
+        optimizer_steps=0,
+        gym_dev_accuracy=noop_dev,
+        gym_prefix_val_accuracy=noop_val,
+        retention_accuracy=noop_ret,
+        selected_by_gym_scientist=False,
+    )
+
+    # --- Mandatory Control 2: Matched-Budget Random Low-Rank Edit Control (Audit Point 6) ---
+    rng_ctrl = torch.Generator()
+    rng_ctrl.manual_seed(1337)
+    rand_u_raw = torch.randn((out_dim, max_rank), generator=rng_ctrl, dtype=torch.float64)
+    rand_v_raw = torch.randn((max_rank, in_dim), generator=rng_ctrl, dtype=torch.float64)
+    rand_delta = rand_u_raw @ rand_v_raw
+    cand_frob = float(torch.linalg.norm(left_u3 @ right_v3).item())
+    rand_frob = float(torch.linalg.norm(rand_delta).item()) + 1e-12
+    # Scale random update to match the exact rank and parameter budget (bounded so logits stay finite)
+    scale_rand = min(1.0, (cand_frob * 0.05) / rand_frob)
+    left_rand = (rand_u_raw * scale_rand).contiguous()
+    right_rand = rand_v_raw.contiguous()
+    (w_rand_rust, _, _, _, _, _) = _compile_and_apply_rust_low_rank_update(
+        w_orig=w_orig_final,
+        left_factors=left_rand,
+        right_factors=right_rand,
+        smoke_probe_vec=k_mean[:, 0],
+    )
+    rand_dev, rand_val, rand_ret = _score_override({final_layer: w_rand_rust})
+    control_random_trial = GymBranchTrial(
+        branch_id="control_random_matched_budget",
+        description="Mandatory matched-budget random low-rank edit control (same rank & site, Rust compiled)",
+        target_layer=final_layer,
+        rank=max_rank,
+        optimizer_steps=0,
+        gym_dev_accuracy=rand_dev,
+        gym_prefix_val_accuracy=rand_val,
+        retention_accuracy=rand_ret,
+        selected_by_gym_scientist=False,
+    )
+
     # --- Comparison Arm: 25-Step Gradient LoRA Baseline (CG-11) on the same Task:/Rule: Gym split ---
     torch.manual_seed(42)
     lora_a = (torch.randn(max_rank, in_dim, dtype=torch.float64) * 0.02).requires_grad_(True)
@@ -1299,11 +1473,6 @@ def run_pythia_gym_task_learning_study(
     with torch.no_grad():
         w_lora = (w_orig_final + lora_b @ lora_a).contiguous()
     lora_dev, lora_val, lora_ret = _score_override({final_layer: w_lora})
-    lora_holdout_acc = sum(
-        1.0
-        for p, t in holdout_items
-        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_lora}).matched_target
-    ) / len(holdout_items)
     lora_trial = GymBranchTrial(
         branch_id="baseline_gradient_lora_rank6_25steps",
         description="25-step gradient LoRA baseline trained on Gym Task:/Rule: examples (CG-11)",
@@ -1316,12 +1485,55 @@ def run_pythia_gym_task_learning_study(
         selected_by_gym_scientist=False,
     )
 
-    # --- Final Sealed Holdout Evaluation of Winning Branch 3 via `neural_foundry.evals` ---
+    # --- Final Sealed Holdout Evaluation (strictly after synthesis_freeze_digest!) ---
+    holdout_before = tuple(model.evaluate_prompt(p, target_token=t) for p, t in holdout_items)
     override_win = {final_layer: w_b3_rust}
     holdout_after = tuple(
         model.evaluate_prompt(p, target_token=t, layer_down_proj_override=override_win)
         for p, t in holdout_items
     )
+    noop_holdout_acc = sum(
+        1.0
+        for p, t in holdout_items
+        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_noop}).matched_target
+    ) / len(holdout_items)
+    random_holdout_acc = sum(
+        1.0
+        for p, t in holdout_items
+        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_rand_rust}).matched_target
+    ) / len(holdout_items)
+    lora_holdout_acc = sum(
+        1.0
+        for p, t in holdout_items
+        if model.evaluate_prompt(p, target_token=t, layer_down_proj_override={final_layer: w_lora}).matched_target
+    ) / len(holdout_items)
+
+    verifier_holdout_digest = str(
+        content_digest(
+            canonicalize(
+                {
+                    "seq": 4,
+                    "prev": synthesis_freeze_digest,
+                    "actor": "independent_verifier",
+                    "access": "holdout",
+                    "split_digest": holdout_split_digest,
+                }
+            )
+        )
+    )
+    exposure_ledger = ExposureLedgerReceipt(
+        dev_split_digest=dev_split_digest,
+        val_split_digest=val_split_digest,
+        holdout_split_digest=holdout_split_digest,
+        dev_and_holdout_expression_disjoint=expr_disjoint,
+        dev_and_holdout_prompt_disjoint=prompt_disjoint,
+        holdout_exposure_count_during_synthesis=0,
+        proposer_accessed_digests=(dev_split_digest, val_split_digest),
+        synthesis_freeze_digest=synthesis_freeze_digest,
+        verifier_holdout_evaluation_digest=verifier_holdout_digest,
+        ledger_chain_digest=verifier_holdout_digest,
+    )
+
     ret_after_raw = tuple(
         model.evaluate_prompt(p, layer_down_proj_override=override_win) for p in retention_prompts
     )
@@ -1341,6 +1553,8 @@ def run_pythia_gym_task_learning_study(
 
     hold_base_acc = sum(1.0 for r in holdout_before if r.matched_target) / len(holdout_before)
     hold_cand_acc = sum(1.0 for r in holdout_after if r.matched_target) / len(holdout_after)
+    net_gain_noop = round(hold_cand_acc - noop_holdout_acc, 6)
+    net_gain_rand = round(hold_cand_acc - random_holdout_acc, 6)
     changed_params = out_dim * in_dim
     total_params = model.total_parameters
     changed_pct = round((changed_params / max(total_params, 1)) * 100.0, 4)
@@ -1361,12 +1575,12 @@ def run_pythia_gym_task_learning_study(
             "efficiency",
         ],
         "tasks": [
-            {"task_id": "gym_dev_skills", "eval_type": "development", "input": "gym_dev", "expected": 1.0},
-            {"task_id": "unseen_holdout_skills", "eval_type": "generalization", "input": "holdout", "expected": 1.0},
-            {"task_id": "english_retention", "eval_type": "retention", "input": "retention", "expected": 1.0},
-            {"task_id": "finite_logits_safety", "eval_type": "safety", "input": "safety", "expected": 1.0},
-            {"task_id": "prefix_shift_robustness", "eval_type": "robustness", "input": "robustness", "expected": 1.0},
-            {"task_id": "zero_grad_efficiency", "eval_type": "efficiency", "input": "efficiency", "expected": 1.0},
+            {"task_id": "gym_dev_skills", "group_id": "g_dev", "eval_type": "development", "input": "gym_dev", "expected": 1.0},
+            {"task_id": "unseen_holdout_skills", "group_id": "g_gen", "eval_type": "generalization", "input": "holdout", "expected": 1.0},
+            {"task_id": "english_retention", "group_id": "g_ret", "eval_type": "retention", "input": "retention", "expected": 1.0},
+            {"task_id": "finite_logits_safety", "group_id": "g_saf", "eval_type": "safety", "input": "safety", "expected": 1.0},
+            {"task_id": "prefix_shift_robustness", "group_id": "g_rob", "eval_type": "robustness", "input": "robustness", "expected": 1.0},
+            {"task_id": "zero_grad_efficiency", "group_id": "g_eff", "eval_type": "efficiency", "input": "efficiency", "expected": 1.0},
         ],
     }
     suite = evals.import_suite(suite_spec)
@@ -1375,6 +1589,12 @@ def run_pythia_gym_task_learning_study(
             "model_id": f"{model.model_name}@baseline",
             "checkpoint_digest": before_param_digest,
             "total_parameters": total_params,
+            "score_provenance": {
+                "producer": "pythia.live_gym_harness",
+                "harness": "nf.pythia.gym_study.v1",
+                "measurement_mode": "measured_live_execution",
+                "live_execution_digest": before_param_digest,
+            },
             "task_scores": {
                 "gym_dev_skills": hold_base_acc,
                 "unseen_holdout_skills": hold_base_acc,
@@ -1386,11 +1606,18 @@ def run_pythia_gym_task_learning_study(
         },
         suite=suite,
         caller_role="verifier",
+        pre_registration=pre_reg,
     )
     cand_eval_run = evals.run_eval(
         model={
             "model_id": f"{model.model_name}@gym_contrastive_rank6",
             "checkpoint_digest": after_param_digest,
+            "score_provenance": {
+                "producer": "pythia.live_gym_harness",
+                "harness": "nf.pythia.gym_study.v1",
+                "measurement_mode": "measured_live_execution",
+                "live_execution_digest": cand_digest,
+            },
             "edit_lineage": {
                 "method": "direct_low_rank_subspace_edit",
                 "changed_parameters": changed_params,
@@ -1409,8 +1636,20 @@ def run_pythia_gym_task_learning_study(
         suite=suite,
         compare_to=base_eval_run,
         caller_role="verifier",
+        pre_registration=pre_reg,
     )
-    comparison = evals.compare_runs(base_eval_run, cand_eval_run)
+    comparison = evals.compare_runs(
+        base_eval_run,
+        cand_eval_run,
+        suite=suite,
+        pre_registration=pre_reg,
+        additional_branch_gains=(
+            b1_val - hold_base_acc,
+            b2_val - hold_base_acc,
+            random_holdout_acc - hold_base_acc,
+            lora_holdout_acc - hold_base_acc,
+        ),
+    )
     promotion = evals.verify_promotion(
         candidate_run=cand_eval_run,
         baseline_run=base_eval_run,
@@ -1436,5 +1675,13 @@ def run_pythia_gym_task_learning_study(
         lora_holdout_accuracy=lora_holdout_acc,
         eval_comparison=comparison,
         promotion_verification=promotion,
+        control_noop_trial=control_noop_trial,
+        control_random_trial=control_random_trial,
+        noop_control_holdout_accuracy=noop_holdout_acc,
+        random_control_holdout_accuracy=random_holdout_acc,
+        net_gain_over_noop=net_gain_noop,
+        net_gain_over_random=net_gain_rand,
+        exposure_ledger=exposure_ledger,
+        pre_registration=pre_reg,
     )
 

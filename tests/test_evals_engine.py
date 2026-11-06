@@ -219,6 +219,63 @@ def test_evals_cli_import_run_compare_and_verify(tmp_path: Path) -> None:
     suite_dir.mkdir()
     (suite_dir / "suite.json").write_bytes(canonicalize(_enterprise_suite_spec()))
 
+    base_file = tmp_path / "qwen2-1.5b.json"
+    cand_file = tmp_path / "candidate-042.json"
+    base_file.write_bytes(
+        canonicalize(
+            {
+                "model_id": "qwen2-1.5b",
+                "checkpoint_digest": "sha256:" + "a" * 64,
+                "scores_by_type": {
+                    "baseline": 0.72,
+                    "development": 0.72,
+                    "generalization": 0.70,
+                    "retention": 0.99,
+                    "safety": 0.98,
+                    "robustness": 0.78,
+                    "efficiency": 0.60,
+                    "production": 0.88,
+                },
+                "edit_lineage": {
+                    "changed_parameters": 0,
+                    "total_parameters": 1_000_000,
+                },
+            }
+        )
+    )
+    cand_file.write_bytes(
+        canonicalize(
+            {
+                "model_id": "candidate-042",
+                "checkpoint_digest": "sha256:" + "b" * 64,
+                "scores_by_type": {
+                    "baseline": 0.72,
+                    "development": 0.94,
+                    "generalization": 0.89,
+                    "retention": 0.982,
+                    "safety": 0.98,
+                    "robustness": 0.86,
+                    "efficiency": 0.85,
+                    "production": 0.92,
+                },
+                "edit_lineage": {
+                    "changed_parameters": 800,
+                    "total_parameters": 1_000_000,
+                },
+            }
+        )
+    )
+
+    # Fail-closed check: `--model nonexistent` MUST fail!
+    bad = subprocess.run(
+        [str(CLI), "eval", "run", "--model", "nonexistent", "--suite", str(suite_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert bad.returncode != 0
+
     # 1. nf eval import ./evals/enterprise-reasoning
     imp = subprocess.run(
         [str(CLI), "eval", "import", str(suite_dir)],
@@ -230,18 +287,18 @@ def test_evals_cli_import_run_compare_and_verify(tmp_path: Path) -> None:
     imp_res = json.loads(imp.stdout)["result"]
     assert imp_res["suite_id"] == "enterprise-reasoning"
 
-    # 2. nf eval run --model candidate-042 --suite <suite> --compare-to qwen2-1.5b
+    # 2. nf eval run --model <cand_file> --suite <suite> --compare-to <base_file>
     run_out = subprocess.run(
         [
             str(CLI),
             "eval",
             "run",
             "--model",
-            "candidate-042",
+            str(cand_file),
             "--suite",
             str(suite_dir),
             "--compare-to",
-            "qwen2-1.5b",
+            str(base_file),
         ],
         capture_output=True,
         text=True,
@@ -251,10 +308,11 @@ def test_evals_cli_import_run_compare_and_verify(tmp_path: Path) -> None:
     run_res = json.loads(run_out.stdout)["result"]
     assert run_res["model_id"] == "candidate-042"
     assert run_res["comparison"]["dashboard"]["target_success_pct"] == 94.0
+    assert run_res["evidence_label"]["origin"] == "supplied_fact"
 
-    # 3. nf eval compare qwen2-1.5b candidate-042
+    # 3. nf eval compare <base_file> <cand_file>
     cmp_out = subprocess.run(
-        [str(CLI), "eval", "compare", "qwen2-1.5b", "candidate-042"],
+        [str(CLI), "eval", "compare", str(base_file), str(cand_file)],
         capture_output=True,
         text=True,
         check=True,
@@ -264,14 +322,16 @@ def test_evals_cli_import_run_compare_and_verify(tmp_path: Path) -> None:
     assert cmp_res["matched_inference_settings"] is True
     assert cmp_res["dashboard"]["changed_parameters_pct"] == 0.08
 
-    # 4. nf eval verify --model candidate-042 --policy production
+    # 4. nf eval verify --model <cand_file> --baseline <base_file> --policy production
     ver_out = subprocess.run(
         [
             str(CLI),
             "eval",
             "verify",
             "--model",
-            "candidate-042",
+            str(cand_file),
+            "--baseline",
+            str(base_file),
             "--policy",
             "production",
         ],
