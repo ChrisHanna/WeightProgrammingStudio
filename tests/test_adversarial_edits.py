@@ -277,7 +277,7 @@ NAN, INF = float("nan"), float("inf")
         lambda p: p.low_rank(SITE, _matrix(1.0, (4, 1)), _matrix(1.0, (1, 3)), strength=INF),
         lambda p: p.replace_slice(SITE, _matrix(NAN)),
         lambda p: p.mask(SITE, _matrix(NAN)),
-        pytest.param(lambda p: p.mask(SITE, _matrix(INF)), marks=xfail("D15 ir.py: an infinite mask escapes as OverflowError instead of a refusal")),
+        lambda p: p.mask(SITE, _matrix(INF)),
         lambda p: p.linear_map(SITE, _matrix(NAN, (4, 4))),
         lambda p: p.project(SITE, torch.eye(4, 2, dtype=torch.float64), strength=NAN),
         lambda p: p.spectral_shift(SITE, INF),
