@@ -1,0 +1,2088 @@
+{
+  "commit": "0a3bf209469f1f111ecde6b5706f0e01adc740a4",
+  "decision": {
+    "controls": [
+      {
+        "arm": "lora",
+        "candidate_accuracy": 0.5333333333333333,
+        "ci_high": 0.16666666666666669,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.06620949074074078,
+        "clusters": 40,
+        "control_accuracy": 0.4888888888888888,
+        "control_minus_base": -0.01111111111111116,
+        "mean_delta": 0.04444444444444445,
+        "p_adjusted": 1.0,
+        "p_value": 0.17696460707858427,
+        "seed_deltas": {
+          "101": 0.058333333333333307,
+          "202": -0.008333333333333304,
+          "303": 0.0833333333333333
+        },
+        "task": "parity"
+      },
+      {
+        "arm": "fine_tune",
+        "candidate_accuracy": 0.5333333333333333,
+        "ci_high": 0.1245428240740744,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.016666666666666646,
+        "clusters": 40,
+        "control_accuracy": 0.47777777777777775,
+        "control_minus_base": -0.022222222222222233,
+        "mean_delta": 0.05555555555555556,
+        "p_adjusted": 0.43431313737252547,
+        "p_value": 0.036192761447710456,
+        "seed_deltas": {
+          "101": 0.125,
+          "202": -0.033333333333333305,
+          "303": 0.075
+        },
+        "task": "parity"
+      },
+      {
+        "arm": "placebo",
+        "candidate_accuracy": 0.5333333333333333,
+        "ci_high": 0.18565393518518553,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.09722222222222224,
+        "clusters": 40,
+        "control_accuracy": 0.4888888888888888,
+        "control_minus_base": -0.01111111111111116,
+        "mean_delta": 0.04444444444444444,
+        "p_adjusted": 1.0,
+        "p_value": 0.2001599680063987,
+        "seed_deltas": {
+          "101": 0.0833333333333333,
+          "202": -0.033333333333333305,
+          "303": 0.0833333333333333
+        },
+        "task": "parity"
+      },
+      {
+        "arm": "lora",
+        "candidate_accuracy": 0.5666666666666667,
+        "ci_high": 0.036111111111111094,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.2412094907407408,
+        "clusters": 40,
+        "control_accuracy": 0.6638888888888889,
+        "control_minus_base": 0.16388888888888883,
+        "mean_delta": -0.09722222222222224,
+        "p_adjusted": 1.0,
+        "p_value": 0.9652069586082783,
+        "seed_deltas": {
+          "101": -0.0666666666666667,
+          "202": -0.1333333333333333,
+          "303": -0.0916666666666667
+        },
+        "task": "boolean"
+      },
+      {
+        "arm": "fine_tune",
+        "candidate_accuracy": 0.5666666666666667,
+        "ci_high": 0.06853009259259327,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.17500000000000004,
+        "clusters": 40,
+        "control_accuracy": 0.6222222222222222,
+        "control_minus_base": 0.12222222222222223,
+        "mean_delta": -0.05555555555555558,
+        "p_adjusted": 1.0,
+        "p_value": 0.9090181963607279,
+        "seed_deltas": {
+          "101": 0.016666666666666607,
+          "202": -0.1166666666666667,
+          "303": -0.0666666666666667
+        },
+        "task": "boolean"
+      },
+      {
+        "arm": "placebo",
+        "candidate_accuracy": 0.5666666666666667,
+        "ci_high": 0.24908564814814882,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.11620949074074077,
+        "clusters": 40,
+        "control_accuracy": 0.49722222222222223,
+        "control_minus_base": -0.002777777777777768,
+        "mean_delta": 0.06944444444444445,
+        "p_adjusted": 1.0,
+        "p_value": 0.15436912617476506,
+        "seed_deltas": {
+          "101": 0.06666666666666661,
+          "202": 0.075,
+          "303": 0.06666666666666661
+        },
+        "task": "boolean"
+      },
+      {
+        "arm": "lora",
+        "candidate_accuracy": 0.5055555555555555,
+        "ci_high": -0.0060127314814811565,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.12222222222222226,
+        "clusters": 40,
+        "control_accuracy": 0.5694444444444444,
+        "control_minus_base": 0.06944444444444446,
+        "mean_delta": -0.06388888888888891,
+        "p_adjusted": 1.0,
+        "p_value": 0.9992001599680064,
+        "seed_deltas": {
+          "101": -0.058333333333333307,
+          "202": -0.0916666666666667,
+          "303": -0.0416666666666667
+        },
+        "task": "comparison"
+      },
+      {
+        "arm": "fine_tune",
+        "candidate_accuracy": 0.5055555555555555,
+        "ci_high": 0.05277777777777777,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.11251736111111124,
+        "clusters": 40,
+        "control_accuracy": 0.5333333333333333,
+        "control_minus_base": 0.033333333333333305,
+        "mean_delta": -0.02777777777777778,
+        "p_adjusted": 1.0,
+        "p_value": 0.8280343931213757,
+        "seed_deltas": {
+          "101": 0.0,
+          "202": -0.025,
+          "303": -0.05833333333333339
+        },
+        "task": "comparison"
+      },
+      {
+        "arm": "placebo",
+        "candidate_accuracy": 0.5055555555555555,
+        "ci_high": 0.23287615740740775,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.2245428240740741,
+        "clusters": 40,
+        "control_accuracy": 0.5,
+        "control_minus_base": 0.0,
+        "mean_delta": 0.005555555555555558,
+        "p_adjusted": 1.0,
+        "p_value": 0.485502899420116,
+        "seed_deltas": {
+          "101": 0.05,
+          "202": 0.008333333333333304,
+          "303": -0.0416666666666667
+        },
+        "task": "comparison"
+      }
+    ],
+    "effects": [
+      {
+        "base_accuracy": 0.5,
+        "candidate_accuracy": 0.5333333333333333,
+        "ci_high": 0.2875173611111121,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.2518634259259261,
+        "clusters": 40,
+        "items": 120,
+        "mean_delta": 0.033333333333333305,
+        "p_adjusted": 1.0,
+        "p_value": 0.3715256948610278,
+        "seed_deltas": {
+          "101": 0.08333333333333326,
+          "202": -0.025000000000000022,
+          "303": 0.04166666666666663
+        },
+        "task": "parity"
+      },
+      {
+        "base_accuracy": 0.5,
+        "candidate_accuracy": 0.5666666666666667,
+        "ci_high": 0.3856539351851854,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.273206018518519,
+        "clusters": 40,
+        "items": 120,
+        "mean_delta": 0.06666666666666662,
+        "p_adjusted": 1.0,
+        "p_value": 0.2979404119176165,
+        "seed_deltas": {
+          "101": 0.05833333333333335,
+          "202": 0.07499999999999996,
+          "303": 0.06666666666666665
+        },
+        "task": "boolean"
+      },
+      {
+        "base_accuracy": 0.5,
+        "candidate_accuracy": 0.5055555555555555,
+        "ci_high": 0.3851967592592599,
+        "ci_level": 0.9958333333333333,
+        "ci_low": -0.3791840277777779,
+        "clusters": 40,
+        "items": 120,
+        "mean_delta": 0.005555555555555558,
+        "p_adjusted": 1.0,
+        "p_value": 0.4967006598680264,
+        "seed_deltas": {
+          "101": 0.050000000000000044,
+          "202": 0.008333333333333304,
+          "303": -0.041666666666666685
+        },
+        "task": "comparison"
+      }
+    ],
+    "failed_candidates": [],
+    "failed_controls": [],
+    "holdout_commitment": "sha256:0e5d98050eb34306725d6cfdc40401a0358c17c7359bd9d8a55050eb8ecaaa49",
+    "label": "harness_demo",
+    "ledger_head": "sha256:001000745ecb54e1f5072ffd2f71d6e4ca0b94e09253b89a223711bce52b9b33",
+    "manifest_digest": "sha256:b1344ac864ef962a01624bb11dacc02d0507554a9f484aea3748bdcdb8cc2577",
+    "plan_digest": "sha256:ed89d792975949f210909c256672721cc33948783565764986b33442f7ebcae7",
+    "promoted": false,
+    "rejection_reasons": [
+      {
+        "code": "NON_CONFIRMATORY_LABEL",
+        "message": "a 'harness_demo' plan can never promote",
+        "observed": null,
+        "scope": "study",
+        "threshold": null
+      },
+      {
+        "code": "EFFECT_CI_BELOW_MINIMUM",
+        "message": "the corrected 0.9958 CI lower bound is below the minimum effect",
+        "observed": -0.2518634259259261,
+        "scope": "parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value exceeds alpha",
+        "observed": 1.0,
+        "scope": "parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "ACCURACY_BELOW_MINIMUM",
+        "message": "pooled candidate accuracy is below the minimum",
+        "observed": 0.5333333333333333,
+        "scope": "parity",
+        "threshold": 0.6
+      },
+      {
+        "code": "INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds reach the minimum effect",
+        "observed": 0.3333333333333333,
+        "scope": "parity",
+        "threshold": 1.0
+      },
+      {
+        "code": "EFFECT_CI_BELOW_MINIMUM",
+        "message": "the corrected 0.9958 CI lower bound is below the minimum effect",
+        "observed": -0.273206018518519,
+        "scope": "boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value exceeds alpha",
+        "observed": 1.0,
+        "scope": "boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "ACCURACY_BELOW_MINIMUM",
+        "message": "pooled candidate accuracy is below the minimum",
+        "observed": 0.5666666666666667,
+        "scope": "boolean",
+        "threshold": 0.6
+      },
+      {
+        "code": "EFFECT_CI_BELOW_MINIMUM",
+        "message": "the corrected 0.9958 CI lower bound is below the minimum effect",
+        "observed": -0.3791840277777779,
+        "scope": "comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value exceeds alpha",
+        "observed": 1.0,
+        "scope": "comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "ACCURACY_BELOW_MINIMUM",
+        "message": "pooled candidate accuracy is below the minimum",
+        "observed": 0.5055555555555555,
+        "scope": "comparison",
+        "threshold": 0.6
+      },
+      {
+        "code": "INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds reach the minimum effect",
+        "observed": 0.3333333333333333,
+        "scope": "comparison",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.06620949074074078,
+        "scope": "lora:parity",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "lora:parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.6666666666666666,
+        "scope": "lora:parity",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.016666666666666646,
+        "scope": "fine_tune:parity",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 0.43431313737252547,
+        "scope": "fine_tune:parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.6666666666666666,
+        "scope": "fine_tune:parity",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.09722222222222224,
+        "scope": "placebo:parity",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "placebo:parity",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.6666666666666666,
+        "scope": "placebo:parity",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.2412094907407408,
+        "scope": "lora:boolean",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "lora:boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.0,
+        "scope": "lora:boolean",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.17500000000000004,
+        "scope": "fine_tune:boolean",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "fine_tune:boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.3333333333333333,
+        "scope": "fine_tune:boolean",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.11620949074074077,
+        "scope": "placebo:boolean",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "placebo:boolean",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.12222222222222226,
+        "scope": "lora:comparison",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "lora:comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.0,
+        "scope": "lora:comparison",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.11251736111111124,
+        "scope": "fine_tune:comparison",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "fine_tune:comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.0,
+        "scope": "fine_tune:comparison",
+        "threshold": 1.0
+      },
+      {
+        "code": "CONTROL_NOT_BEATEN",
+        "message": "the corrected 0.9958 CI lower bound against this control doesn't clear the margin",
+        "observed": -0.2245428240740741,
+        "scope": "placebo:comparison",
+        "threshold": 0.0
+      },
+      {
+        "code": "CONTROL_NOT_SIGNIFICANT_AFTER_CORRECTION",
+        "message": "the holm-adjusted p-value against this control exceeds alpha",
+        "observed": 1.0,
+        "scope": "placebo:comparison",
+        "threshold": 0.05
+      },
+      {
+        "code": "CONTROL_INCONSISTENT_ACROSS_SEEDS",
+        "message": "too few synthesis seeds beat this control",
+        "observed": 0.6666666666666666,
+        "scope": "placebo:comparison",
+        "threshold": 1.0
+      },
+      {
+        "code": "RETENTION_AGREEMENT_BELOW_MINIMUM",
+        "message": "the worst candidate's top-1 agreement with base is too low",
+        "observed": 0.0,
+        "scope": "retention",
+        "threshold": 0.9
+      },
+      {
+        "code": "RETENTION_KL_ABOVE_MAXIMUM",
+        "message": "the worst candidate's KL from base is too high",
+        "observed": 13.179285166962554,
+        "scope": "retention",
+        "threshold": 0.1
+      }
+    ],
+    "retention": {
+      "items": 40,
+      "worst_agreement_ci_low": 0.0,
+      "worst_kl_ci_high": 13.179285166962554
+    },
+    "study_id": "harness-demo-controls-pythia-14m"
+  },
+  "freeze": {
+    "holdout_commitment": "sha256:0e5d98050eb34306725d6cfdc40401a0358c17c7359bd9d8a55050eb8ecaaa49",
+    "manifest_digest": "sha256:b1344ac864ef962a01624bb11dacc02d0507554a9f484aea3748bdcdb8cc2577",
+    "retention_items": 40,
+    "task_items": 360
+  },
+  "item_warning": "These items have a known shortcut and are being replaced.",
+  "label": "HARNESS DEMO, NOT A SCIENTIFIC RESULT",
+  "not_evidence_for": "any edit method, control, Pythia-14M capability, or promotion of anything",
+  "per_arm_aggregates": [
+    {
+      "aggregate": {
+        "retention": null,
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          }
+        }
+      },
+      "arm": "base",
+      "candidate_digest": "sha256:8fce8b6c365bc83f06ab1da620c2dea5c82062588cf3877a168638ce38ed8d9a",
+      "synthesis_seed": null
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.0,
+            "level": 0.9958333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 12.525584832792635,
+            "level": 0.9958333333333333,
+            "low": 10.476585725091995,
+            "mean": 11.503416637324218
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4916666666666667,
+              "clusters": 40,
+              "high": 0.03333333333333333,
+              "level": 0.9958333333333333,
+              "low": -0.05,
+              "mean": -0.008333333333333335
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          }
+        }
+      },
+      "arm": "placebo",
+      "candidate_digest": "sha256:44e697d0789bbccbae2a0aa93b3b71b17a91e1aed2d6cf0ed86aa57702fb7ab4",
+      "synthesis_seed": 101
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 1.0,
+            "level": 0.9958333333333333,
+            "low": 0.725,
+            "mean": 0.875
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 0.034586169981599135,
+            "level": 0.9958333333333333,
+            "low": 0.021893742088271675,
+            "mean": 0.02779334096010954
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.625,
+              "clusters": 40,
+              "high": 0.525,
+              "level": 0.9958333333333333,
+              "low": -0.275,
+              "mean": 0.125
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.625,
+              "clusters": 40,
+              "high": 0.825,
+              "level": 0.9958333333333333,
+              "low": 0.4,
+              "mean": 0.625
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.6083333333333333,
+              "clusters": 40,
+              "high": 0.4583333333333333,
+              "level": 0.9958333333333333,
+              "low": -0.27362847222222236,
+              "mean": 0.10833333333333331
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.6083333333333333,
+              "clusters": 40,
+              "high": 0.7666666666666666,
+              "level": 0.9958333333333333,
+              "low": 0.4416666666666666,
+              "mean": 0.6083333333333332
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.525,
+              "clusters": 40,
+              "high": 0.29166666666666663,
+              "level": 0.9958333333333333,
+              "low": -0.2583333333333334,
+              "mean": 0.024999999999999967
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.525,
+              "clusters": 40,
+              "high": 0.625,
+              "level": 0.9958333333333333,
+              "low": 0.4083333333333333,
+              "mean": 0.5249999999999999
+            }
+          }
+        }
+      },
+      "arm": "lora",
+      "candidate_digest": "sha256:6a1f3f7e76bb2e325cb8a976df0df62eed74776774ffece1ea962149d020af4e",
+      "synthesis_seed": 101
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 1.0,
+            "level": 0.9958333333333333,
+            "low": 0.75,
+            "mean": 0.9
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 0.027113176610085415,
+            "level": 0.9958333333333333,
+            "low": 0.020512532554567257,
+            "mean": 0.0235755394897461
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5416666666666667,
+              "clusters": 40,
+              "high": 0.45,
+              "level": 0.9958333333333333,
+              "low": -0.41392361111111137,
+              "mean": 0.041666666666666664
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5416666666666667,
+              "clusters": 40,
+              "high": 0.75,
+              "level": 0.9958333333333333,
+              "low": 0.325,
+              "mean": 0.5416666666666666
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.55,
+              "clusters": 40,
+              "high": 0.4652951388888899,
+              "level": 0.9958333333333333,
+              "low": -0.3778472222222228,
+              "mean": 0.04999999999999998
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.55,
+              "clusters": 40,
+              "high": 0.7416666666666667,
+              "level": 0.9958333333333333,
+              "low": 0.344409722222222,
+              "mean": 0.55
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4583333333333333,
+              "clusters": 40,
+              "high": 0.1402951388888899,
+              "level": 0.9958333333333333,
+              "low": -0.2083333333333334,
+              "mean": -0.0416666666666667
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.4583333333333333,
+              "clusters": 40,
+              "high": 0.6319618055555566,
+              "level": 0.9958333333333333,
+              "low": 0.2833333333333333,
+              "mean": 0.4583333333333333
+            }
+          }
+        }
+      },
+      "arm": "fine_tune",
+      "candidate_digest": "sha256:c6658afe246778bcc119cf695ad6ee475cbf05a4b2933114a5f47bc0fd6a0d51",
+      "synthesis_seed": 101
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.0,
+            "level": 0.9958333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 10.907272474299061,
+            "level": 0.9958333333333333,
+            "low": 9.867603614353197,
+            "mean": 10.406332350007935
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.45,
+              "level": 0.9958333333333333,
+              "low": -0.45,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5083333333333333,
+              "clusters": 40,
+              "high": 0.08333333333333333,
+              "level": 0.9958333333333333,
+              "low": -0.058333333333333334,
+              "mean": 0.008333333333333328
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          }
+        }
+      },
+      "arm": "placebo",
+      "candidate_digest": "sha256:88ddb9a8be56b824bf4d0dc2a8297b41a329a80eb8da6e97c684c69a03353722",
+      "synthesis_seed": 202
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 1.0,
+            "level": 0.9958333333333333,
+            "low": 0.75,
+            "mean": 0.9
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 0.07342156764760979,
+            "level": 0.9958333333333333,
+            "low": 0.02793836476432103,
+            "mean": 0.047656981635923634
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.7083333333333333,
+              "clusters": 40,
+              "high": 0.4416666666666666,
+              "level": 0.9958333333333333,
+              "low": -0.06529513888888903,
+              "mean": 0.20833333333333331
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.7083333333333333,
+              "clusters": 40,
+              "high": 0.8583333333333332,
+              "level": 0.9958333333333333,
+              "low": 0.534704861111111,
+              "mean": 0.7083333333333333
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.6,
+              "clusters": 40,
+              "high": 0.45696180555555654,
+              "level": 0.9958333333333333,
+              "low": -0.2583333333333334,
+              "mean": 0.09999999999999995
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.6,
+              "clusters": 40,
+              "high": 0.7666666666666666,
+              "level": 0.9958333333333333,
+              "low": 0.4333333333333333,
+              "mean": 0.6
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4833333333333333,
+              "clusters": 40,
+              "high": 0.19029513888888985,
+              "level": 0.9958333333333333,
+              "low": -0.225,
+              "mean": -0.016666666666666698
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.4833333333333333,
+              "clusters": 40,
+              "high": 0.5833333333333333,
+              "level": 0.9958333333333333,
+              "low": 0.375,
+              "mean": 0.4833333333333333
+            }
+          }
+        }
+      },
+      "arm": "lora",
+      "candidate_digest": "sha256:a32775c1070628a4e2399f51edd0c1b2c93ff78dfc684bda687f68989c63b03e",
+      "synthesis_seed": 202
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 1.0,
+            "level": 0.9958333333333333,
+            "low": 0.775,
+            "mean": 0.925
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 0.04526504166272673,
+            "level": 0.9958333333333333,
+            "low": 0.015780315745372867,
+            "mean": 0.027735692212343326
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.6916666666666667,
+              "clusters": 40,
+              "high": 0.49862847222222323,
+              "level": 0.9958333333333333,
+              "low": -0.12500000000000003,
+              "mean": 0.19166666666666665
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.6916666666666667,
+              "clusters": 40,
+              "high": 0.8416666666666666,
+              "level": 0.9958333333333333,
+              "low": 0.5416666666666666,
+              "mean": 0.6916666666666667
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5333333333333333,
+              "clusters": 40,
+              "high": 0.3069618055555565,
+              "level": 0.9958333333333333,
+              "low": -0.24166666666666678,
+              "mean": 0.033333333333333305
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5333333333333333,
+              "clusters": 40,
+              "high": 0.6666666666666666,
+              "level": 0.9958333333333333,
+              "low": 0.37637152777777766,
+              "mean": 0.5333333333333332
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5083333333333333,
+              "clusters": 40,
+              "high": 0.275,
+              "level": 0.9958333333333333,
+              "low": -0.2986284722222224,
+              "mean": 0.008333333333333281
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5083333333333333,
+              "clusters": 40,
+              "high": 0.575,
+              "level": 0.9958333333333333,
+              "low": 0.4333333333333333,
+              "mean": 0.5083333333333333
+            }
+          }
+        }
+      },
+      "arm": "fine_tune",
+      "candidate_digest": "sha256:8edbe75f47df336da604174a9a1133a035a2262b81ef8ec08fae2990f3f2dff6",
+      "synthesis_seed": 202
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.0,
+            "level": 0.9958333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 9.683911177753842,
+            "level": 0.9958333333333333,
+            "low": 8.667885208960055,
+            "mean": 9.223765449800228
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.4417708333333394,
+              "level": 0.9958333333333333,
+              "low": -0.45,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4583333333333333,
+              "clusters": 40,
+              "high": 0.3389236111111131,
+              "level": 0.9958333333333333,
+              "low": -0.43196180555555574,
+              "mean": -0.04166666666666672
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.0,
+              "clusters": 40,
+              "high": 0.0,
+              "level": 0.9958333333333333,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          }
+        }
+      },
+      "arm": "placebo",
+      "candidate_digest": "sha256:d9b77cad8a2cd6ef5665a625326188e6042f598130a1a54ffd169b9b2489a314",
+      "synthesis_seed": 303
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.975,
+            "level": 0.9958333333333333,
+            "low": 0.65,
+            "mean": 0.825
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 0.19299808336776456,
+            "level": 0.9958333333333333,
+            "low": 0.023883535594379657,
+            "mean": 0.09111644595179828
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.6583333333333333,
+              "clusters": 40,
+              "high": 0.37362847222222323,
+              "level": 0.9958333333333333,
+              "low": -0.05696180555555569,
+              "mean": 0.15833333333333333
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.6583333333333333,
+              "clusters": 40,
+              "high": 0.8736284722222232,
+              "level": 0.9958333333333333,
+              "low": 0.459704861111111,
+              "mean": 0.6583333333333334
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.425,
+              "level": 0.9958333333333333,
+              "low": -0.4389236111111114,
+              "mean": -2.2204460492503132e-17
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5,
+              "clusters": 40,
+              "high": 0.7166666666666666,
+              "level": 0.9958333333333333,
+              "low": 0.284704861111111,
+              "mean": 0.5
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4583333333333333,
+              "clusters": 40,
+              "high": 0.24725694444444646,
+              "level": 0.9958333333333333,
+              "low": -0.3292187500000004,
+              "mean": -0.04166666666666667
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.4583333333333333,
+              "clusters": 40,
+              "high": 0.6805902777777798,
+              "level": 0.9958333333333333,
+              "low": 0.259704861111111,
+              "mean": 0.4583333333333333
+            }
+          }
+        }
+      },
+      "arm": "lora",
+      "candidate_digest": "sha256:20dddb4847d1ed776810ec7ba973ed1672ac97040ace6abdd118eec2a784eff3",
+      "synthesis_seed": 303
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 1.0,
+            "level": 0.9958333333333333,
+            "low": 0.75,
+            "mean": 0.9
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 0.06399224370066427,
+            "level": 0.9958333333333333,
+            "low": 0.016061230125390635,
+            "mean": 0.035173719476890186
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.6333333333333333,
+              "clusters": 40,
+              "high": 0.375,
+              "level": 0.9958333333333333,
+              "low": -0.11529513888888904,
+              "mean": 0.1333333333333333
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.6333333333333333,
+              "clusters": 40,
+              "high": 0.775,
+              "level": 0.9958333333333333,
+              "low": 0.4680381944444443,
+              "mean": 0.6333333333333332
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5166666666666667,
+              "clusters": 40,
+              "high": 0.43196180555555647,
+              "level": 0.9958333333333333,
+              "low": -0.3889236111111114,
+              "mean": 0.016666666666666642
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5166666666666667,
+              "clusters": 40,
+              "high": 0.7152951388888898,
+              "level": 0.9958333333333333,
+              "low": 0.32499999999999996,
+              "mean": 0.5166666666666666
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4666666666666666,
+              "clusters": 40,
+              "high": 0.2736284722222232,
+              "level": 0.9958333333333333,
+              "low": -0.3555902777777781,
+              "mean": -0.03333333333333335
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.4666666666666666,
+              "clusters": 40,
+              "high": 0.5666666666666667,
+              "level": 0.9958333333333333,
+              "low": 0.35970486111111094,
+              "mean": 0.4666666666666666
+            }
+          }
+        }
+      },
+      "arm": "fine_tune",
+      "candidate_digest": "sha256:7eae56b89314b74c9faa892fa4622b25013095375a97dcdd2a8020854e11538b",
+      "synthesis_seed": 303
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.0,
+            "level": 0.9958333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 13.179285166962554,
+            "level": 0.9958333333333333,
+            "low": 10.492842580678994,
+            "mean": 11.809203235005072
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5583333333333333,
+              "clusters": 40,
+              "high": 0.30559027777777975,
+              "level": 0.9958333333333333,
+              "low": -0.2069618055555557,
+              "mean": 0.05833333333333329
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.3416666666666667,
+              "clusters": 40,
+              "high": 0.4236284722222232,
+              "level": 0.9958333333333333,
+              "low": 0.2583333333333333,
+              "mean": 0.3416666666666667
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.55,
+              "clusters": 40,
+              "high": 0.425,
+              "level": 0.9958333333333333,
+              "low": -0.34166666666666673,
+              "mean": 0.04999999999999996
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.3833333333333333,
+              "clusters": 40,
+              "high": 0.5,
+              "level": 0.9958333333333333,
+              "low": 0.25137152777777766,
+              "mean": 0.3833333333333333
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5833333333333333,
+              "clusters": 40,
+              "high": 0.46529513888888985,
+              "level": 0.9958333333333333,
+              "low": -0.340295138888889,
+              "mean": 0.0833333333333333
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5833333333333333,
+              "clusters": 40,
+              "high": 0.7736284722222232,
+              "level": 0.9958333333333333,
+              "low": 0.375,
+              "mean": 0.5833333333333333
+            }
+          }
+        }
+      },
+      "arm": "candidate",
+      "candidate_digest": "sha256:2c37cad86e565f66d839f707632ab909b36a1afc0beac2408134d5b48d1a9dd3",
+      "synthesis_seed": 101
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.0,
+            "level": 0.9958333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 12.198271319815465,
+            "level": 0.9958333333333333,
+            "low": 9.116220492037948,
+            "mean": 10.696622751254562
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.575,
+              "clusters": 40,
+              "high": 0.4778472222222262,
+              "level": 0.9958333333333333,
+              "low": -0.33892361111111136,
+              "mean": 0.07499999999999997
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.575,
+              "clusters": 40,
+              "high": 0.7652951388888899,
+              "level": 0.9958333333333333,
+              "low": 0.38470486111111096,
+              "mean": 0.575
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5083333333333333,
+              "clusters": 40,
+              "high": 0.425,
+              "level": 0.9958333333333333,
+              "low": -0.40559027777777806,
+              "mean": 0.008333333333333293
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5083333333333333,
+              "clusters": 40,
+              "high": 0.7083333333333334,
+              "level": 0.9958333333333333,
+              "low": 0.3083333333333333,
+              "mean": 0.5083333333333333
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.475,
+              "clusters": 40,
+              "high": 0.07499999999999998,
+              "level": 0.9958333333333333,
+              "low": -0.12362847222222235,
+              "mean": -0.025000000000000005
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.475,
+              "clusters": 40,
+              "high": 0.6555902777777798,
+              "level": 0.9958333333333333,
+              "low": 0.31803819444444426,
+              "mean": 0.475
+            }
+          }
+        }
+      },
+      "arm": "candidate",
+      "candidate_digest": "sha256:acd32cbcfef38900c335f939f95101d77718de49df4ff93c0ed77231cf4c5b53",
+      "synthesis_seed": 202
+    },
+    {
+      "aggregate": {
+        "retention": {
+          "agreement": {
+            "clusters": 40,
+            "high": 0.0,
+            "level": 0.9958333333333333,
+            "low": 0.0,
+            "mean": 0.0
+          },
+          "kl": {
+            "clusters": 40,
+            "high": 12.543675266172405,
+            "level": 0.9958333333333333,
+            "low": 9.091307373226822,
+            "mean": 10.675322346582835
+          }
+        },
+        "tasks": {
+          "boolean": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5666666666666667,
+              "clusters": 40,
+              "high": 0.42362847222222316,
+              "level": 0.9958333333333333,
+              "low": -0.29166666666666674,
+              "mean": 0.06666666666666662
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5333333333333333,
+              "clusters": 40,
+              "high": 0.6902951388888899,
+              "level": 0.9958333333333333,
+              "low": 0.37637152777777766,
+              "mean": 0.5333333333333333
+            }
+          },
+          "comparison": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.4583333333333333,
+              "clusters": 40,
+              "high": 0.3236284722222232,
+              "level": 0.9958333333333333,
+              "low": -0.4292187500000004,
+              "mean": -0.041666666666666706
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.325,
+              "clusters": 40,
+              "high": 0.475,
+              "level": 0.9958333333333333,
+              "low": 0.18333333333333332,
+              "mean": 0.325
+            }
+          },
+          "parity": {
+            "forced_choice_accuracy": {
+              "base": 0.5,
+              "candidate": 0.5416666666666666,
+              "clusters": 40,
+              "high": 0.35,
+              "level": 0.9958333333333333,
+              "low": -0.33333333333333337,
+              "mean": 0.04166666666666659
+            },
+            "top1_accuracy": {
+              "base": 0.0,
+              "candidate": 0.5416666666666666,
+              "clusters": 40,
+              "high": 0.6583333333333333,
+              "level": 0.9958333333333333,
+              "low": 0.409704861111111,
+              "mean": 0.5416666666666666
+            }
+          }
+        }
+      },
+      "arm": "candidate",
+      "candidate_digest": "sha256:eca13c3d85442876c04d522a85228fa5d74a19ee5c4f955bdd84b01e47d649de",
+      "synthesis_seed": 303
+    }
+  ],
+  "plan": {
+    "alpha": 0.05,
+    "analysis_seed": 20261106,
+    "bootstrap_resamples": 2000,
+    "checkpoint_digest": "sha256:116a02532db461f91386a5b20f942ff2c8d4de7341e21b55caafc3d7b25f49a1",
+    "checkpoint_dir": "/tmp/pythia-14m",
+    "clusters_per_task_per_draw": 20,
+    "control_arms": [
+      "base",
+      "lora",
+      "fine_tune",
+      "placebo"
+    ],
+    "correction": "holm",
+    "development_prefixes": [
+      "Task:",
+      "Rule:"
+    ],
+    "evaluator": "pythia_mlp_override",
+    "holdout_draws": 2,
+    "holdout_prefixes": [
+      "Today:",
+      "Check:",
+      "Quiz:"
+    ],
+    "hypothesis": "HARNESS DEMO, NOT A SCIENTIFIC RESULT: every arm exercises the protocol",
+    "item_generator": "templated_v1",
+    "label": "harness_demo",
+    "number_domain": [
+      0,
+      9999
+    ],
+    "permutation_resamples": 5000,
+    "primary_metric": "forced_choice_accuracy",
+    "retention_items": 40,
+    "schema_version": "nf.study.plan.v2",
+    "secondary_metrics": [
+      "top1_accuracy"
+    ],
+    "study_id": "harness-demo-controls-pythia-14m",
+    "synthesis_seeds": [
+      101,
+      202,
+      303
+    ],
+    "tasks": [
+      "parity",
+      "boolean",
+      "comparison"
+    ],
+    "thresholds": {
+      "max_retention_kl": 0.1,
+      "min_accuracy": 0.6,
+      "min_control_advantage": 0.0,
+      "min_effect": 0.05,
+      "min_retention_agreement": 0.9,
+      "min_seed_pass_fraction": 1.0
+    },
+    "torch_threads": 2
+  },
+  "plan_digest": "sha256:ed89d792975949f210909c256672721cc33948783565764986b33442f7ebcae7",
+  "repeat_query_response": "ALREADY_QUERIED: this candidate has already used its only query",
+  "synthesis": {
+    "algorithm": "AlphaEdit",
+    "layer": 5,
+    "rules_per_task": 4,
+    "strength": 80.0
+  },
+  "timings_seconds": {
+    "candidate_101": 1.0,
+    "candidate_202": 0.9,
+    "candidate_303": 0.9,
+    "decide": 0.1,
+    "fit_fine_tune_101": 16.1,
+    "fit_fine_tune_202": 16.5,
+    "fit_fine_tune_303": 14.3,
+    "fit_lora_101": 19.6,
+    "fit_lora_202": 18.8,
+    "fit_lora_303": 20.6,
+    "freeze": 1.0,
+    "query_base_None": 3.3,
+    "query_candidate_101": 3.7,
+    "query_candidate_202": 3.4,
+    "query_candidate_303": 3.6,
+    "query_fine_tune_101": 4.1,
+    "query_fine_tune_202": 3.9,
+    "query_fine_tune_303": 5.7,
+    "query_lora_101": 3.5,
+    "query_lora_202": 4.2,
+    "query_lora_303": 3.5,
+    "query_placebo_101": 5.3,
+    "query_placebo_202": 3.4,
+    "query_placebo_303": 4.4,
+    "tune_fine_tune": 83.5,
+    "tune_lora": 50.3
+  },
+  "tuning": {
+    "fine_tune": {
+      "data": {
+        "operands": {
+          "boolean": [
+            "False AND True AND False AND True",
+            "False OR False AND True",
+            "False OR False OR True",
+            "NOT False AND NOT False AND True OR True",
+            "NOT False OR True OR NOT True AND True OR False",
+            "NOT True AND NOT True OR True",
+            "NOT True OR True AND NOT True",
+            "True AND True AND True AND True AND False"
+          ],
+          "comparison": [
+            "1480",
+            "2636",
+            "3460",
+            "3677",
+            "376",
+            "3890",
+            "5438",
+            "6050",
+            "6553",
+            "6614",
+            "7410",
+            "7492",
+            "8805",
+            "9052",
+            "907",
+            "9739"
+          ],
+          "parity": [
+            "1495",
+            "1829",
+            "2027",
+            "2396",
+            "2458",
+            "3126",
+            "5727",
+            "600"
+          ]
+        },
+        "prefixes": [
+          "Rule:",
+          "Task:"
+        ],
+        "retention_prompts": [
+          "The busy market had always been",
+          "The busy market was built by",
+          "The morning train remained close to",
+          "The red bicycle depended on the",
+          "The retired engineer became part of",
+          "The retired engineer belonged to the",
+          "The small village stood near the",
+          "The stone wall waited beside the",
+          "The tall building moved toward the",
+          "The winter storm became part of",
+          "The winter storm belonged to the",
+          "The winter storm looked across the",
+          "The wooden bridge appeared in the",
+          "The wooden bridge ended up in",
+          "The wooden bridge was known for",
+          "The young doctor could be seen from"
+        ],
+        "train_digest": "sha256:a5006f4b1f51ee825f5576950625f14a366a02dd28e78a3c1637e1d41ff53b3e",
+        "validation_digest": "sha256:c75eb3d8ac46d7d9449cfcb44761167ae3f0feead589a023fe0286495cabefd1"
+      },
+      "method": "development_grid_search",
+      "selected": {
+        "config": {
+          "checkpoints": [],
+          "guard_batch": 4,
+          "kind": "sft",
+          "lr": 1e-05,
+          "rank": 0,
+          "retention_weight": 3.0,
+          "seed": 0,
+          "steps": 10,
+          "targets": "all"
+        },
+        "score": {
+          "dev_accuracy": 0.6666666666666666,
+          "retention_tune_accuracy": 1.0,
+          "steps": 10,
+          "val_accuracy": 0.5,
+          "val_loss": 1.0339243326956473,
+          "wall_seconds": 15.433121809997829
+        }
+      },
+      "selection": "forced-choice accuracy on validation operands + top-1 retention on the tuning fold",
+      "trials": [
+        {
+          "config": {
+            "checkpoints": [
+              10,
+              25
+            ],
+            "guard_batch": 4,
+            "kind": "sft",
+            "lr": 1e-05,
+            "rank": 0,
+            "retention_weight": 3.0,
+            "seed": 0,
+            "steps": 25,
+            "targets": "all"
+          },
+          "cost": {
+            "changed_parameters": 7637332,
+            "delta_l2_norm": 0.317470538632179,
+            "optimizer_steps": 25,
+            "peak_rss_bytes": 1100668928,
+            "total_model_parameters": 14067712,
+            "trainable_parameters": 14067712,
+            "wall_seconds": 38.43126101998496
+          },
+          "scores": [
+            {
+              "dev_accuracy": 0.6666666666666666,
+              "retention_tune_accuracy": 1.0,
+              "steps": 10,
+              "val_accuracy": 0.5,
+              "val_loss": 1.0339243326956473,
+              "wall_seconds": 15.433121809997829
+            },
+            {
+              "dev_accuracy": 0.9166666666666666,
+              "retention_tune_accuracy": 0.875,
+              "steps": 25,
+              "val_accuracy": 0.4166666666666667,
+              "val_loss": 0.7648986243495003,
+              "wall_seconds": 38.431258978002006
+            }
+          ]
+        },
+        {
+          "config": {
+            "checkpoints": [
+              10,
+              25
+            ],
+            "guard_batch": 4,
+            "kind": "sft",
+            "lr": 3e-05,
+            "rank": 0,
+            "retention_weight": 3.0,
+            "seed": 0,
+            "steps": 25,
+            "targets": "all"
+          },
+          "cost": {
+            "changed_parameters": 7637367,
+            "delta_l2_norm": 0.6162280145127581,
+            "optimizer_steps": 25,
+            "peak_rss_bytes": 1215209472,
+            "total_model_parameters": 14067712,
+            "trainable_parameters": 14067712,
+            "wall_seconds": 36.372474306001095
+          },
+          "scores": [
+            {
+              "dev_accuracy": 0.5833333333333334,
+              "retention_tune_accuracy": 0.875,
+              "steps": 10,
+              "val_accuracy": 0.5,
+              "val_loss": 0.8415635031918937,
+              "wall_seconds": 14.957484982995084
+            },
+            {
+              "dev_accuracy": 1.0,
+              "retention_tune_accuracy": 0.875,
+              "steps": 25,
+              "val_accuracy": 0.5,
+              "val_loss": 0.7422464949509594,
+              "wall_seconds": 36.3724715129938
+            }
+          ]
+        }
+      ]
+    },
+    "lora": {
+      "data": {
+        "operands": {
+          "boolean": [
+            "False AND True AND False AND True",
+            "False OR False AND True",
+            "False OR False OR True",
+            "NOT False AND NOT False AND True OR True",
+            "NOT False OR True OR NOT True AND True OR False",
+            "NOT True AND NOT True OR True",
+            "NOT True OR True AND NOT True",
+            "True AND True AND True AND True AND False"
+          ],
+          "comparison": [
+            "1480",
+            "2636",
+            "3460",
+            "3677",
+            "376",
+            "3890",
+            "5438",
+            "6050",
+            "6553",
+            "6614",
+            "7410",
+            "7492",
+            "8805",
+            "9052",
+            "907",
+            "9739"
+          ],
+          "parity": [
+            "1495",
+            "1829",
+            "2027",
+            "2396",
+            "2458",
+            "3126",
+            "5727",
+            "600"
+          ]
+        },
+        "prefixes": [
+          "Rule:",
+          "Task:"
+        ],
+        "retention_prompts": [
+          "The busy market had always been",
+          "The busy market was built by",
+          "The morning train remained close to",
+          "The red bicycle depended on the",
+          "The retired engineer became part of",
+          "The retired engineer belonged to the",
+          "The small village stood near the",
+          "The stone wall waited beside the",
+          "The tall building moved toward the",
+          "The winter storm became part of",
+          "The winter storm belonged to the",
+          "The winter storm looked across the",
+          "The wooden bridge appeared in the",
+          "The wooden bridge ended up in",
+          "The wooden bridge was known for",
+          "The young doctor could be seen from"
+        ],
+        "train_digest": "sha256:a5006f4b1f51ee825f5576950625f14a366a02dd28e78a3c1637e1d41ff53b3e",
+        "validation_digest": "sha256:c75eb3d8ac46d7d9449cfcb44761167ae3f0feead589a023fe0286495cabefd1"
+      },
+      "method": "development_grid_search",
+      "selected": {
+        "config": {
+          "checkpoints": [],
+          "guard_batch": 4,
+          "kind": "lora",
+          "lr": 0.001,
+          "rank": 4,
+          "retention_weight": 3.0,
+          "seed": 0,
+          "steps": 50,
+          "targets": "all_down_proj"
+        },
+        "score": {
+          "dev_accuracy": 0.9166666666666666,
+          "retention_tune_accuracy": 0.875,
+          "steps": 50,
+          "val_accuracy": 0.5833333333333334,
+          "val_loss": 0.7226264840310502,
+          "wall_seconds": 19.404118167003617
+        }
+      },
+      "selection": "forced-choice accuracy on validation operands + top-1 retention on the tuning fold",
+      "trials": [
+        {
+          "config": {
+            "checkpoints": [
+              25,
+              50
+            ],
+            "guard_batch": 4,
+            "kind": "lora",
+            "lr": 0.003,
+            "rank": 4,
+            "retention_weight": 3.0,
+            "seed": 0,
+            "steps": 50,
+            "targets": "final_down_proj"
+          },
+          "cost": {
+            "changed_parameters": 65536,
+            "delta_l2_norm": 1.5904893581200905,
+            "optimizer_steps": 50,
+            "peak_rss_bytes": 462028800,
+            "total_model_parameters": 14067712,
+            "trainable_parameters": 2560,
+            "wall_seconds": 13.459989455004688
+          },
+          "scores": [
+            {
+              "dev_accuracy": 0.5833333333333334,
+              "retention_tune_accuracy": 0.75,
+              "steps": 25,
+              "val_accuracy": 0.5833333333333334,
+              "val_loss": 0.7277142086812501,
+              "wall_seconds": 6.607105512026465
+            },
+            {
+              "dev_accuracy": 0.5833333333333334,
+              "retention_tune_accuracy": 0.75,
+              "steps": 50,
+              "val_accuracy": 0.4166666666666667,
+              "val_loss": 0.6953940615439967,
+              "wall_seconds": 13.459987687005196
+            }
+          ]
+        },
+        {
+          "config": {
+            "checkpoints": [
+              25,
+              50
+            ],
+            "guard_batch": 4,
+            "kind": "lora",
+            "lr": 0.001,
+            "rank": 4,
+            "retention_weight": 3.0,
+            "seed": 0,
+            "steps": 50,
+            "targets": "all_down_proj"
+          },
+          "cost": {
+            "changed_parameters": 393216,
+            "delta_l2_norm": 0.7924815210683749,
+            "optimizer_steps": 50,
+            "peak_rss_bytes": 488767488,
+            "total_model_parameters": 14067712,
+            "trainable_parameters": 15360,
+            "wall_seconds": 19.40412031498272
+          },
+          "scores": [
+            {
+              "dev_accuracy": 0.6666666666666666,
+              "retention_tune_accuracy": 0.875,
+              "steps": 25,
+              "val_accuracy": 0.5,
+              "val_loss": 0.7737346078590935,
+              "wall_seconds": 9.45800427100039
+            },
+            {
+              "dev_accuracy": 0.9166666666666666,
+              "retention_tune_accuracy": 0.875,
+              "steps": 50,
+              "val_accuracy": 0.5833333333333334,
+              "val_loss": 0.7226264840310502,
+              "wall_seconds": 19.404118167003617
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "wall_seconds": 306.2
+}
