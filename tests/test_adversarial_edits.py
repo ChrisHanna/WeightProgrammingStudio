@@ -216,7 +216,6 @@ def test_edit_of_a_tied_weight_does_not_silently_split_the_tie() -> None:
     assert torch.equal(out.tensors[SITE], out.tensors[TWIN])
 
 
-@xfail("D2 edit_plan.py: digests never bind the tensor name, so an unsigned graph can be redirected")
 def test_graph_cannot_be_redirected_to_a_tensor_with_identical_bytes() -> None:
     toy = Toy()
     toy.tensors[TWIN] = toy.tensors[SITE].clone()
@@ -264,7 +263,7 @@ def test_non_finite_operands_and_results_are_refused(model: Toy, build: Callable
     "build",
     [
         pytest.param(lambda p: p.spectral_clip(SITE, NAN), marks=xfail("D7 edit_plan.py: NaN clip limit is accepted")),
-        pytest.param(lambda p: p.spectral_clip(SITE, -1.0), marks=xfail("D7 edit_plan.py: negative clip limit flips the weight's sign")),
+        lambda p: p.spectral_clip(SITE, -1.0),
         pytest.param(lambda p: p.remove_noise_floor(SITE, NAN), marks=xfail("D7 edit_plan.py: NaN threshold zeroes the whole tensor")),
         lambda p: p.soft_threshold(SITE, NAN),
         lambda p: p.clamp(SITE, NAN),
@@ -300,7 +299,6 @@ def test_constraint_added_after_the_step_still_applies(model: Toy) -> None:
         plan.preview()
 
 
-@xfail("D4 edit_plan.py: add_constraint doesn't clear the cached candidate, so execute skips the new limit")
 def test_constraint_added_after_preview_is_not_skipped_by_the_cache(model: Toy) -> None:
     plan = EditPlan(model).scale(SITE, 2.0)
     plan.preview()
@@ -461,7 +459,6 @@ def test_base_model_differing_in_the_edited_tensor_is_refused(model: Toy) -> Non
         apply_edit_graph(other, graph)
 
 
-@xfail("D1 edit_plan.py: replay checks only the edited tensors, so a different base model is accepted")
 def test_base_model_differing_outside_the_edited_tensors_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     other = Toy()
@@ -470,7 +467,6 @@ def test_base_model_differing_outside_the_edited_tensors_is_refused(model: Toy) 
         apply_edit_graph(other, graph)
 
 
-@xfail("D1 edit_plan.py: replay checks only the edited tensors, so a different base model is accepted")
 def test_base_model_with_extra_tensors_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     other = Toy()
