@@ -514,11 +514,10 @@ def test_graph_declaring_a_different_base_model_id_is_refused(model: Toy) -> Non
         apply_edit_graph(model, graph)
 
 
-@xfail("D14 edit_plan.py: depends_on is written but never checked")
 def test_graph_with_a_forward_dependency_is_refused(model: Toy) -> None:
     graph = _graph_plan(model).to_graph()
     graph["steps"][0]["depends_on"] = ["step_2"]
-    with pytest.raises(EditGraphError):
+    with pytest.raises(EditGraphError, match="depends_on"):
         apply_edit_graph(model, graph)
 
 

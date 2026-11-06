@@ -607,7 +607,10 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
         raise EditGraphError("This isn't the base model the graph was made for")
     working: dict[str, torch.Tensor] = {}
     receipts: list[StepReceipt] = []
-    for step in steps:
+    for index, step in enumerate(steps):
+        # Steps run in list order, so the only dependencies that order can honour are the ones `to_graph` writes.
+        if step.get("id") != f"step_{index}" or step.get("depends_on") != ([f"step_{index - 1}"] if index else []):
+            raise EditGraphError(f"Step {index} has an id or depends_on that doesn't match its position")
         tensor, op = str(step["tensor"]), str(step["operation"])
         if tensor not in base:
             raise EditGraphError(f"Base model has no tensor {tensor!r}")
