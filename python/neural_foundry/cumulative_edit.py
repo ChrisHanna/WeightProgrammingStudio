@@ -402,13 +402,20 @@ def freeze_cumulative(doc: dict[str, Any], rows: Sequence[Mapping[str, Any]], ro
     comparator_of: dict[str, str] = {}
     single_rows = [r for r in rows if r["family"] == "single" and "tune" in r.get("scores", {})]
     equal: dict[str, Any] = {}
-    for path in sorted(root.glob("cumulative_result_c*.json")):
+    # The primary first, so a sensitivity arm that reached the identical model is recorded once and not tested twice.
+    paths = sorted(root.glob("cumulative_result_c*.json"), key=lambda p: p.stem != f"cumulative_result_c{PRIMARY_COST:g}")
+    seen: dict[str, str] = {}
+    for path in paths:
         result = json.loads(path.read_text(encoding="utf-8"))
         tag = path.stem.removeprefix("cumulative_result_c")
         name = f"cumulative_c{tag}"
         if not result["replay"]:
             doc["cumulative_empty"] = {**doc.get("cumulative_empty", {}), name: result["stop_reason"]}
             continue
+        if result["replay"]["state_digest"] in seen:
+            doc["cumulative_identical"] = {**doc.get("cumulative_identical", {}), name: seen[result["replay"]["state_digest"]]}
+            continue
+        seen[result["replay"]["state_digest"]] = name
         doc["cumulative"][name] = {
             "graph": str(root / f"cumulative_graph_c{tag}.json"),
             "state_digest": result["replay"]["state_digest"],

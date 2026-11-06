@@ -1,0 +1,282 @@
+{
+ "sites": [
+  "gpt_neox.layers.0.attention.dense.weight",
+  "gpt_neox.layers.5.attention.dense.weight",
+  "gpt_neox.layers.5.mlp.dense_4h_to_h.weight"
+ ],
+ "development_bar": 1.0,
+ "trials": [
+  {
+   "kind": "lora",
+   "steps": 100,
+   "weight": 1.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 0.8333333333333334,
+    "dev_aug": 0.5555555555555556,
+    "val": 0.5,
+    "practice": 0.45,
+    "tune": 0.7449664429530202,
+    "tune_kl": 0.12343925078936337,
+    "tune_task_mass": 0.00994972563201986,
+    "delta_norm": 0.6220199247650974,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 26.62217121597496
+  },
+  {
+   "kind": "lora",
+   "steps": 200,
+   "weight": 1.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.8888888888888888,
+    "val": 0.8333333333333334,
+    "practice": 0.75,
+    "tune": 0.697986577181208,
+    "tune_kl": 0.13454507684554914,
+    "tune_task_mass": 0.006503687631472885,
+    "delta_norm": 0.7475974362130386,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 59.9138608489593
+  },
+  {
+   "kind": "lora",
+   "steps": 300,
+   "weight": 1.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.9444444444444444,
+    "val": 0.8333333333333334,
+    "practice": 0.7,
+    "tune": 0.7181208053691275,
+    "tune_kl": 0.180176046320274,
+    "tune_task_mass": 0.0060238058302932666,
+    "delta_norm": 0.901791961088214,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 88.67797090593376
+  },
+  {
+   "kind": "lora",
+   "steps": 100,
+   "weight": 10.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 0.6666666666666666,
+    "dev_aug": 0.5,
+    "val": 0.3333333333333333,
+    "practice": 0.7,
+    "tune": 0.7919463087248322,
+    "tune_kl": 0.055162087833160386,
+    "tune_task_mass": 0.0045780777165631064,
+    "delta_norm": 0.5443063133603879,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 32.84860494500026
+  },
+  {
+   "kind": "lora",
+   "steps": 200,
+   "weight": 10.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 0.75,
+    "dev_aug": 0.5,
+    "val": 0.5,
+    "practice": 0.8,
+    "tune": 0.8456375838926175,
+    "tune_kl": 0.047726876551750494,
+    "tune_task_mass": 0.0037807554082431847,
+    "delta_norm": 0.6101003333704781,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 63.56891651300248
+  },
+  {
+   "kind": "lora",
+   "steps": 300,
+   "weight": 10.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.7777777777777778,
+    "val": 0.8333333333333334,
+    "practice": 0.8,
+    "tune": 0.8322147651006712,
+    "tune_kl": 0.04797481143323318,
+    "tune_task_mass": 0.003634596933262382,
+    "delta_norm": 0.6708070966640293,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 95.57463704200927
+  },
+  {
+   "kind": "sft",
+   "steps": 50,
+   "weight": 1.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 0.6666666666666666,
+    "dev_aug": 0.5,
+    "val": 0.3333333333333333,
+    "practice": 0.75,
+    "tune": 0.7785234899328859,
+    "tune_kl": 0.06448339671299344,
+    "tune_task_mass": 0.012147576067515672,
+    "delta_norm": 0.2664753038201072,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 13.086178030003794
+  },
+  {
+   "kind": "sft",
+   "steps": 100,
+   "weight": 1.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.8888888888888888,
+    "val": 0.8333333333333334,
+    "practice": 0.75,
+    "tune": 0.8120805369127517,
+    "tune_kl": 0.05943921363992348,
+    "tune_task_mass": 0.00822464071789976,
+    "delta_norm": 0.32541846564150556,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 25.68443837799714
+  },
+  {
+   "kind": "sft",
+   "steps": 150,
+   "weight": 1.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.9444444444444444,
+    "val": 1.0,
+    "practice": 0.65,
+    "tune": 0.8120805369127517,
+    "tune_kl": 0.06143138601065231,
+    "tune_task_mass": 0.006654962086679418,
+    "delta_norm": 0.373629449384277,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 38.97395739099011
+  },
+  {
+   "kind": "sft",
+   "steps": 50,
+   "weight": 10.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 0.5833333333333334,
+    "dev_aug": 0.5555555555555556,
+    "val": 0.5,
+    "practice": 0.75,
+    "tune": 0.8590604026845637,
+    "tune_kl": 0.035004497729118136,
+    "tune_task_mass": 0.005676647038084213,
+    "delta_norm": 0.21962264072105162,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 12.892104946979089
+  },
+  {
+   "kind": "sft",
+   "steps": 100,
+   "weight": 10.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.7777777777777778,
+    "val": 0.5,
+    "practice": 0.8,
+    "tune": 0.8657718120805369,
+    "tune_kl": 0.030255787660863682,
+    "tune_task_mass": 0.005147191918658553,
+    "delta_norm": 0.26116038138159536,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 26.26341636799043
+  },
+  {
+   "kind": "sft",
+   "steps": 150,
+   "weight": 10.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.8888888888888888,
+    "val": 0.6666666666666666,
+    "practice": 0.85,
+    "tune": 0.8590604026845637,
+    "tune_kl": 0.03315717418039674,
+    "tune_task_mass": 0.004690083231974519,
+    "delta_norm": 0.2900720076530128,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 37.61895026196726
+  }
+ ],
+ "selected": {
+  "lora": {
+   "kind": "lora",
+   "steps": 300,
+   "weight": 10.0,
+   "lr": 0.0003,
+   "rank": 4,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.7777777777777778,
+    "val": 0.8333333333333334,
+    "practice": 0.8,
+    "tune": 0.8322147651006712,
+    "tune_kl": 0.04797481143323318,
+    "tune_task_mass": 0.003634596933262382,
+    "delta_norm": 0.6708070966640293,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 95.57463704200927,
+   "weights_digest": "5411af02f57531a4be0cf3cc7ba354e8782005352cbc0fcf810a9bd1547735e8",
+   "changed_parameters": 98304
+  },
+  "sft": {
+   "kind": "sft",
+   "steps": 150,
+   "weight": 10.0,
+   "lr": 3e-05,
+   "rank": 0,
+   "scores": {
+    "dev": 1.0,
+    "dev_aug": 0.8888888888888888,
+    "val": 0.6666666666666666,
+    "practice": 0.85,
+    "tune": 0.8590604026845637,
+    "tune_kl": 0.03315717418039674,
+    "tune_task_mass": 0.004690083231974519,
+    "delta_norm": 0.2900720076530128,
+    "changed_parameters": 98304
+   },
+   "wall_seconds_rough": 37.61895026196726,
+   "weights_digest": "0c9184e11d721e3f7e50631b9c7414b33337798bfab6149153ec47493d1159d3",
+   "changed_parameters": 98304
+  }
+ }
+}
