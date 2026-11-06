@@ -100,7 +100,7 @@ def _graph_plan(model: Toy) -> EditPlan:
         Region(cols=(0, 4)),
         Region(rows=(0, 2**64)),
         Region(cols=(2**64 - 1, 2**64 + 1)),
-        pytest.param(Region(rows=(0, 1.5)), marks=xfail("D16 edit_plan.py: Region accepts a float bound and truncates it")),  # type: ignore[arg-type]
+        Region(rows=(0, 1.5)),  # type: ignore[arg-type]
     ],
     ids=["empty", "inverted", "negative", "past_end", "cols_past_end", "u64_end", "u64_wrap", "float"],
 )

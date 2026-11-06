@@ -65,6 +65,8 @@ class Region:
     def resolve(self, shape: Sequence[int]) -> tuple[tuple[int, int], tuple[int, int]]:
         rows = self.rows or (0, int(shape[0]))
         cols = self.cols or (0, int(shape[1]))
+        if any(isinstance(bound, bool) or not hasattr(bound, "__index__") for bound in (*rows, *cols)):
+            raise ValueError(f"Region bounds must be integers, not {rows}, {cols}")
         for (lo, hi), width in ((rows, shape[0]), (cols, shape[1])):
             if not 0 <= lo < hi <= width:
                 raise ValueError(f"Region {rows}, {cols} is outside tensor shape {tuple(shape)}")
