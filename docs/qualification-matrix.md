@@ -11,7 +11,7 @@ Each row is one combination of operation, architecture, dtype, backend and shape
 | `experimental` | Code exists, but no qualification run has passed. | Any cited test must exist. |
 | `unsupported` | Refused or not implemented. | Any cited test must exist. |
 
-`tensor` means the row is about a raw tensor and claims nothing about any model architecture. **No model architecture is `verified` for editing yet**, because no real-checkpoint test meets the Milestone 1 pass conditions in [milestones.md](milestones.md).
+`tensor` means the row is about a raw tensor and claims nothing about any model architecture. **No model architecture is `verified` for editing yet** (the one model row below is serving parity for one configuration, not editing), because no real-checkpoint test meets the Milestone 1 pass conditions in [milestones.md](milestones.md).
 
 A row records that the cited test passed when this matrix was last audited. The test only checks that the citation exists. It doesn't run the cited test. Run the full suite with `NF_QUALIFICATION=1` to make skipped qualification tests fail.
 
@@ -51,5 +51,5 @@ A row records that the cited test passed when this matrix was last audited. The 
 | Rule construction (5-op ReLU) | two-layer fixture | f64 | Python Torch | fixed | fixture-only | tests/test_m4_engines.py::test_rule_construction_compiles_exact_relu_weights_with_independent_oracle |
 | Mapped transfer with supplied or inferred permutation | two-layer fixture | f64 | Python Torch | same shape | fixture-only | tests/test_m4_engines.py::test_mapped_transfer_permutation_alignment_fitted_alignment_and_transfer_protocols |
 | Transfer benchmark, proposer training | any | any | none | none | unsupported | tests/test_m4_engines.py::test_library_reuse_strategy_retrieval_cross_model_protocol_proposer_dataset_proposer_training_learned_proposer_transfer_benchmark_research_source_records_and_m4_feature_acceptance |
-| Serve an exported base and edited checkpoint through vLLM 0.33.0 (FLEX_ATTENTION only), 11 prompts, compared with transformers | GPT-NeoX (Pythia-14M only) | f32 served, f64 reference | vLLM on CUDA | same shape | verified | tests/test_real_runtimes.py::test_vllm_serves_exported_base_and_edit_with_transformers_parity |
+| Serving parity only, one configuration: vLLM 0.33.0 `vllm serve` with FLEX_ATTENTION, greedy, against transformers | GPT-NeoX (Pythia-14M only) | f32 served, f32 and f64 references | vLLM on CUDA | same shape | verified | tests/test_real_runtimes.py::test_vllm_serves_exported_base_and_edit_with_transformers_parity |
 | TensorRT qualification, systems profile, WeightEfficiencyBench | any | any | none | none | unsupported | tests/test_m5_surgery_and_efficiency.py::test_quantization_gym_compression_gym_generation_gym_serving_protocol_vllm_adapter_tensorrt_adapter_systems_profile_kernel_admission_efficiency_benchmark_and_backend_qualification |

@@ -156,23 +156,35 @@ class TransformersAdapter:
         )
 
 
-class VllmAdapter:
-    """Run a checkpoint through vLLM in-process. Not qualified.
+# vLLM's default TRITON_ATTN missed parity on Pythia-14M by up to 0.41 nats; see vllm_qualification.py.
+QUALIFIED_ATTENTION_BACKEND = "FLEX_ATTENTION"
 
-    `vllm_qualification` covers `vllm serve` with FLEX_ATTENTION. This class uses vLLM's default
-    attention backend, and TRITON_ATTN missed parity on Pythia-14M by up to 0.41 nats.
+
+class VllmAdapter:
+    """Run a checkpoint through vLLM in-process, with the settings `vllm_qualification` serves under.
+
+    Qualification covers `vllm serve` on Pythia-14M only. It isn't evidence for any other checkpoint.
     """
 
     runtime = "vllm"
 
-    def __init__(self, checkpoint_dir: str | Path, *, expected_digest: str | None = None) -> None:
+    def __init__(
+        self, checkpoint_dir: str | Path, *, expected_digest: str | None = None, gpu_memory_utilization: float = 0.05
+    ) -> None:
         self.directory = Path(checkpoint_dir)
         self.model_digest = _weights_digest(self.directory, expected_digest)
         try:
             self._vllm = importlib.import_module("vllm")
         except ImportError as exc:
             raise ServingRuntimeUnavailableError("vllm is not installed") from exc
-        self.engine = self._vllm.LLM(model=str(self.directory))
+        self.engine = self._vllm.LLM(
+            model=str(self.directory),
+            dtype="float32",
+            attention_backend=QUALIFIED_ATTENTION_BACKEND,
+            generation_config="vllm",
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=256,
+        )
 
     def generate(self, prompt: str, sampler: Mapping[str, Any] | None = None) -> GenerationResult:
         s = normalize_sampler(sampler)

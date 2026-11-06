@@ -485,11 +485,11 @@ Status: **experimental.** The reusable `algorithmic_three_skill` Gym compared wi
 
 ## Limitations
 
-- **No edit is qualified on a real checkpoint.** Milestone 1 is schema only. The one real-checkpoint serving result is vLLM on Pythia-14M, described below. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
+- **No edit is qualified on a real checkpoint.** Milestone 1 is schema only. The vLLM result below is serving parity for one configuration, not edit qualification. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
 - **Other architectures:** Llama, Mistral, Gemma, Gemma2 and Qwen3 can't be edited. `Qwen/qwen2-dense-mini` is a fixture despite its name.
 - **Not external packages:** EasyEdit, mergekit, NeMo-Gym, Verifiers, Gymnasium and circuit-tracer names refer to local code unless a receipt says otherwise. The gym adapter receipts record `sandbox_used=False` and `external_package_executed=False`.
 - **Not implemented:** `run_transfer_benchmark`, `run_proposer_training_study`, `qualify_tensorrt_llm_adapter`, `run_end_to_end_systems_profile` and `run_weight_efficiency_benchmark` raise `NotImplementedError` once their contract checks pass.
-- **vLLM:** `qualify_vllm_serving_adapter` runs real vLLM 0.33.0 on a GPU, for Pythia-14M only, in f32 with `FLEX_ATTENTION`. Logprobs match transformers within 2e-3 nats on the base export and 0.1 nats on the edited one, where f32 rounding is large. The default `TRITON_ATTN` backend failed parity, by up to 0.41 nats, so it isn't qualified. vLLM runs Pythia through its Transformers modeling backend, so this isn't an independent implementation of the model.
+- **vLLM:** `qualify_vllm_serving_adapter` checks serving parity for one configuration: vLLM 0.33.0, Pythia-14M, f32, `FLEX_ATTENTION`, greedy decoding. It says nothing about other models, dtypes, attention backends or sampling, and it isn't evidence that an edit is correct. vLLM's default `TRITON_ATTN` failed this check. vLLM runs Pythia through its Transformers modeling backend, so this isn't an independent implementation of the model.
 - **Caller-supplied results:** many M4 and M5 evaluators score numbers they are given and mark them `evidence="caller_supplied"`. Their output isn't a measurement.
 - **M4 acceptance is not qualification:** `run_m4_feature_acceptance_suite` checks small fixtures and contract refusals, and qualifies no engine.
 - **Surgery** slices tensors you pass in and doesn't produce a loadable model.

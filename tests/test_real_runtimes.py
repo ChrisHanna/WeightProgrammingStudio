@@ -127,7 +127,10 @@ def test_vllm_serves_exported_base_and_edit_with_transformers_parity() -> None:
     print(json.dumps(result.measurements, indent=2))
     tolerances = result.measurements["logprob_tolerance_nats"]
     for label in ("base", "edited"):
-        assert result.measurements["parity"][label]["max_abs_logprob_diff_vs_transformers_f64"] <= tolerances[label]
+        for prompt_set in ("tuning", "fresh"):
+            stats = result.measurements["parity"][label][prompt_set]
+            assert stats["max_abs_logprob_diff_vs_transformers_f64"] <= tolerances[label]
+            assert stats["max_abs_logprob_diff_vs_transformers_f32"] <= tolerances[label]
     assert result.measurements["min_base_vs_edited_first_token_logprob_distance"] > tolerances["edited"]
     assert result.measurements["served_weight_digests"]["base"] != result.measurements["served_weight_digests"]["edited"]
 

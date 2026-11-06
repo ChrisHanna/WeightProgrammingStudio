@@ -32,19 +32,33 @@ from typing import Any
 import torch
 
 from . import export_formats, pythia, serving
+from .serving import QUALIFIED_ATTENTION_BACKEND as ATTENTION_BACKEND
 
 PARITY_PROMPTS = ("Once upon a time", "1 2 3 4")
 MAX_NEW_TOKENS = 12
 TOP_LOGPROBS = 5
 # Largest allowed |logprob difference| in nats, between vLLM f32 on GPU and either reference.
-# Base: about 3x the 7.5e-4 measured. Edited: wider because the edit raises the largest weight in
-# its matrix from 0.27 to 89.8, which makes f32 arithmetic ill-conditioned. Without vLLM, transformers
-# f32 on GPU and on CPU differ by 1.8e-2 on that model. vLLM measured 5.8e-2 against f64, so this
-# value was set after seeing the result, and rounding is the likely cause rather than a proven one.
+# Base: about 3x the 7.5e-4 measured on TUNING prompts.
+# Edited: 5x the measured control, transformers f32 on GPU vs on CPU, which involves no vLLM and
+# measured 1.84e-2 on the tuning prompts. The multiple was picked knowing vLLM had measured 5.75e-2
+# on those prompts, so only FRESH_PROMPTS test it. Don't widen it to make a run pass.
 BASE_LOGPROB_TOLERANCE = 2e-3
-EDITED_LOGPROB_TOLERANCE = 1e-1
-# The default TRITON_ATTN backend misses this tolerance on Pythia-14M, by up to 0.41 nats, so it is not qualified.
-ATTENTION_BACKEND = "FLEX_ATTENTION"
+F32_GPU_CPU_CONTROL_NATS = 1.84e-2
+EDITED_LOGPROB_TOLERANCE = 5 * F32_GPU_CPU_CONTROL_NATS
+# Never used to set a tolerance. Committed before their first run.
+FRESH_PROMPTS = (
+    "The tallest mountain in the world is", "My favourite colour has always been", "The river flows through the",
+    "She opened the door and saw", "Water boils at a temperature of", "The first president of the United States was",
+    "Yesterday I went to the market to buy", "A triangle has three", "The dog barked loudly because",
+    "Scientists recently discovered that", "The largest planet in the solar system is", "He picked up the phone and",
+    "In the winter the lake", "The recipe calls for two cups of", "Monday comes before", "The teacher asked the students to",
+    "Birds build their nests in", "The price of bread has", "After dinner we usually", "The opposite of hot is",
+    "A good night of sleep helps", "The train to the city leaves at", "The ocean covers most of", "Music can make people feel",
+    "The old man walked slowly across the", "Red and yellow make", "The library closes early on", "Trees lose their leaves in",
+    "The children played in the", "To make tea you first", "The moon orbits the", "Her brother works as a",
+    "The book on the table belongs to", "Rain fell all night and by morning", "The speed of light is", "5 6 7 8",
+    "def add(a, b):", "Dear Sir or Madam,", "Q: What is your name?", "The stock market closed lower after",
+)
 _LOOPBACK = "127.0.0.1"
 _STARTUP_SECONDS = 300.0
 _STOP_SECONDS = 30.0
@@ -270,26 +284,28 @@ def _reference(adapter: serving.TransformersAdapter, prompt: str) -> _Reference:
     return _Reference(prompt_ids, tuple(tokens), tuple(logprobs))
 
 
-def _compare(served: _Completion, reference: _Reference, *, prompt: str, label: str) -> float:
-    """Require identical tokens, and return the largest |logprob difference| over every reported value."""
+def _compare(served: _Completion, reference: _Reference, *, prompt: str, label: str) -> tuple[float, list[str]]:
+    """Return the largest |logprob difference| while the contexts match, and any parity problems."""
     if served.prompt_ids != reference.prompt_ids:
-        raise VllmQualificationFailure(
-            "VLLM_PARITY_FAILED", f"{label}: tokenizers differ on {prompt!r}: {served.prompt_ids} vs {reference.prompt_ids}"
-        )
-    if served.token_ids != reference.token_ids:
-        raise VllmQualificationFailure(
-            "VLLM_PARITY_FAILED", f"{label}: greedy tokens differ on {prompt!r}: {served.token_ids} vs {reference.token_ids}"
-        )
+        return 0.0, [f"{label}: tokenizers differ on {prompt!r}: {served.prompt_ids} vs {reference.prompt_ids}"]
     worst = 0.0
-    for chosen, logprob, top, expected in zip(
-        served.token_ids, served.logprobs, served.top_logprobs, reference.logprobs, strict=True
+    problems: list[str] = []
+    for position, (chosen, logprob, top, expected) in enumerate(
+        zip(served.token_ids, served.logprobs, served.top_logprobs, reference.logprobs, strict=True)
     ):
-        worst = max(worst, abs(logprob - float(expected[chosen])))
         if chosen not in top or len(top) != TOP_LOGPROBS:
-            raise VllmQualificationFailure("VLLM_PARITY_FAILED", f"{label}: malformed top_logprobs on {prompt!r}")
-        for token, value in top.items():
-            worst = max(worst, abs(value - float(expected[token])))
-    return worst
+            problems.append(f"{label}: malformed top_logprobs on {prompt!r}")
+            break
+        worst = max(worst, abs(logprob - float(expected[chosen])), *(abs(v - float(expected[t])) for t, v in top.items()))
+        if chosen != reference.token_ids[position]:
+            # Later positions have different contexts, so they can't be compared.
+            top2 = expected.topk(2).values
+            problems.append(
+                f"{label}: greedy tokens differ on {prompt!r} at position {position}: {chosen} vs "
+                f"{reference.token_ids[position]}, reference top-2 gap {float(top2[0] - top2[1]):.3e}"
+            )
+            break
+    return worst, problems
 
 
 def _first_position_distance(served: _Completion, reference: _Reference) -> float:
@@ -301,27 +317,36 @@ def _qualify_one(
     label: str,
     ref_f64: serving.TransformersAdapter,
     ref_f32: serving.TransformersAdapter,
-    prompts: Sequence[str],
     tolerance: float,
-) -> tuple[dict[str, _Completion], dict[str, float]]:
+    prompt_sets: dict[str, Sequence[str]],
+) -> tuple[dict[str, _Completion], dict[str, Any], list[str]]:
     completions: dict[str, _Completion] = {}
-    worst_f64 = worst_f32 = 0.0
-    for prompt in prompts:
-        served = server.complete(prompt)
-        completions[prompt] = served
-        worst_f64 = max(worst_f64, _compare(served, _reference(ref_f64, prompt), prompt=prompt, label=f"{label}/f64"))
-        worst_f32 = max(worst_f32, _compare(served, _reference(ref_f32, prompt), prompt=prompt, label=f"{label}/f32"))
-    if max(worst_f64, worst_f32) > tolerance:
-        raise VllmQualificationFailure(
-            "VLLM_PARITY_FAILED",
-            f"{label}: max |logprob diff| f64={worst_f64:.3e} f32={worst_f32:.3e} exceeds tolerance {tolerance:.1e}",
-        )
-    return completions, {
-        "max_abs_logprob_diff_vs_transformers_f64": worst_f64,
-        "max_abs_logprob_diff_vs_transformers_f32": worst_f32,
-        "prompts": len(prompts),
-        "greedy_tokens_per_prompt": MAX_NEW_TOKENS,
-    }
+    stats: dict[str, Any] = {}
+    problems: list[str] = []
+    for set_name, prompts in prompt_sets.items():
+        worst = {"f64": 0.0, "f32": 0.0}
+        divergent = 0
+        for prompt in prompts:
+            served = server.complete(prompt)
+            completions[prompt] = served
+            for name, adapter in (("f64", ref_f64), ("f32", ref_f32)):
+                diff, found = _compare(served, _reference(adapter, prompt), prompt=prompt, label=f"{label}/{name}/{set_name}")
+                worst[name] = max(worst[name], diff)
+                divergent += bool(found)
+                problems += found
+        stats[set_name] = {
+            "max_abs_logprob_diff_vs_transformers_f64": worst["f64"],
+            "max_abs_logprob_diff_vs_transformers_f32": worst["f32"],
+            "prompts": len(prompts),
+            "greedy_tokens_per_prompt": MAX_NEW_TOKENS,
+            "reference_comparisons_with_token_divergence": divergent,
+        }
+        if max(worst.values()) > tolerance:
+            problems.append(
+                f"{label}/{set_name}: max |logprob diff| f64={worst['f64']:.3e} f32={worst['f32']:.3e} "
+                f"exceeds tolerance {tolerance:.3e}"
+            )
+    return completions, stats, problems
 
 
 def run_qualification(
@@ -345,13 +370,15 @@ def run_qualification(
     if report.edited_weight is None or not all(p.matched_target for p in report.dev_after):
         raise VllmQualificationFailure("VLLM_EDIT_NOT_PRESERVED", "the f64 edit didn't reach its targets before export")
     dev = report.dev_after
-    prompts = tuple(p.prompt for p in dev) + tuple(p.prompt for p in report.retention_after) + PARITY_PROMPTS
+    tuning = tuple(p.prompt for p in dev) + tuple(p.prompt for p in report.retention_after) + PARITY_PROMPTS
+    prompt_sets: dict[str, Sequence[str]] = {"tuning": tuning, "fresh": FRESH_PROMPTS}
+    problems: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="nf-vllm-qual-") as tmp:
         root = Path(tmp)
         original = model.tensors[report.target_site]
         served: dict[str, dict[str, _Completion]] = {}
-        parity: dict[str, dict[str, float]] = {}
+        parity: dict[str, dict[str, Any]] = {}
         references: dict[str, _Reference] = {}
         digests: dict[str, str] = {}
         tolerances = {"base": BASE_LOGPROB_TOLERANCE, "edited": EDITED_LOGPROB_TOLERANCE}
@@ -364,13 +391,21 @@ def run_qualification(
             ref_f64 = serving.TransformersAdapter(f64_dir, dtype="float64")
             ref_f32 = serving.TransformersAdapter(f32_dir, dtype="float32")
             with _VllmServer(interpreter, f32_dir, gpu_memory_fraction, root / f"{label}.log") as server:
-                served[label], parity[label] = _qualify_one(server, label, ref_f64, ref_f32, prompts, tolerances[label])
+                served[label], parity[label], found = _qualify_one(
+                    server, label, ref_f64, ref_f32, tolerances[label], prompt_sets
+                )
+                problems += found
             if serving.sha256_file(f32_dir / "model.safetensors") != digests[label]:
                 raise VllmQualificationFailure("VLLM_WRONG_MODEL", f"{label} export changed while being served")
             if label == "edited":
-                references = {p: _reference(ref_f64, p) for p in prompts}
+                references = {p.prompt: _reference(ref_f64, p.prompt) for p in dev}
             del ref_f64, ref_f32
         model.tensors[report.target_site] = original
+
+    if problems:
+        raise VllmQualificationFailure(
+            "VLLM_PARITY_FAILED", f"{len(problems)} problems: {problems}; measured {json.dumps(parity)}"
+        )
 
     # The tolerance has to separate the two models, or the parity above would prove nothing.
     separation = min(_first_position_distance(served["base"][p.prompt], references[p.prompt]) for p in dev)
