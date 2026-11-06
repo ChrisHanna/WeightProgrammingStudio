@@ -320,9 +320,8 @@ def test_huge_finite_add_is_exact_or_refused(model: Toy) -> None:
 
 
 @pytest.mark.parametrize("field", ["max_frobenius_delta", "max_spectral_delta", "max_parameter_magnitude", "max_changed_parameters"])
-@xfail("D3 edit_plan.py: value > NaN is False, so a NaN limit disables the constraint")
 def test_nan_constraint_is_not_treated_as_no_limit(model: Toy, field: str) -> None:
-    with pytest.raises((EditConstraintViolation, ValueError)):
+    with pytest.raises((EditConstraintViolation, ValueError), match="non-negative"):
         EditPlan(model, EditConstraints(**{field: NAN})).scale(SITE, 2.0).preview()
 
 

@@ -45,6 +45,15 @@ class EditConstraints:
     preserve_prompts: tuple[str, ...] = ()
     min_retention: float = 1.0
 
+    def __post_init__(self) -> None:
+        # Written so a NaN fails too: every comparison with one is False, which would disable the limit.
+        for label in ("max_changed_parameters", "max_parameter_magnitude", "max_frobenius_delta", "max_spectral_delta"):
+            limit = getattr(self, label)
+            if limit is not None and not limit >= 0:
+                raise ValueError(f"{label} must be a non-negative number, not {limit!r}")
+        if not 0.0 <= self.min_retention <= 1.0:
+            raise ValueError(f"min_retention must be in [0, 1], not {self.min_retention!r}")
+
 
 @dataclass(frozen=True)
 class Region:
@@ -189,6 +198,8 @@ class EditPlan:
             constraints = EditConstraints(**{k: tuple(v) if isinstance(v, list) else v for k, v in proposal.spec.constraints.items()})
         except TypeError as exc:
             raise GymProposalError(f"Unknown proposal constraint: {exc}") from exc
+        except ValueError as exc:
+            raise GymProposalError(f"Invalid proposal constraint: {exc}") from exc
         plan = cls(base_model, constraints)
         for planned, resolved in zip(proposal.spec.operations, proposal.operations, strict=True):
             plan._add_resolved(planned, resolved)
