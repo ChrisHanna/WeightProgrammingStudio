@@ -921,12 +921,12 @@ def test_nf_patch_rollback_does_not_claim_verification_it_did_not_do(tmp_path: P
     assert "cannot restore weights" in result.stdout + result.stderr
 
 
-@xfail("D12 studio.rs: patch audit reports audit_passed:true for any unsigned document")
 def test_nf_patch_audit_does_not_pass_an_unsigned_patch(tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_text(json.dumps(_body()))
     result = _run_nf("patch", "audit", str(path))
     assert result.returncode != 0 or '"audit_passed":true' not in result.stdout.replace(" ", "")
+    assert '"status":"unsigned"' in result.stdout.replace(" ", "")
 
 
 # ---------------------------------------------------------------- artifact manifests

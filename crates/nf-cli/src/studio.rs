@@ -639,7 +639,8 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
     wrap_ok(json!({
         "schema_version": 1,
         "kind": "nf_patch_audit_report",
-        "audit_passed": (!is_signed || sig_check["verified"].as_bool().unwrap_or(false)) && preserve_shapes,
+        // Unsigned means unauthenticated, so an audit can't pass it, whatever the document says about itself.
+        "audit_passed": is_signed && sig_check["verified"].as_bool().unwrap_or(false) && preserve_shapes,
         "signed": is_signed,
         "signature_verification": sig_check,
         "gradient_free": gradient_free,
