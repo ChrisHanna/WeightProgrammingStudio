@@ -497,10 +497,11 @@ Status: **experimental.** The reusable `algorithmic_three_skill` Gym compared wi
 
 ## Limitations
 
-- **Nothing is qualified on a real checkpoint.** Milestone 1 is schema only. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
+- **No edit is qualified on a real checkpoint.** Milestone 1 is schema only. The vLLM check below currently fails. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
 - **Other architectures:** Llama, Mistral, Gemma, Gemma2 and Qwen3 can't be edited. `Qwen/qwen2-dense-mini` is a fixture despite its name.
 - **Not external packages:** EasyEdit, mergekit, NeMo-Gym, Verifiers, Gymnasium and circuit-tracer names refer to local code unless a receipt says otherwise. The gym adapter receipts record `sandbox_used=False` and `external_package_executed=False`.
-- **Not implemented:** `run_transfer_benchmark`, `run_proposer_training_study`, `qualify_vllm_serving_adapter`, `qualify_tensorrt_llm_adapter`, `run_end_to_end_systems_profile` and `run_weight_efficiency_benchmark` raise `NotImplementedError` once their contract checks pass.
+- **Not implemented:** `run_transfer_benchmark`, `run_proposer_training_study`, `qualify_tensorrt_llm_adapter`, `run_end_to_end_systems_profile` and `run_weight_efficiency_benchmark` raise `NotImplementedError` once their contract checks pass.
+- **vLLM is not qualified:** `qualify_vllm_serving_adapter` checks serving parity for one configuration: vLLM 0.33.0, Pythia-14M, f32, `FLEX_ATTENTION`, greedy decoding. It currently raises `VLLM_PARITY_FAILED`: on 40 held-out prompts the base export differs from transformers by up to 2.6e-3 nats, over the 2e-3 limit fixed beforehand. Even a pass would say nothing about other models, dtypes, attention backends or sampling, or about whether an edit is correct. vLLM's default `TRITON_ATTN` failed this check. vLLM runs Pythia through its Transformers modeling backend, so this isn't an independent implementation of the model.
 - **Caller-supplied results:** many M4 and M5 evaluators score numbers they are given and mark them `evidence="caller_supplied"`. Their output isn't a measurement.
 - **M4 acceptance is not qualification:** `run_m4_feature_acceptance_suite` checks small fixtures and contract refusals, and qualifies no engine.
 - **Surgery** slices tensors you pass in and doesn't produce a loadable model.

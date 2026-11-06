@@ -10,7 +10,8 @@ Implements:
 
 Evidence: surgery functions slice tensors passed to them and do not produce a loadable model.
 Gym evaluators score numbers the caller supplies; results carry an ``evidence`` field.
-qualify_vllm_serving_adapter, qualify_tensorrt_llm_adapter, run_end_to_end_systems_profile and
+qualify_vllm_serving_adapter runs real vLLM and raises if it can't or if parity fails.
+qualify_tensorrt_llm_adapter, run_end_to_end_systems_profile and
 run_weight_efficiency_benchmark are not implemented and raise NotImplementedError once their
 contract checks pass.
 """
@@ -20,7 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -509,23 +511,49 @@ class ServingAdapterQualification:
     loopback_bound: bool
     compiled_engine_digest: str
     runtime_parity_verified: bool
+    measurements: dict[str, Any] = field(default_factory=dict)
 
 
 def qualify_vllm_serving_adapter(
     *,
-    pinned_version: str = "0.6.4",
+    pinned_version: str = "0.33.0",
     bind_host: str = "127.0.0.1",
     authorized: bool = True,
     is_mocked_transport_only: bool = False,
+    checkpoint_dir: str | Path = "/tmp/pythia-14m",
+    vllm_python: str | Path | None = None,
+    gpu_memory_fraction: float = 0.05,
 ) -> ServingAdapterQualification:
-    """Not implemented: starts no server. Enforces the contract, then raises (T114). See serving.py."""
+    """Serve exported base and edited checkpoints through real vLLM and compare with transformers (T114).
+
+    Raises M5SurgeryError if vLLM or the GPU is absent or any check fails. See vllm_qualification.py.
+    The scope is the checkpoint and version checked, in float32 on the GPU.
+    """
     if not authorized:
         raise M5SurgeryError("VLLM_UNAUTHORIZED", "vLLM launch requires explicit StudyContract authorization")
     if bind_host != "127.0.0.1":
         raise M5SurgeryError("NON_LOOPBACK_BIND_FORBIDDEN", "vLLM server must bind exclusively to 127.0.0.1 loopback")
     if is_mocked_transport_only:
         raise M5SurgeryError("MOCK_VLLM_NOT_QUALIFIED", "mocked HTTP transport does not qualify vLLM backend")
-    raise NotImplementedError(f"vLLM {pinned_version} qualification is not implemented; no runtime was run")
+    from . import vllm_qualification
+
+    try:
+        measured = vllm_qualification.run_qualification(
+            pinned_version=pinned_version,
+            checkpoint_dir=checkpoint_dir,
+            vllm_python=vllm_python,
+            gpu_memory_fraction=gpu_memory_fraction,
+        )
+    except vllm_qualification.VllmQualificationFailure as exc:
+        raise M5SurgeryError(exc.code, str(exc)) from exc
+    return ServingAdapterQualification(
+        adapter_id="vllm",
+        pinned_version=pinned_version,
+        loopback_bound=True,
+        compiled_engine_digest="not_applicable",
+        runtime_parity_verified=True,
+        measurements=measured,
+    )
 
 
 def qualify_tensorrt_llm_adapter(

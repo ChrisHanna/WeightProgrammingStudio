@@ -205,8 +205,9 @@ def test_quantization_gym_compression_gym_generation_gym_serving_protocol_vllm_a
     assert srv.retained_quality_ok is None
 
     # T114 & T115: vLLM and TensorRT-LLM adapters
-    with pytest.raises(NotImplementedError):
-        qualify_vllm_serving_adapter()
+    with pytest.raises(M5SurgeryError) as absent_vllm:
+        qualify_vllm_serving_adapter(vllm_python="/nonexistent/vllm/python")
+    assert absent_vllm.value.code == "VLLM_UNAVAILABLE"
     with pytest.raises(M5SurgeryError):
         qualify_vllm_serving_adapter(bind_host="0.0.0.0")
 
