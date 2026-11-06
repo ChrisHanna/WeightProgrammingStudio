@@ -913,12 +913,12 @@ def test_nf_verify_requires_a_trusted_key(keys: dict[str, Any], other_keys: dict
     assert _nf_verify(path, other_keys["public_key"]) is False
 
 
-@xfail("D11 studio.rs: patch rollback reports rollback_verified:true after reading one JSON file and restoring nothing")
 def test_nf_patch_rollback_does_not_claim_verification_it_did_not_do(tmp_path: Path) -> None:
     path = tmp_path / "p.json"
     path.write_text(json.dumps({"base_checkpoint_digest": "sha256:" + "1" * 64}))
     result = _run_nf("patch", "rollback", str(path))
     assert result.returncode != 0 or '"rollback_verified":true' not in result.stdout.replace(" ", "")
+    assert "cannot restore weights" in result.stdout + result.stderr
 
 
 @xfail("D12 studio.rs: patch audit reports audit_passed:true for any unsigned document")

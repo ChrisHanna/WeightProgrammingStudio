@@ -648,44 +648,13 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
     }))
 }
 
-fn handle_patch_rollback(rest: &[String]) -> Result<String> {
-    let raw = single_file_arg(rest, "patch rollback")?;
-    let val: Value = serde_json::from_slice(&raw)
-        .map_err(|e| err(ErrorCode::InvalidValue, "/patch/rollback", e.to_string()))?;
-    let payload = if val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope") {
-        &val["patch"]
-    } else {
-        &val
-    };
-    let base_ckpt = payload
-        .get("base_model")
-        .and_then(|b| b.get("checkpoint"))
-        .or_else(|| payload.get("base_checkpoint_digest"))
-        .or_else(|| payload.get("source_checkpoint"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            err(
-                ErrorCode::InvalidValue,
-                "/patch/rollback",
-                "patch or receipt must contain base_model.checkpoint or base_checkpoint_digest for rollback",
-            )
-        })?;
-    let _parsed: ContentDigest = base_ckpt.parse()?;
-    let base_param = payload
-        .get("base_model")
-        .and_then(|b| b.get("parameter_digest"))
-        .or_else(|| payload.get("base_parameter_digest"))
-        .or_else(|| payload.get("source_parameter_digest"))
-        .and_then(Value::as_str)
-        .unwrap_or(base_ckpt);
-    wrap_ok(json!({
-        "schema_version": 1,
-        "kind": "nf_patch_rollback_receipt",
-        "active_reference": "rolled_back_to_source",
-        "restored_checkpoint_digest": base_ckpt,
-        "restored_parameter_digest": base_param,
-        "rollback_verified": true,
-    }))
+fn handle_patch_rollback(_rest: &[String]) -> Result<String> {
+    // A patch document holds digests, not weights, so the native CLI has nothing to restore or check.
+    Err(err(
+        ErrorCode::UnsupportedCapability,
+        "/patch/rollback",
+        "`nf patch rollback` cannot restore weights from a patch file; use `neural_foundry.patch_ux.create_rollback_handle` and `rollback_model_patch` in Python",
+    ))
 }
 
 fn handle_catalog(rest: &[String]) -> Result<String> {
