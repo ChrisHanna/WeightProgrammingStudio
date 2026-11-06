@@ -250,7 +250,7 @@ with export_formats.ShardedMmapCheckpoint("/path/to/sharded_ckpt", max_checkpoin
 ```
 
 ### 2. Rebuild & Export Round-Trip: HuggingFace Safetensors & `GGUF v3` (`F32`, `F16`, `Q8_0`)
-Export to Safetensors and GGUF v3, reload through this package, and compare answers on the probe prompts you pass in. **Fixture-only:** a match on a few prompts is not a claim of full behavioural equivalence.
+Export to Safetensors and GGUF v3, reload through this package, and compare answers on the probe prompts you pass in. **Fixture-only:** a match on a few prompts is not a claim of full behavioural equivalence. The GGUF file follows the published container layout but reloads through this package only: it has never been run on `llama.cpp` or `Ollama`. On Pythia-14M, 4-bit modes (`q4_0`, `nf_q4`) changed model behaviour after reload and did not preserve the edit's gain (3 prompts).
 
 ```python
 from pathlib import Path

@@ -33,7 +33,32 @@ GGUF_DEFAULT_ALIGNMENT = 32
 GGUF_TYPE_UINT32 = 4
 GGUF_TYPE_INT32 = 5
 GGUF_TYPE_FLOAT32 = 6
+GGUF_TYPE_BOOL = 7
 GGUF_TYPE_STRING = 8
+GGUF_TYPE_ARRAY = 9
+_GGUF_SCALAR_FORMATS = {
+    0: "<B", 1: "<b", 2: "<H", 3: "<h", GGUF_TYPE_UINT32: "<I", GGUF_TYPE_INT32: "<i",
+    GGUF_TYPE_FLOAT32: "<f", GGUF_TYPE_BOOL: "<B", 10: "<Q", 11: "<q", 12: "<d",
+}
+GGUF_MAX_DIMS = 4
+GGUF_MAX_TENSOR_NAME_BYTES = 64
+GGUF_QUANTIZATION_VERSION = 2  # GGML_QNT_VERSION
+GGUF_BLOCK_ELEMENTS = 32
+
+# Hugging Face config keys and the `[architecture].` keys the GGUF specification names for them.
+_GGUF_CONFIG_INT_KEYS = (
+    ("max_position_embeddings", "context_length"),
+    ("hidden_size", "embedding_length"),
+    ("num_hidden_layers", "block_count"),
+    ("intermediate_size", "feed_forward_length"),
+    ("num_attention_heads", "attention.head_count"),
+)
+_GGUF_CONFIG_FLOAT_KEYS = (
+    ("layer_norm_eps", "attention.layer_norm_epsilon"),
+    ("rms_norm_eps", "attention.layer_norm_rms_epsilon"),
+)
+_GGUF_ARCHITECTURE_NAMES = {"gpt_neox": "gptneox"}
+_GGUF_UNKNOWN_ARCHITECTURE = "nfunknown"
 
 # GGML tensor types
 GGML_TYPE_F32 = 0
@@ -1015,6 +1040,33 @@ def reload_and_verify_huggingface_safetensors(
     )
 
 
+def _gguf_architecture(cfg: Mapping[str, Any]) -> str:
+    """The spec allows only `[a-z0-9]+` here; a model with no stated type isn't labelled as a known one."""
+    model_type = str(cfg.get("model_type", ""))
+    name = _GGUF_ARCHITECTURE_NAMES.get(model_type, model_type).lower()
+    return "".join(c for c in name if c.isascii() and c.isalnum()) or _GGUF_UNKNOWN_ARCHITECTURE
+
+
+def _gguf_hyperparameters(arch: str, cfg: Mapping[str, Any]) -> list[tuple[str, int, Any]]:
+    """Spec-named keys for values the config actually states; a missing value is omitted, never invented."""
+    pairs: list[tuple[str, int, Any]] = []
+    for source, key in _GGUF_CONFIG_INT_KEYS:
+        value = cfg.get(source)
+        if type(value) is int and value >= 0:
+            pairs.append((f"{arch}.{key}", GGUF_TYPE_UINT32, value))
+    for source, key in _GGUF_CONFIG_FLOAT_KEYS:
+        value = cfg.get(source)
+        if type(value) in (int, float):
+            pairs.append((f"{arch}.{key}", GGUF_TYPE_FLOAT32, float(value)))
+    if arch == "gptneox":
+        if type(cfg.get("use_parallel_residual")) is bool:
+            pairs.append(("gptneox.use_parallel_residual", GGUF_TYPE_BOOL, cfg["use_parallel_residual"]))
+        hidden, heads, rotary = cfg.get("hidden_size"), cfg.get("num_attention_heads"), cfg.get("rotary_pct")
+        if type(hidden) is int and type(heads) is int and heads > 0 and type(rotary) in (int, float):
+            pairs.append(("gptneox.rope.dimension_count", GGUF_TYPE_UINT32, int(hidden // heads * rotary)))
+    return pairs
+
+
 def export_gguf_v3(
     model: Any,
     output_path: str | Path,
@@ -1023,10 +1075,13 @@ def export_gguf_v3(
 ) -> Path:
     """Write a GGUF v3 container (`F32`, `F16`, `Q8_0`, `Q4_0`, or `nf_q4`) that reloads through `reload_and_verify_gguf_v3`.
 
-    This is not a llama.cpp model file. Reading llama.cpp b12164's loader source (the file has not
-    been run against it) shows these mismatches: the architecture is `gpt_neox` where llama.cpp
-    expects `gptneox`, tensors keep Hugging Face names and row-major dimension order, the
-    hyperparameter keys differ, and no tokenizer is embedded.
+    The container follows the published GGUF v3 layout: spec-named metadata keys, dimensions in
+    ggml order (`ne[0]`, the row length, comes first) and block types only where a row is a whole
+    number of blocks. Other matrices stay F32 in every mode.
+
+    It is not runtime-qualified, and is not expected to load in llama.cpp: tensors keep Hugging
+    Face names rather than `blk.N.*`, attention weights are not converted, and no tokenizer is
+    embedded. It has never been run on llama.cpp or any other GGUF runtime.
     """
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1041,14 +1096,88 @@ def export_gguf_v3(
         raise ValueError(f"Unsupported GGUF quantization mode: {quantization!r}")
 
     cfg = getattr(model, "config", {}) or {}
-    arch = str(cfg.get("model_type", "gpt_neox"))
+    arch = _gguf_architecture(cfg)
+    display_name = getattr(model, "model_id", None) or getattr(model, "model_name", None) or "nf-edited-model"
     kv_pairs: list[tuple[str, int, Any]] = [
         ("general.architecture", GGUF_TYPE_STRING, arch),
-        ("general.name", GGUF_TYPE_STRING, str(getattr(model, "model_id", "nf-edited-model"))),
+        ("general.name", GGUF_TYPE_STRING, str(display_name)),
         ("general.alignment", GGUF_TYPE_UINT32, GGUF_DEFAULT_ALIGNMENT),
-        (f"{arch}.Hidden_size", GGUF_TYPE_UINT32, int(cfg.get("hidden_size", 64))),
-        (f"{arch}.block_count", GGUF_TYPE_UINT32, int(cfg.get("num_hidden_layers", 2))),
+        *_gguf_hyperparameters(arch, cfg),
     ]
+
+    tensor_info = bytearray()
+    tensor_payloads: list[bytes] = []
+    tensor_offsets: list[int] = []
+    cur_data_offset = 0
+    any_quantized = False
+
+    for name in sorted(tensors.keys()):
+        t = tensors[name]
+        shape = [int(d) for d in t.shape]
+        if len(shape) > GGUF_MAX_DIMS:
+            raise ValueError(f"GGUF tensor {name!r} has {len(shape)} dimensions; the format allows {GGUF_MAX_DIMS}")
+        # ggml keeps the terminating NUL in its 64-byte name field, so 64 itself is refused here.
+        if len(name.encode("utf-8")) >= GGUF_MAX_TENSOR_NAME_BYTES:
+            raise ValueError(f"GGUF tensor name {name!r} is too long")
+        flat = [float(x) for x in t.reshape(-1).tolist()]
+        # ggml requires each row (`ne[0]`) to be a whole number of blocks.
+        blockable = len(shape) == 2 and shape[1] % GGUF_BLOCK_ELEMENTS == 0
+        if qmode == "f32":
+            ggml_type = GGML_TYPE_F32
+            raw = struct.pack(f"<{len(flat)}f", *flat)
+        elif qmode == "f16":
+            ggml_type = GGML_TYPE_F16
+            raw = struct.pack(f"<{len(flat)}e", *flat)
+        elif qmode == "nf_q4":
+            is_embed_or_head = any(
+                tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
+            )
+            if blockable and not is_embed_or_head:
+                ggml_type = NF_TYPE_Q4_BLOCK
+                raw, _ = quantize_matrix_nf_q4(t)
+            elif blockable:
+                ggml_type = GGML_TYPE_Q8_0
+                raw, _ = quantize_matrix_q8_0(t)
+            else:
+                ggml_type = GGML_TYPE_F32
+                raw = struct.pack(f"<{len(flat)}f", *flat)
+        elif qmode == "q4_0":
+            is_embed_or_head = any(
+                tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
+            )
+            if blockable and not is_embed_or_head:
+                ggml_type = GGML_TYPE_Q4_0
+                raw, _ = quantize_matrix_q4_0(t, hessian_error_diffusion=True)
+            elif blockable:
+                ggml_type = GGML_TYPE_Q8_0
+                raw, _ = quantize_matrix_q8_0(t)
+            else:
+                ggml_type = GGML_TYPE_F32
+                raw = struct.pack(f"<{len(flat)}f", *flat)
+        else:
+            if blockable:
+                ggml_type = GGML_TYPE_Q8_0
+                raw, _ = quantize_matrix_q8_0(t)
+            else:
+                ggml_type = GGML_TYPE_F32
+                raw = struct.pack(f"<{len(flat)}f", *flat)
+
+        cur_data_offset = _align_offset(cur_data_offset, GGUF_DEFAULT_ALIGNMENT)
+        tensor_offsets.append(cur_data_offset)
+        tensor_payloads.append(raw)
+        cur_data_offset += len(raw)
+        any_quantized = any_quantized or ggml_type not in (GGML_TYPE_F32, GGML_TYPE_F16)
+
+        # GGUF v3 tensor info: name, n_dimensions, dimensions (uint64 each, ggml order), ggml_type (uint32), offset (uint64)
+        tensor_info.extend(_pack_gguf_string(name))
+        tensor_info.extend(struct.pack("<I", len(shape)))
+        for dim in reversed(shape):
+            tensor_info.extend(struct.pack("<Q", dim))
+        tensor_info.extend(struct.pack("<I", ggml_type))
+        tensor_info.extend(struct.pack("<Q", tensor_offsets[-1]))
+
+    if any_quantized:
+        kv_pairs.append(("general.quantization_version", GGUF_TYPE_UINT32, GGUF_QUANTIZATION_VERSION))
 
     buf = bytearray()
     buf.extend(GGUF_MAGIC)
@@ -1061,74 +1190,10 @@ def export_gguf_v3(
         buf.extend(struct.pack("<I", vtype))
         if vtype == GGUF_TYPE_STRING:
             buf.extend(_pack_gguf_string(str(val)))
-        elif vtype == GGUF_TYPE_UINT32:
-            buf.extend(struct.pack("<I", int(val)))
-        elif vtype == GGUF_TYPE_INT32:
-            buf.extend(struct.pack("<i", int(val)))
-        elif vtype == GGUF_TYPE_FLOAT32:
-            buf.extend(struct.pack("<f", float(val)))
-
-    tensor_payloads: list[bytes] = []
-    tensor_offsets: list[int] = []
-    cur_data_offset = 0
-
-    for name in sorted(tensors.keys()):
-        t = tensors[name]
-        shape = [int(d) for d in t.shape]
-        flat = [float(x) for x in t.reshape(-1).tolist()]
-        if qmode == "f32":
-            ggml_type = GGML_TYPE_F32
-            raw = struct.pack(f"<{len(flat)}f", *flat)
-        elif qmode == "f16":
-            ggml_type = GGML_TYPE_F16
-            raw = struct.pack(f"<{len(flat)}e", *flat)
-        elif qmode == "nf_q4":
-            is_embed_or_head = any(
-                tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
-            )
-            if len(flat) % 32 == 0 and len(shape) == 2 and not is_embed_or_head:
-                ggml_type = NF_TYPE_Q4_BLOCK
-                raw, _ = quantize_matrix_nf_q4(t)
-            elif len(flat) % 32 == 0 and len(shape) == 2:
-                ggml_type = GGML_TYPE_Q8_0
-                raw, _ = quantize_matrix_q8_0(t)
-            else:
-                ggml_type = GGML_TYPE_F32
-                raw = struct.pack(f"<{len(flat)}f", *flat)
-        elif qmode == "q4_0":
-            is_embed_or_head = any(
-                tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
-            )
-            if len(flat) % 32 == 0 and len(shape) == 2 and not is_embed_or_head:
-                ggml_type = GGML_TYPE_Q4_0
-                raw, _ = quantize_matrix_q4_0(t, hessian_error_diffusion=True)
-            elif len(flat) % 32 == 0 and len(shape) == 2:
-                ggml_type = GGML_TYPE_Q8_0
-                raw, _ = quantize_matrix_q8_0(t)
-            else:
-                ggml_type = GGML_TYPE_F32
-                raw = struct.pack(f"<{len(flat)}f", *flat)
         else:
-            # Q8_0 requires element count divisible by 32; fall back to F32 for small 1D biases/norms < 32
-            if len(flat) % 32 == 0 and len(shape) == 2:
-                ggml_type = GGML_TYPE_Q8_0
-                raw, _ = quantize_matrix_q8_0(t)
-            else:
-                ggml_type = GGML_TYPE_F32
-                raw = struct.pack(f"<{len(flat)}f", *flat)
+            buf.extend(struct.pack(_GGUF_SCALAR_FORMATS[vtype], val))
 
-        cur_data_offset = _align_offset(cur_data_offset, GGUF_DEFAULT_ALIGNMENT)
-        tensor_offsets.append(cur_data_offset)
-        tensor_payloads.append(raw)
-        cur_data_offset += len(raw)
-
-        # GGUF v3 tensor info: name, n_dimensions, dimensions (uint64 each), ggml_type (uint32), offset (uint64)
-        buf.extend(_pack_gguf_string(name))
-        buf.extend(struct.pack("<I", len(shape)))
-        for dim in shape:
-            buf.extend(struct.pack("<Q", dim))
-        buf.extend(struct.pack("<I", ggml_type))
-        buf.extend(struct.pack("<Q", tensor_offsets[-1]))
+    buf.extend(tensor_info)
 
     # Pad header to GGUF_DEFAULT_ALIGNMENT before tensor data section
     aligned_hdr = _align_offset(len(buf), GGUF_DEFAULT_ALIGNMENT)
@@ -1143,6 +1208,38 @@ def export_gguf_v3(
     buf.extend(data_section)
     out_path.write_bytes(bytes(buf))
     return out_path
+
+
+def _read_gguf_scalar(blob: Any, offset: int, vtype: int) -> tuple[Any, int]:
+    (val,) = struct.unpack_from(_GGUF_SCALAR_FORMATS[vtype], blob, offset)
+    if vtype == GGUF_TYPE_BOOL:
+        if val not in (0, 1):
+            raise ValueError(f"GGUF bool has value {val}; only 0 and 1 are allowed")
+        val = bool(val)
+    return val, offset + struct.calcsize(_GGUF_SCALAR_FORMATS[vtype])
+
+
+def _read_gguf_value(blob: Any, offset: int, vtype: int) -> tuple[Any, int]:
+    if vtype == GGUF_TYPE_STRING:
+        return _unpack_gguf_string(blob, offset)
+    if vtype in _GGUF_SCALAR_FORMATS:
+        return _read_gguf_scalar(blob, offset, vtype)
+    if vtype != GGUF_TYPE_ARRAY:
+        raise ValueError(f"Unsupported GGUF metadata vtype {vtype}")
+    (element_type, count) = struct.unpack_from("<IQ", blob, offset)
+    offset += 12
+    if element_type == GGUF_TYPE_ARRAY:
+        raise ValueError("Nested GGUF arrays aren't supported")
+    if element_type != GGUF_TYPE_STRING and element_type not in _GGUF_SCALAR_FORMATS:
+        raise ValueError(f"Unsupported GGUF metadata vtype {element_type}")
+    # Every element takes at least one byte, so this bounds the loop by the file size.
+    if count > len(blob) - offset:
+        raise ValueError(f"GGUF array of {count} elements runs past the end of the file")
+    values = []
+    for _ in range(count):
+        item, offset = _read_gguf_value(blob, offset, element_type)
+        values.append(item)
+    return values, offset
 
 
 def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1164,27 +1261,19 @@ def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dic
         key, offset = _unpack_gguf_string(blob, offset)
         (vtype,) = struct.unpack_from("<I", blob, offset)
         offset += 4
-        if vtype == GGUF_TYPE_STRING:
-            val, offset = _unpack_gguf_string(blob, offset)
-        elif vtype == GGUF_TYPE_UINT32:
-            (val,) = struct.unpack_from("<I", blob, offset)
-            offset += 4
-        elif vtype == GGUF_TYPE_INT32:
-            (val,) = struct.unpack_from("<i", blob, offset)
-            offset += 4
-        elif vtype == GGUF_TYPE_FLOAT32:
-            (val,) = struct.unpack_from("<f", blob, offset)
-            offset += 4
-        else:
-            raise ValueError(f"Unsupported GGUF metadata vtype {vtype}")
+        val, offset = _read_gguf_value(blob, offset, vtype)
+        if key in metadata:
+            raise ValueError(f"Duplicate GGUF metadata key {key!r}")
         metadata[key] = val
 
     tensor_descriptors: list[tuple[str, tuple[int, ...], int, int]] = []
     for _ in range(tensor_count):
         tname, offset = _unpack_gguf_string(blob, offset)
+        if len(tname.encode("utf-8")) > GGUF_MAX_TENSOR_NAME_BYTES:
+            raise ValueError(f"GGUF tensor name {tname!r} is longer than {GGUF_MAX_TENSOR_NAME_BYTES} bytes")
         (ndim,) = struct.unpack_from("<I", blob, offset)
         offset += 4
-        if ndim > (size - offset) // 8:
+        if ndim > GGUF_MAX_DIMS:
             raise ValueError(f"GGUF tensor {tname!r} declares {ndim} dimensions")
         dims = []
         for _ in range(ndim):
@@ -1193,12 +1282,13 @@ def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dic
             dims.append(int(d))
         (ggml_type, rel_offset) = struct.unpack_from("<IQ", blob, offset)
         offset += 12
-        tensor_descriptors.append((tname, tuple(dims), int(ggml_type), int(rel_offset)))
+        # Files store ggml order (`ne[0]` first); tensors here are row-major.
+        tensor_descriptors.append((tname, tuple(reversed(dims)), int(ggml_type), int(rel_offset)))
     if not tensor_descriptors:
         raise ValueError(f"GGUF file {path} has no tensors")
 
     alignment = metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT)
-    if type(alignment) is not int or alignment <= 0 or alignment & (alignment - 1):
+    if type(alignment) is not int or alignment < 8 or alignment & (alignment - 1):
         raise ValueError(f"Invalid GGUF alignment {alignment!r}")
     data_base = _align_offset(offset, alignment)
 
@@ -1217,7 +1307,9 @@ def _parse_gguf_tensors(blob: Any, path: Path) -> tuple[dict[str, Any], list[dic
         elif ggml_type in block_bytes:
             if len(shape) != 2:
                 raise ValueError(f"GGUF block-quantized tensor {tname!r} must be a matrix, got shape {shape}")
-            length = ((n + 31) // 32) * block_bytes[ggml_type]
+            if shape[1] % GGUF_BLOCK_ELEMENTS:
+                raise ValueError(f"GGUF block-quantized tensor {tname!r}: rows of {shape[1]} aren't whole blocks")
+            length = (n // GGUF_BLOCK_ELEMENTS) * block_bytes[ggml_type]
         else:
             raise ValueError(f"Unsupported GGML tensor type {ggml_type}")
         if rel_off % alignment or rel_off < position:
