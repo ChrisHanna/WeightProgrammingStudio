@@ -321,6 +321,21 @@ fn verify_signed_envelope(envelope: &Value, trusted_public_key: &str) -> Result<
             "expected nf_signed_patch_envelope document",
         ));
     }
+    // Mirrors `patch_ux.verify_patch_signature`: an envelope field nobody signed can't be allowed to mean anything.
+    if envelope.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/patch/verify-signature",
+            "unsupported signed patch envelope schema_version",
+        ));
+    }
+    if envelope.as_object().is_some_and(|o| o.keys().any(|k| !ENVELOPE_KEYS.contains(&k.as_str()))) {
+        return Err(err(
+            ErrorCode::IntegrityMismatch,
+            "/patch/verify-signature",
+            "signed patch envelope has unknown fields",
+        ));
+    }
     let patch_val = envelope.get("patch").ok_or_else(|| {
         err(
             ErrorCode::InvalidValue,
@@ -374,6 +389,10 @@ fn verify_signed_envelope(envelope: &Value, trusted_public_key: &str) -> Result<
 
 const OPEN_PATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const OPEN_PATCH_FORMAT_VERSION: &str = "1.0.0";
+const ENVELOPE_KEYS: [&str; 9] = [
+    "schema_version", "kind", "signature_scheme", "patch_digest", "signer_id", "public_key", "key_fingerprint",
+    "signature", "patch",
+];
 const OPEN_PATCH_KEYS: [&str; 11] = [
     "schema_version", "kind", "format_version", "base_model", "candidate_checkpoint_digest",
     "total_parameters", "operations", "sbom", "rounding_contract", "evaluation_provenance", "security_scan",
@@ -513,6 +532,13 @@ fn handle_open_patch_verify(rest: &[String]) -> Result<String> {
                 ErrorCode::IntegrityMismatch,
                 "/verify",
                 "open patch body differs from its signed payload",
+            ));
+        }
+        if top.get("patch_digest").is_some_and(|digest| *digest != sig_res["patch_digest"]) {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/verify",
+                "open patch's patch_digest differs from its signed digest",
             ));
         }
     }

@@ -878,14 +878,7 @@ def test_python_refuses_wrapper_attack(keys: dict[str, Any], name: str) -> None:
         patch_ux.verify_open_patch_v1(doc, public_key=keys["public_key"])
 
 
-NF_WRAPPER_GAPS = {
-    "unsigned_top_digest": "D10 studio.rs: the unsigned top-level patch_digest isn't compared with the signed one",
-    "envelope_future_schema": "D10 studio.rs: the envelope's schema_version isn't checked",
-    "envelope_unknown_field": "D10 studio.rs: unknown envelope fields are accepted",
-}
-
-
-@pytest.mark.parametrize("name", _marked(WRAPPER_ATTACKS, NF_WRAPPER_GAPS))
+@pytest.mark.parametrize("name", WRAPPER_ATTACKS)
 def test_nf_verify_refuses_wrapper_attack(keys: dict[str, Any], name: str, tmp_path: Path) -> None:
     doc = _open_patch(_body(), keys)
     WRAPPER_ATTACKS[name](doc, keys)
