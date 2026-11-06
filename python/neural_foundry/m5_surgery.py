@@ -10,7 +10,7 @@ Implements:
 
 Evidence: surgery functions slice tensors passed to them and do not produce a loadable model.
 Gym evaluators score numbers the caller supplies; results carry an ``evidence`` field.
-qualify_vllm_serving_adapter runs real vLLM and raises if it can't.
+qualify_vllm_serving_adapter runs real vLLM and raises if it can't or if parity fails.
 qualify_tensorrt_llm_adapter, run_end_to_end_systems_profile and
 run_weight_efficiency_benchmark are not implemented and raise NotImplementedError once their
 contract checks pass.

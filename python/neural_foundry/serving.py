@@ -163,7 +163,8 @@ QUALIFIED_ATTENTION_BACKEND = "FLEX_ATTENTION"
 class VllmAdapter:
     """Run a checkpoint through vLLM in-process, with the settings `vllm_qualification` serves under.
 
-    Qualification covers `vllm serve` on Pythia-14M only. It isn't evidence for any other checkpoint.
+    Not qualified: the check in `vllm_qualification` currently fails its held-out logprob limit, and it
+    only ever covers `vllm serve` on Pythia-14M.
     """
 
     runtime = "vllm"
