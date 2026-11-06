@@ -26,17 +26,9 @@ from .export_formats import (
     export_huggingface_safetensors,
 )
 from .gym_proposal import GymProposalError, ProposedOperation, ResolvedGymWeightProposal, ResolvedOperation, proposal_digest
+from .ir import ReloadParityError, require_reload_parity  # noqa: F401 - ReloadParityError is public here too
 from .ir import WeightIRTransactionBuilder, unpack_matrix_bytes
 from .records import NativeError, canonicalize, content_digest
-
-
-class ReloadParityError(ValueError):
-    """Rust reported that a reloaded candidate doesn't match the one it built."""
-
-
-def _require_reload_parity(tx: Any, *, tensor: str, operation: str) -> None:
-    if tx.reload_parity_verified is not True:
-        raise ReloadParityError(f"{operation} on {tensor}: the transaction's reload parity check failed")
 
 
 class EditConstraintViolation(ValueError):
@@ -441,7 +433,7 @@ class EditPlan:
             current = working.get(tensor, base[tensor]).to(torch.float64)
             arguments = build(current)
             tx = WeightIRTransactionBuilder.execute_matrix_edit(current, provenance_tag=f"edit_plan.{op}.v1", engine_name="studio.edit_plan", **arguments)
-            _require_reload_parity(tx, tensor=tensor, operation=op)
+            require_reload_parity(tx)
             edited = torch.tensor(unpack_matrix_bytes(tx.edited_bytes, tuple(current.shape), "f64"), dtype=torch.float64)
             working[tensor] = edited
             receipts.append(
@@ -713,7 +705,7 @@ def apply_edit_graph(base_model: Any, graph: Mapping[str, Any]) -> PlanCandidate
         tx = WeightIRTransactionBuilder.execute_matrix_edit(
             current, provenance_tag=f"edit_plan.{op}.v1", engine_name="studio.edit_plan", **arguments
         )
-        _require_reload_parity(tx, tensor=tensor, operation=op)
+        require_reload_parity(tx)
         if tx.before_parameter_digest != step["before_parameter_digest"]:
             raise EditGraphError(f"{step['id']}: this isn't the base model the graph was made for")
         if tx.after_parameter_digest != step["after_parameter_digest"]:

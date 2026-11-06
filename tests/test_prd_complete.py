@@ -142,6 +142,8 @@ def test_prd_priority_experiments_a_b_c_d_and_claude_gpt6_interoperability() -> 
     if Path("/tmp/pythia-14m/model.safetensors").is_file():
         real_rep = studio.run_priority_experiments("EleutherAI/pythia-14m")
         # No Gym branch qualifies on the real checkpoint, so experiment D has no direct edit to compare.
+        assert real_rep.experiment_a_claude.rust_candidate_digest is None
+        assert real_rep.experiment_a_agent_interoperability_verified is False
         assert real_rep.experiment_d_direct_holdout_accuracy is None
         assert real_rep.experiment_d_direct_retention_accuracy is None
         assert real_rep.all_experiments_succeeded is False

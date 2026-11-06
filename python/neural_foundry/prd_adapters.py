@@ -233,6 +233,7 @@ def _compile_and_apply_rust_add_delta(
         provenance_tag=provenance_tag,
         engine_name="mergekit.rust_ir",
     )
+    ir.require_reload_parity(tx)
     w_edited = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -677,7 +678,7 @@ class FrontierAgentSessionReport:
     repaired_loop_rate_before: float | None  # None: this session did not measure it
     repaired_loop_rate_after: float | None
     held_out_accuracy_after: float | None  # None: nothing was submitted
-    rust_candidate_digest: str
+    rust_candidate_digest: str | None  # None: no candidate. Never an empty string.
     transport_mode: Literal["live_http_api", "live_custom_transport", "local_tool_harness"] = "local_tool_harness"
     transcript: tuple[AgentTurnTranscript, ...] = ()
     total_prompt_tokens: int = 0
@@ -687,7 +688,7 @@ class FrontierAgentSessionReport:
     budget_remaining_usd: float = 5.0
     feedback_tools_enabled: bool = True
     session_kind: Literal["scripted_protocol", "agent_driven"] = "scripted_protocol"
-    submitted_plan_digest: str = ""
+    submitted_plan_digest: str | None = None
     submitted_weights_by_layer: dict[int, torch.Tensor] | None = None
     holdout_access_denied_count: int = 0
     stop_reason: str = ""
@@ -1193,7 +1194,7 @@ class FrontierAgentProgrammer:
             repaired_loop_rate_before=None,
             repaired_loop_rate_after=None,
             held_out_accuracy_after=hold_acc,
-            rust_candidate_digest=gym_rep.rust_candidate_digest or "",
+            rust_candidate_digest=gym_rep.rust_candidate_digest,
             transport_mode=t_mode,
             transcript=tuple(self._transcript),
             total_prompt_tokens=self.total_prompt_tokens,
@@ -1573,7 +1574,7 @@ class FrontierAgentProgrammer:
             repaired_loop_rate_before=None,
             repaired_loop_rate_after=None,
             held_out_accuracy_after=holdout_accuracy,
-            rust_candidate_digest=final["candidate_digest"] if final else "",
+            rust_candidate_digest=final["candidate_digest"] if final else None,
             transport_mode=t_mode,
             transcript=tuple(self._transcript),
             total_prompt_tokens=self.total_prompt_tokens,
@@ -1583,7 +1584,7 @@ class FrontierAgentProgrammer:
             budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
             feedback_tools_enabled=True,
             session_kind="agent_driven",
-            submitted_plan_digest=final["plan_digest"] if final else "",
+            submitted_plan_digest=final["plan_digest"] if final else None,
             submitted_weights_by_layer={final["layer"]: final["weight"]} if final else None,
             holdout_access_denied_count=denied,
             stop_reason=stop_reason,
@@ -1667,6 +1668,9 @@ def run_prd_priority_experiments_suite(
     rep_gpt6 = gpt6_agent.run_reasoning_loop_repair_experiment(target_model)
     interop_ok = (
         rep_claude.tool_schemas_digest == rep_gpt6.tool_schemas_digest
+        # Two missing candidates agree about nothing, so each digest must exist before they are compared.
+        and bool(rep_claude.rust_candidate_digest)
+        and bool(rep_gpt6.rust_candidate_digest)
         and rep_claude.rust_candidate_digest == rep_gpt6.rust_candidate_digest
         and rep_claude.duplicate_proposals_blocked == 1
     )

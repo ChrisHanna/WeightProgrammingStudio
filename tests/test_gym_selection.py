@@ -18,7 +18,7 @@ GYM = pythia.ALGORITHMIC_THREE_SKILL_GYM
 
 
 def _trial(name: str, dev: float = 1.0, val: float = 1.0, retention: float | None = 1.0, *, rank: int = 6, parity: bool = True) -> pythia.GymBranchTrial:
-    return pythia.GymBranchTrial(name, "", 1, rank, 0, dev, val, 1.0, False, selection_retention_accuracy=retention, reload_parity_verified=parity)
+    return pythia.GymBranchTrial(name, "", 1, rank, 0, dev, val, 1.0, False, retention_guard_accuracy=retention, reload_parity_verified=parity)
 
 
 def test_the_best_qualifying_scores_win_whatever_the_position() -> None:
@@ -75,17 +75,38 @@ def test_every_branch_records_its_scores() -> None:
     report = pythia.run_pythia_gym_task_learning_study(pythia.build_mini_pythia_model(), target_strength=85.0)
     assert len(report.branches) == 3
     for trial in report.branches:
-        assert trial.selection_retention_accuracy is not None
-        assert trial.selection_retention_source == "synthesis_guard_prompts"
+        assert trial.retention_guard_accuracy is not None
+        assert trial.retention_guard_source == "fixture_synthesis_prompts"
         assert isinstance(trial.reload_parity_verified, bool)
 
 
-def test_unseen_prompts_stay_out_of_synthesis_and_the_evaluator_corpus() -> None:
-    unseen = set(GYM.selection_retention_prompts)
-    assert unseen.isdisjoint(GYM.retention_prompts)
+def test_guard_set_is_frozen_by_a_recorded_digest() -> None:
+    assert pythia.retention_guard_digest(GYM.selection_retention_guard_prompts) == pythia.SELECTION_RETENTION_GUARD_DIGEST
+    changed = (*GYM.selection_retention_guard_prompts[:-1], "Something else")
+    assert pythia.retention_guard_digest(changed) != pythia.SELECTION_RETENTION_GUARD_DIGEST
+
+
+def test_fixtures_are_never_promotable_even_if_every_measure_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    passing = promotion_gate._decision("passed", [], None)  # noqa: SLF001
+    monkeypatch.setattr(promotion_gate, "decide_promotion", lambda report: passing)
+    monkeypatch.setattr(ie, "evaluate_candidate", lambda *a, **k: {})
+    for model in (pythia.build_mini_pythia_model(), pythia.build_mini_qwen2_causal_lm()):
+        verdict = pythia.run_pythia_gym_task_learning_study(model, target_strength=85.0).promotion_verification
+        assert verdict["promote_eligible"] is False
+        assert verdict["status"] == "not_evaluated"
+
+
+def test_no_public_report_field_calls_a_candidate_qualified() -> None:
+    assert not {f for f in pythia.GymBranchTrial.__dataclass_fields__ if "qualified" in f and f != "disqualified_because"}
+
+
+def test_guards_stay_out_of_synthesis_the_evaluator_corpus_and_the_holdout() -> None:
+    guards = set(GYM.selection_retention_guard_prompts)
+    assert guards.isdisjoint(GYM.retention_prompts)
+    assert guards.isdisjoint(expression for expression, _ in GYM.holdout_rules)
     corpus = ie.load_corpus()
-    assert unseen.isdisjoint(prompt for pairs in corpus["tasks"].values() for prompt, _ in pairs)
-    assert not any(prompt in sentence for prompt in unseen for sentence in corpus["text"])
+    assert guards.isdisjoint(prompt for pairs in corpus["tasks"].values() for prompt, _ in pairs)
+    assert not any(prompt in sentence for prompt in guards for sentence in corpus["text"])
 
 
 @pytest.fixture

@@ -64,15 +64,15 @@ def test_pythia_gym_task_learning_branches_and_holdout_verification() -> None:
     real_model = PythiaModel.from_pretrained_dir(pythia_dir, model_name="EleutherAI/pythia-14m")
     real_rep = run_pythia_gym_task_learning_study(real_model)
 
-    # Branch 3 beats Branch 1 and Branch 2 on the prompts synthesis saw, but fails on unseen public prompts.
+    # Branch 3 beats Branch 1 and Branch 2 on the prompts synthesis saw, but fails its selection-time retention guards.
     b1, b2, b3 = real_rep.branches
     assert b3.gym_dev_accuracy == 1.0
     assert b3.gym_prefix_val_accuracy == 1.0
     assert b3.retention_accuracy == 1.0
     assert b3.gym_prefix_val_accuracy > b2.gym_prefix_val_accuracy
     assert b3.gym_dev_accuracy > b1.gym_dev_accuracy
-    assert b3.selection_retention_source == "unseen_public_prompts"
-    assert b3.selection_retention_accuracy < 0.98
+    assert b3.retention_guard_source == "selection_time_retention_guard"
+    assert b3.retention_guard_accuracy < 0.98
     assert real_rep.selected_branch_id is None
     assert real_rep.selected_proposal is None
     assert real_rep.holdout_after == ()

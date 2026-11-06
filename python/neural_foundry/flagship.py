@@ -877,8 +877,8 @@ def run_flagship_loop_repair_study_and_publish_bundle(
                 "seed": 17,
             },
             "seed": 17,
-            "pre_registration_digest": gym_rep.pre_registration.pre_registration_digest if gym_rep.pre_registration else "",
-            "exposure_ledger_digest": gym_rep.exposure_ledger.ledger_chain_digest if gym_rep.exposure_ledger else "",
+            "pre_registration_digest": gym_rep.pre_registration.pre_registration_digest if gym_rep.pre_registration else None,
+            "exposure_ledger_digest": gym_rep.exposure_ledger.ledger_chain_digest if gym_rep.exposure_ledger else None,
             "controls": {
                 # A repair restores clean behaviour, so these score agreement with the clean model.
                 "noop_accuracy": round(restoration_defective, 4),

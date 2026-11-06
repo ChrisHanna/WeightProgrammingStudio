@@ -216,6 +216,17 @@ def build_rounding_contract(
     )
 
 
+class ReloadParityError(ValueError):
+    """A transaction's reload parity isn't exactly True, so its candidate can't be used."""
+
+
+def require_reload_parity(receipt: Any) -> None:
+    """The one check for every Rust transaction. Only `True` passes: not a truthy value, and not None."""
+    value = getattr(receipt, "reload_parity_verified", None)
+    if value is not True:
+        raise ReloadParityError(f"The transaction's reload parity check failed: reload_parity_verified is {value!r}")
+
+
 @dataclass(frozen=True)
 class CompiledTransactionReceipt:
     """Verified result of compiling and executing a Weight IR operation in Rust."""

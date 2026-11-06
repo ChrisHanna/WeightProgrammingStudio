@@ -1066,6 +1066,8 @@ def _independent_promotion(
     except (independent_eval.IndependentEvalError, KeyError) as exc:
         # For example a fixture whose tokenizer can't express the corpus. Unmeasured is not promoted.
         decision = promotion_gate.not_evaluated(f"The independent evaluator could not run: {exc}")
+    if evidence_grade_for_model(model) == "fixture_synthetic":
+        decision = promotion_gate.not_evaluated("Fixtures prove the software path only, so they are never promotable.")
     decision["gym_self_check"] = dict(self_check)
     decision["dashboard"] = dict(self_check.get("dashboard", {}))
     return decision
@@ -1155,8 +1157,9 @@ def run_pythia_weight_programming_study(
         provenance_tag="pythia.whitened_nullspace_rank4.v1",
         engine_name="pythia.whitened_subspace",
     )
+    ir.require_reload_parity(tx)
     w_before_digest = tx.before_parameter_digest
-    reload_parity_ok = tx.reload_parity_verified
+    reload_parity_ok = True  # require_reload_parity above raised otherwise.
     w_edited = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -1352,9 +1355,9 @@ class GymBranchTrial:
     gym_prefix_val_accuracy: float
     retention_accuracy: float
     selected_by_gym_scientist: bool
-    # Measured on prompts synthesis never saw, unlike `retention_accuracy`.
-    selection_retention_accuracy: float | None = None
-    selection_retention_source: str | None = None
+    # Measured on the frozen selection-time guard prompts. This score chooses a branch, so it isn't independent evidence.
+    retention_guard_accuracy: float | None = None
+    retention_guard_source: str | None = None
     reload_parity_verified: bool | None = None
     disqualified_because: tuple[str, ...] = ()
     # How many unwanted directions synthesis was told to avoid: retention, then prefix nuisance.
@@ -1402,6 +1405,8 @@ class PythiaGymTaskReport:
     gym_proposals: tuple[GymProposalCandidate, ...] = ()
     edited_weight: torch.Tensor | None = None
     edit_steps: VerifiedMethodSteps | tuple[()] = ()
+    selection_retention_guard_digest: str | None = None
+    lora_weight: torch.Tensor | None = None
 
     @property
     def selected_proposal(self) -> ResolvedGymWeightProposal | None:
@@ -1451,6 +1456,7 @@ def _compile_and_apply_rust_low_rank_update(
         provenance_tag="pythia.contrastive_prefix_nullspace.v1",
         engine_name="pythia.contrastive_prefix_nullspace",
     )
+    ir.require_reload_parity(tx)
     w_edited = (
         torch.frombuffer(bytearray(tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -1484,8 +1490,9 @@ class ReusableTaskGym:
         "In computer science a list is",
         "Once upon a time there was",
     )
-    # Public, and never given to synthesis, so a branch's null-space can't have been fitted to them.
-    selection_retention_prompts: tuple[str, ...] = (
+    # Selection-time retention guards: public, kept from synthesis, and consulted by selection. Not a holdout.
+    # Post-selection evaluation uses other data, the independent evaluator's corpus and `holdout_rules`.
+    selection_retention_guard_prompts: tuple[str, ...] = (
         "She opened the door and",
         "The weather this morning was",
         "He picked up the phone and",
@@ -1501,6 +1508,7 @@ class ReusableTaskGym:
 
 # Selection limits repeat values the production policy in `evals.DEFAULT_POLICIES` already set:
 # `min_generalization_score` for learning the task and `min_retention_ratio` for keeping behaviour.
+SELECTION_RETENTION_GUARD_DIGEST = "sha256:b12f927c7ddc9e08511a1e0fbe94535d6fbc4adce015d15e3e4b548962c46f72"
 SELECTION_MIN_DEV_ACCURACY = 0.70
 SELECTION_MIN_VAL_ACCURACY = 0.70
 SELECTION_MIN_RETENTION = 0.98
@@ -1511,8 +1519,12 @@ GYM_BRANCH_METHODS = {
 }
 
 
+def retention_guard_digest(prompts: Sequence[str]) -> str:
+    return str(content_digest(canonicalize({"kind": "nf_selection_retention_guard_v1", "prompts": list(prompts)})))
+
+
 def select_gym_branch(trials: Sequence[GymBranchTrial]) -> tuple[tuple[GymBranchTrial, ...], GymBranchTrial | None]:
-    """Choose from development, validation and unseen public retention scores. A holdout isn't an input.
+    """Choose from development, validation and selection-time retention guard scores. A holdout isn't an input.
 
     Every branch below a limit, or whose reload parity failed, is out. The rest rank by validation,
     then retention, then development. A tie goes to the branch with more synthesis guards, since equal
@@ -1528,8 +1540,8 @@ def select_gym_branch(trials: Sequence[GymBranchTrial]) -> tuple[tuple[GymBranch
                 (f"development {trial.gym_dev_accuracy:.3f} below {SELECTION_MIN_DEV_ACCURACY}", trial.gym_dev_accuracy < SELECTION_MIN_DEV_ACCURACY),
                 (f"validation {trial.gym_prefix_val_accuracy:.3f} below {SELECTION_MIN_VAL_ACCURACY}", trial.gym_prefix_val_accuracy < SELECTION_MIN_VAL_ACCURACY),
                 (
-                    f"retention {trial.selection_retention_accuracy} below {SELECTION_MIN_RETENTION}",
-                    trial.selection_retention_accuracy is None or trial.selection_retention_accuracy < SELECTION_MIN_RETENTION,
+                    f"retention {trial.retention_guard_accuracy} below {SELECTION_MIN_RETENTION}",
+                    trial.retention_guard_accuracy is None or trial.retention_guard_accuracy < SELECTION_MIN_RETENTION,
                 ),
                 ("reload parity failed", trial.reload_parity_verified is not True),
             )
@@ -1541,7 +1553,7 @@ def select_gym_branch(trials: Sequence[GymBranchTrial]) -> tuple[tuple[GymBranch
         return tuple(judged), None
     best = min(
         qualified,
-        key=lambda t: (-t.gym_prefix_val_accuracy, -(t.selection_retention_accuracy or 0.0), -t.gym_dev_accuracy, -t.synthesis_guards, t.rank, t.branch_id),
+        key=lambda t: (-t.gym_prefix_val_accuracy, -(t.retention_guard_accuracy or 0.0), -t.gym_dev_accuracy, -t.synthesis_guards, t.rank, t.branch_id),
     )
     chosen = replace(best, selected_by_gym_scientist=True)
     return tuple(chosen if t.branch_id == best.branch_id else t for t in judged), chosen
@@ -1645,11 +1657,11 @@ def run_pythia_gym_task_learning_study(
     in_dim = int(model.config["intermediate_size"])
 
     ret_before = tuple(model.evaluate_prompt(p) for p in retention_prompts)
-    # A fixture's small vocabulary reduces the unseen prompts to fragments, so it uses the prompts
+    # A fixture's small vocabulary reduces the guard prompts to fragments, so it uses the prompts
     # synthesis saw. That proves the software path only, and each trial records the weaker source.
     is_fixture = evidence_grade_for_model(model) == "fixture_synthetic"
-    selection_source = "synthesis_guard_prompts" if is_fixture else "unseen_public_prompts"
-    selection_prompts = tuple(retention_prompts) if is_fixture else tuple(gym.selection_retention_prompts)
+    selection_source = "fixture_synthesis_prompts" if is_fixture else "selection_time_retention_guard"
+    selection_prompts = tuple(retention_prompts) if is_fixture else tuple(gym.selection_retention_guard_prompts)
     selection_before = tuple(model.evaluate_prompt(p).top1_token_id for p in selection_prompts)
 
     w_eff = model.effective_unembedding()
@@ -1721,8 +1733,8 @@ def run_pythia_gym_task_learning_study(
         gym_prefix_val_accuracy=b1_val,
         retention_accuracy=b1_ret,
         selected_by_gym_scientist=False,
-        selection_retention_accuracy=_selection_retention({early_layer: w_b1}),
-        selection_retention_source=selection_source,
+        retention_guard_accuracy=_selection_retention({early_layer: w_b1}),
+        retention_guard_source=selection_source,
         reload_parity_verified=reload_b1,
     )
 
@@ -1760,8 +1772,8 @@ def run_pythia_gym_task_learning_study(
         retention_accuracy=b2_ret,
         selected_by_gym_scientist=False,
         synthesis_guards=1,
-        selection_retention_accuracy=_selection_retention({final_layer: w_b2}),
-        selection_retention_source=selection_source,
+        retention_guard_accuracy=_selection_retention({final_layer: w_b2}),
+        retention_guard_source=selection_source,
         reload_parity_verified=reload_b2,
     )
 
@@ -1821,8 +1833,8 @@ def run_pythia_gym_task_learning_study(
         retention_accuracy=b3_ret,
         selected_by_gym_scientist=False,
         synthesis_guards=2,
-        selection_retention_accuracy=_selection_retention({final_layer: w_b3_rust}),
-        selection_retention_source=selection_source,
+        retention_guard_accuracy=_selection_retention({final_layer: w_b3_rust}),
+        retention_guard_source=selection_source,
         reload_parity_verified=reload_b3,
     )
 
@@ -1878,6 +1890,7 @@ def run_pythia_gym_task_learning_study(
         smoke_probe=k_mean[:, 0],
         provenance_tag="pythia.control_noop.v1",
     )
+    ir.require_reload_parity(noop_tx)
     w_noop = (
         torch.frombuffer(bytearray(noop_tx.edited_bytes), dtype=torch.float64)
         .reshape(out_dim, in_dim)
@@ -2000,6 +2013,8 @@ def run_pythia_gym_task_learning_study(
             ),
             pre_registration=pre_reg,
             gym_proposals=gym_proposals,
+            selection_retention_guard_digest=retention_guard_digest(selection_prompts),
+            lora_weight=w_lora,
         )
 
     # --- Final Sealed Holdout Evaluation (strictly after synthesis_freeze_digest!) ---
@@ -2215,6 +2230,8 @@ def run_pythia_gym_task_learning_study(
         exposure_ledger=exposure_ledger,
         pre_registration=pre_reg,
         gym_proposals=gym_proposals,
+        selection_retention_guard_digest=retention_guard_digest(selection_prompts),
+        lora_weight=w_lora,
     )
 
 

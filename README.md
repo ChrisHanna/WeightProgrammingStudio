@@ -497,7 +497,7 @@ Status: **experimental, and the real-model edits are harmful.** These rows measu
 
 **Independent evaluator result on Pythia-14M, the same edit:** top-1 agreement with the base model is 0.8% on free text and 0% on all six retention tasks. KL divergence is 12.8 nats per token, and perplexity rises from 138 to about 96 million ([recorded run](docs/evidence/milestone1/)).
 
-**What happens now:** promotion reads only that evaluator (`neural_foundry/promotion_gate.py`), and it rejects this edit. The Gym selects from development, validation and retention scores on public prompts synthesis didn't see, and on Pythia-14M it selects no branch: branch 3 keeps 0 of 10 of those answers. So no real-model row above is a current selection or a qualification. Pythia-31M hasn't been run through either step. Fixtures can't take the evaluator's corpus, so they are never promoted.
+**What happens now:** promotion reads only that evaluator (`neural_foundry/promotion_gate.py`), and it rejects this edit. The Gym selects from development and validation scores and 10 frozen selection-time retention guard prompts, and on Pythia-14M it selects no branch: branch 3 keeps 0 of 10 of those answers. The guards are public and selection reads them, so they aren't a holdout or independent evidence. So no real-model row above is a current selection or a qualification. Pythia-31M hasn't been run through either step. Fixtures can't take the evaluator's corpus, so they are never promoted.
 
 ## Limitations
 
