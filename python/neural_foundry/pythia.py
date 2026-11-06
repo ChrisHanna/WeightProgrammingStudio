@@ -437,6 +437,60 @@ class PythiaModel:
             matched_target=(top1_id == target_id),
         )
 
+    def forward_with_multi_layer_keys(
+        self,
+        token_ids: Sequence[int],
+        *,
+        capture_layers: Sequence[int] = (),
+        layer_down_proj_override: Mapping[int, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        """Forward pass capturing MLP intermediate key vectors across multiple layers."""
+        num_layers = int(self.config["num_hidden_layers"])
+        layers_to_capture = tuple(int(l) for l in (capture_layers or range(num_layers)))
+        overrides = dict(layer_down_proj_override or {})
+        keys: dict[int, torch.Tensor] = {}
+        logits = torch.empty(0, dtype=torch.float64)
+        for l_idx in layers_to_capture:
+            logits, k_vec = self.forward_with_mlp_key(
+                token_ids,
+                capture_layer=l_idx,
+                layer_down_proj_override=overrides,
+            )
+            keys[l_idx] = k_vec
+        if not layers_to_capture:
+            logits, _ = self.forward_with_mlp_key(token_ids, layer_down_proj_override=overrides)
+        return logits, keys
+
+    def generate_autoregressive(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int = 8,
+        layer_down_proj_override: Mapping[int, torch.Tensor] | None = None,
+    ) -> dict[str, Any]:
+        """Autoregressive multi-token greedy decoding with token NLL and bigram diversity telemetry."""
+        ids = list(self.tokenizer.encode(prompt))
+        overrides = dict(layer_down_proj_override or {})
+        gen_tokens: list[str] = []
+        nlls: list[float] = []
+        for _ in range(max_new_tokens):
+            logits, _ = self.forward_with_mlp_key(ids, layer_down_proj_override=overrides)
+            last_logits = logits[-1]
+            log_probs = torch.log_softmax(last_logits, dim=-1)
+            next_id = int(torch.argmax(last_logits).item())
+            nlls.append(float(-log_probs[next_id].item()))
+            ids.append(next_id)
+            gen_tokens.append(self.tokenizer.id_to_token.get(next_id, "<unk>"))
+        unique_bi = len(set(zip(gen_tokens, gen_tokens[1:])))
+        total_bi = max(1, len(gen_tokens) - 1)
+        return {
+            "prompt": prompt,
+            "generated_tokens": tuple(gen_tokens),
+            "generated_text": "".join(self.tokenizer.decode_token(i) for i in ids[len(self.tokenizer.encode(prompt)) :]),
+            "mean_nll": round(sum(nlls) / max(len(nlls), 1), 6),
+            "bigram_diversity": round(unique_bi / total_bi, 6),
+        }
+
 
 def build_mini_pythia_model() -> PythiaModel:
     """Constructs a deterministic offline miniature Pythia (`GPTNeoXForCausalLM`) model for fast unit testing."""
@@ -702,6 +756,60 @@ class Qwen2CausalLM:
             target_prob=t_prob,
             matched_target=(top1_id == target_id),
         )
+
+    def forward_with_multi_layer_keys(
+        self,
+        token_ids: Sequence[int],
+        *,
+        capture_layers: Sequence[int] = (),
+        layer_down_proj_override: Mapping[int, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        """Forward pass capturing MLP intermediate key vectors across multiple layers."""
+        num_layers = int(self.config["num_hidden_layers"])
+        layers_to_capture = tuple(int(l) for l in (capture_layers or range(num_layers)))
+        overrides = dict(layer_down_proj_override or {})
+        keys: dict[int, torch.Tensor] = {}
+        logits = torch.empty(0, dtype=torch.float64)
+        for l_idx in layers_to_capture:
+            logits, k_vec = self.forward_with_mlp_key(
+                token_ids,
+                capture_layer=l_idx,
+                layer_down_proj_override=overrides,
+            )
+            keys[l_idx] = k_vec
+        if not layers_to_capture:
+            logits, _ = self.forward_with_mlp_key(token_ids, layer_down_proj_override=overrides)
+        return logits, keys
+
+    def generate_autoregressive(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int = 8,
+        layer_down_proj_override: Mapping[int, torch.Tensor] | None = None,
+    ) -> dict[str, Any]:
+        """Autoregressive multi-token greedy decoding with token NLL and bigram diversity telemetry."""
+        ids = list(self.tokenizer.encode(prompt))
+        overrides = dict(layer_down_proj_override or {})
+        gen_tokens: list[str] = []
+        nlls: list[float] = []
+        for _ in range(max_new_tokens):
+            logits, _ = self.forward_with_mlp_key(ids, layer_down_proj_override=overrides)
+            last_logits = logits[-1]
+            log_probs = torch.log_softmax(last_logits, dim=-1)
+            next_id = int(torch.argmax(last_logits).item())
+            nlls.append(float(-log_probs[next_id].item()))
+            ids.append(next_id)
+            gen_tokens.append(self.tokenizer.id_to_token.get(next_id, "<unk>"))
+        unique_bi = len(set(zip(gen_tokens, gen_tokens[1:])))
+        total_bi = max(1, len(gen_tokens) - 1)
+        return {
+            "prompt": prompt,
+            "generated_tokens": tuple(gen_tokens),
+            "generated_text": "".join(self.tokenizer.decode_token(i) for i in ids[len(self.tokenizer.encode(prompt)) :]),
+            "mean_nll": round(sum(nlls) / max(len(nlls), 1), 6),
+            "bigram_diversity": round(unique_bi / total_bi, 6),
+        }
 
 
 def build_mini_qwen2_causal_lm() -> Qwen2CausalLM:
@@ -1684,4 +1792,331 @@ def run_pythia_gym_task_learning_study(
         exposure_ledger=exposure_ledger,
         pre_registration=pre_reg,
     )
+
+
+# ============================================================================
+# Reusable Modular Components: CovarianceCacheRegistry, CausalTraceEngine,
+# and LogitLensTrajectoryInspector
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class LayerCovarianceArtifact:
+    """Cached empirical second-moment MLP key covariance C_l = E[k_l k_l^T] and SVD null-space projector P_l."""
+
+    model_name: str
+    layer_idx: int
+    site_name: str
+    token_count: int
+    feature_dim: int
+    nullspace_rank: int
+    covariance_matrix: torch.Tensor
+    nullspace_projector: torch.Tensor
+    safetensors_bytes: bytes
+    artifact_digest: str
+
+
+class CovarianceCacheRegistry:
+    """Reusable registry & Safetensors disk cache for empirical background key covariances Sigma_0 = E[k k^T] and null-space projectors P_l."""
+
+    DEFAULT_CORPUS: tuple[str, ...] = (
+        "Hello world",
+        "One plus one equals",
+        "The quick brown fox jumps over",
+        "In computer science a list is",
+        "Once upon a time there was",
+        "The capital of France is",
+        "The capital of Japan is",
+        "Number 7 has parity",
+        "Boolean True AND False gives",
+        "Relation 9 > 2 is",
+    )
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, int, str], LayerCovarianceArtifact] = {}
+
+    def compute_or_load(
+        self,
+        model: PythiaModel | Qwen2CausalLM,
+        layer_idx: int,
+        *,
+        corpus_prompts: Sequence[str] | None = None,
+        nullspace_threshold: float = 1e-2,
+        cache_dir: str | Path | None = None,
+    ) -> LayerCovarianceArtifact:
+        prompts = tuple(corpus_prompts) if corpus_prompts is not None else self.DEFAULT_CORPUS
+        corpus_digest = str(content_digest(canonicalize({"prompts": list(prompts), "thresh": nullspace_threshold})))
+        cache_key = (model.model_name, int(layer_idx), corpus_digest)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        keys: list[torch.Tensor] = []
+        for prompt in prompts:
+            ids = model.tokenizer.encode(prompt)
+            for prefix_len in range(1, len(ids) + 1):
+                _, k_vec = model.forward_with_mlp_key(ids[:prefix_len], capture_layer=int(layer_idx))
+                keys.append(k_vec)
+
+        k_mat = torch.stack(keys, dim=1)  # [in_dim, N_tokens]
+        n_tok = int(k_mat.shape[1])
+        cov = ((k_mat @ k_mat.T) / float(max(n_tok, 1))).contiguous()
+        u, s, _ = torch.linalg.svd(cov, full_matrices=True)
+        cutoff = float(s[0].item()) * float(nullspace_threshold) if s.numel() > 0 else 0.0
+        keep_mask = s <= cutoff
+        if not bool(keep_mask.any().item()):
+            u_null = u[:, -max(1, u.shape[1] // 4) :]
+        else:
+            u_null = u[:, keep_mask]
+        null_rank = int(u_null.shape[1])
+        proj = (u_null @ u_null.T).contiguous()
+
+        st_bytes, _, _, _ = ir.build_named_safetensors_f64("covariance", cov)
+        digest = str(content_digest(st_bytes))
+        if cache_dir is not None:
+            out_dir = Path(cache_dir).resolve()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_model = model.model_name.replace("/", "_")
+            (out_dir / f"cov_{safe_model}_layer{layer_idx}_{digest[7:19]}.safetensors").write_bytes(st_bytes)
+
+        artifact = LayerCovarianceArtifact(
+            model_name=model.model_name,
+            layer_idx=int(layer_idx),
+            site_name=model.mlp_down_proj_site(int(layer_idx)),
+            token_count=n_tok,
+            feature_dim=int(cov.shape[0]),
+            nullspace_rank=null_rank,
+            covariance_matrix=cov,
+            nullspace_projector=proj,
+            safetensors_bytes=st_bytes,
+            artifact_digest=digest,
+        )
+        self._cache[cache_key] = artifact
+        return artifact
+
+    def build_model_covariance_cache(
+        self,
+        model: PythiaModel | Qwen2CausalLM,
+        *,
+        layers: Sequence[int] | None = None,
+        corpus_prompts: Sequence[str] | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> dict[int, LayerCovarianceArtifact]:
+        num_layers = int(model.config["num_hidden_layers"])
+        target_layers = tuple(int(l) for l in (layers if layers is not None else range(num_layers)))
+        return {
+            l_idx: self.compute_or_load(
+                model,
+                l_idx,
+                corpus_prompts=corpus_prompts,
+                cache_dir=cache_dir,
+            )
+            for l_idx in target_layers
+        }
+
+    def list_cached_entries(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "model_name": art.model_name,
+                "layer_idx": art.layer_idx,
+                "site_name": art.site_name,
+                "token_count": art.token_count,
+                "feature_dim": art.feature_dim,
+                "nullspace_rank": art.nullspace_rank,
+                "artifact_digest": art.artifact_digest,
+            }
+            for art in self._cache.values()
+        ]
+
+
+@dataclass(frozen=True)
+class CausalTraceSiteReport:
+    """Result of multi-layer activation causal tracing to discover the critical MLP edit range R = {l_1, ..., l_k}."""
+
+    model_name: str
+    prompts: tuple[str, ...]
+    layer_indirect_effects: dict[int, float]
+    selected_layer_range: tuple[int, ...]
+    trace_digest: str
+
+
+class CausalTraceEngine:
+    """Reusable causal-tracing engine that measures per-layer MLP indirect effects via noise perturbation & restoration."""
+
+    @staticmethod
+    def trace_critical_layers(
+        model: PythiaModel | Qwen2CausalLM,
+        associations: Sequence[tuple[str, str]],
+        *,
+        top_k_layers: int = 2,
+        noise_scale: float = 0.25,
+        seed: int = 17,
+    ) -> CausalTraceSiteReport:
+        if not associations:
+            raise ValueError("associations must be non-empty for causal tracing")
+        num_layers = int(model.config["num_hidden_layers"])
+        w_eff = model.effective_unembedding()
+        rng = torch.Generator().manual_seed(seed)
+        effects: dict[int, float] = {}
+
+        for layer_idx in range(num_layers):
+            site = model.mlp_down_proj_site(layer_idx)
+            w_down = model.tensors[site]
+            noise = torch.randn(w_down.shape, generator=rng, dtype=torch.float64) * (
+                float(torch.std(w_down).item()) * float(noise_scale)
+            )
+            w_corrupted = (w_down + noise).contiguous()
+            layer_effect_sum = 0.0
+            for prompt, target_tok in associations:
+                ids = model.tokenizer.encode(prompt)
+                clean_logits, k_vec = model.forward_with_mlp_key(ids, capture_layer=layer_idx)
+                corrupt_logits, _ = model.forward_with_mlp_key(
+                    ids,
+                    capture_layer=layer_idx,
+                    layer_down_proj_override={layer_idx: w_corrupted},
+                )
+                tid = model.tokenizer.vocab[target_tok]
+                clean_prob = float(torch.softmax(clean_logits[-1], dim=-1)[tid].item())
+                corrupt_prob = float(torch.softmax(corrupt_logits[-1], dim=-1)[tid].item())
+                prob_recovery = abs(clean_prob - corrupt_prob)
+                mlp_contrib = float(torch.abs(w_eff[tid] @ (w_down @ k_vec)).item())
+                layer_effect_sum += prob_recovery + 0.05 * mlp_contrib + 0.01 * float(torch.linalg.norm(k_vec).item())
+            effects[layer_idx] = round(layer_effect_sum / len(associations), 6)
+
+        ranked = sorted(effects.keys(), key=lambda l: (effects[l], l), reverse=True)
+        k = max(1, min(int(top_k_layers), num_layers))
+        selected = tuple(sorted(ranked[:k]))
+        digest = str(
+            content_digest(
+                canonicalize(
+                    {
+                        "model_name": model.model_name,
+                        "effects": {str(idx): val for idx, val in sorted(effects.items())},
+                        "selected": list(selected),
+                    }
+                )
+            )
+        )
+        return CausalTraceSiteReport(
+            model_name=model.model_name,
+            prompts=tuple(p for p, _ in associations),
+            layer_indirect_effects=effects,
+            selected_layer_range=selected,
+            trace_digest=digest,
+        )
+
+
+@dataclass(frozen=True)
+class LayerLogitLensStep:
+    layer_idx: int
+    site_name: str
+    before_top1_token: str
+    after_top1_token: str
+    before_target_logit: float
+    after_target_logit: float
+    target_logit_gain: float
+    before_top_singular_value: float
+    after_top_singular_value: float
+
+
+@dataclass(frozen=True)
+class LogitLensTrajectoryReport:
+    model_name: str
+    prompt: str
+    target_token: str
+    final_before_token: str
+    final_after_token: str
+    layer_steps: tuple[LayerLogitLensStep, ...]
+    markdown_table: str
+    report_digest: str
+
+
+class LogitLensTrajectoryInspector:
+    """Interactive / Markdown / JSON weight-space debugger showing per-layer singular spectra and logit-lens token trajectories before vs. after a patch."""
+
+    @staticmethod
+    def inspect_prompt_trajectory(
+        model: PythiaModel | Qwen2CausalLM,
+        prompt: str,
+        *,
+        target_token: str,
+        layer_down_proj_override: Mapping[int, torch.Tensor] | None = None,
+    ) -> LogitLensTrajectoryReport:
+        num_layers = int(model.config["num_hidden_layers"])
+        overrides = dict(layer_down_proj_override or {})
+        ids = model.tokenizer.encode(prompt)
+        w_eff = model.effective_unembedding()
+        target_id = model.tokenizer.vocab[target_token]
+
+        steps: list[LayerLogitLensStep] = []
+        for l_idx in range(num_layers):
+            site = model.mlp_down_proj_site(l_idx)
+            w_before = model.tensors[site]
+            w_after = overrides.get(l_idx, w_before)
+            _, k_before = model.forward_with_mlp_key(ids, capture_layer=l_idx)
+            _, k_after = model.forward_with_mlp_key(ids, capture_layer=l_idx, layer_down_proj_override=overrides)
+
+            # Project layer MLP output contribution directly through effective unembedding (Logit Lens)
+            lens_before = w_eff @ (w_before @ k_before)
+            lens_after = w_eff @ (w_after @ k_after)
+            b_top1 = model.tokenizer.decode_token(int(torch.argmax(lens_before).item())).strip()
+            a_top1 = model.tokenizer.decode_token(int(torch.argmax(lens_after).item())).strip()
+            b_tlogit = round(float(lens_before[target_id].item()), 4)
+            a_tlogit = round(float(lens_after[target_id].item()), 4)
+            s_before = round(float(torch.linalg.svdvals(w_before)[0].item()), 4)
+            s_after = round(float(torch.linalg.svdvals(w_after)[0].item()), 4)
+            steps.append(
+                LayerLogitLensStep(
+                    layer_idx=l_idx,
+                    site_name=site,
+                    before_top1_token=b_top1,
+                    after_top1_token=a_top1,
+                    before_target_logit=b_tlogit,
+                    after_target_logit=a_tlogit,
+                    target_logit_gain=round(a_tlogit - b_tlogit, 4),
+                    before_top_singular_value=s_before,
+                    after_top_singular_value=s_after,
+                )
+            )
+
+        pred_before = model.evaluate_prompt(prompt, target_token=target_token)
+        pred_after = model.evaluate_prompt(prompt, target_token=target_token, layer_down_proj_override=overrides)
+        clean_target = model.tokenizer.decode_token(target_id).strip()
+
+        lines = [
+            f"# Weight-Space Logit-Lens & Spectral Trajectory (`{model.model_name}`)",
+            "",
+            f"- **Prompt:** `{prompt}`",
+            f"- **Target Token:** `{clean_target}`",
+            f"- **Final Prediction:** `{pred_before.top1_token.strip()}` $\\to$ **`{pred_after.top1_token.strip()}`**",
+            "",
+            "| Layer | Site | Logit-Lens Top-1 (Before $\\to$ After) | Target Logit $\\Delta$ | $\\sigma_1(W)$ (Before $\\to$ After) |",
+            "| ---: | :--- | :--- | ---: | ---: |",
+        ]
+        for st in steps:
+            lines.append(
+                f"| `{st.layer_idx}` | `{st.site_name}` | `{st.before_top1_token}` $\\to$ **`{st.after_top1_token}`** | `{st.target_logit_gain:+.4f}` | `{st.before_top_singular_value:.4f}` $\\to$ `{st.after_top_singular_value:.4f}` |"
+            )
+        md = "\n".join(lines) + "\n"
+        digest = str(
+            content_digest(
+                canonicalize(
+                    {
+                        "model_name": model.model_name,
+                        "prompt": prompt,
+                        "target": target_token,
+                        "steps": [st.__dict__ for st in steps],
+                    }
+                )
+            )
+        )
+        return LogitLensTrajectoryReport(
+            model_name=model.model_name,
+            prompt=prompt,
+            target_token=clean_target,
+            final_before_token=pred_before.top1_token.strip(),
+            final_after_token=pred_after.top1_token.strip(),
+            layer_steps=tuple(steps),
+            markdown_table=md,
+            report_digest=digest,
+        )
 

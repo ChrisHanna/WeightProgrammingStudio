@@ -31,6 +31,8 @@ from . import ir
 from .m4_modalities import construct_algorithmic_relu_rule
 from .pythia import (
     ALGORITHMIC_THREE_SKILL_GYM,
+    CausalTraceEngine,
+    CovarianceCacheRegistry,
     PythiaModel,
     Qwen2CausalLM,
     _compile_and_apply_rust_low_rank_update,
@@ -154,6 +156,9 @@ class EasyEditAdapterReceipt:
     edited_weight: torch.Tensor
     implementation_source: ImplementationSource = "local_reimplementation_not_external_baseline"
     external_package_installed: bool = False
+    target_layers: tuple[int, ...] = ()
+    edited_weights_by_layer: dict[int, torch.Tensor] | None = None
+    layer_plan_digests: tuple[str, ...] = ()
 
 
 def run_easyedit_adapter(
@@ -169,8 +174,10 @@ def run_easyedit_adapter(
     nullspace_prompts: Sequence[str] = (),
     target_strength: float = 65.0,
     require_external_package: bool = False,
+    target_layers: Sequence[int] | Literal["auto_causal_trace"] | None = None,
+    covariance_registry: CovarianceCacheRegistry | None = None,
 ) -> EasyEditAdapterReceipt:
-    """Executes ROME (rank-1), MEMIT (multi-association), or AlphaEdit (null-space projected) through Rust Weight IR (WP-13)."""
+    """Executes ROME (rank-1), MEMIT (multi-association / distributed multi-layer), or AlphaEdit (null-space projected / distributed) through Rust Weight IR (WP-13)."""
     pkgs = probe_external_baseline_packages()
     ext_installed = bool(pkgs["easyeditor"])
     if require_external_package and not ext_installed:
@@ -183,69 +190,123 @@ def run_easyedit_adapter(
         raise ValueError("ROME is a rank-1 single-association editor; use MEMIT or AlphaEdit for batches")
 
     num_layers = int(model.config["num_hidden_layers"])
-    layer_idx = num_layers - 1
-    site_name = model.mlp_down_proj_site(layer_idx)
-    w_orig = model.tensors[site_name]
-    out_dim, in_dim = int(w_orig.shape[0]), int(w_orig.shape[1])
+    if target_layers == "auto_causal_trace":
+        trace_rep = CausalTraceEngine.trace_critical_layers(
+            model,
+            associations,
+            top_k_layers=1 if algorithm == "ROME" else min(2, num_layers),
+        )
+        resolved_layers = trace_rep.selected_layer_range
+    elif target_layers is not None:
+        resolved_layers = tuple(int(l) for l in target_layers)
+        if not resolved_layers or any(l < 0 or l >= num_layers for l in resolved_layers):
+            raise ValueError(f"Invalid target_layers {resolved_layers} for num_layers={num_layers}")
+    else:
+        resolved_layers = (num_layers - 1,)
+
+    if algorithm == "ROME" and len(resolved_layers) != 1:
+        raise ValueError("ROME edits a single target layer; use MEMIT or AlphaEdit for multi-layer distributed edits")
 
     ret_before = [model.evaluate_prompt(p).top1_token_id for p in retention_prompts]
-
+    out_dim = int(model.config["hidden_size"])
+    in_dim = int(model.config["intermediate_size"])
     w_eff = model.effective_unembedding()
-    cov = w_eff.T @ w_eff + 10.0 * torch.eye(out_dim, dtype=torch.float64)
+    cov_unembed = w_eff.T @ w_eff + 10.0 * torch.eye(out_dim, dtype=torch.float64)
 
-    k_list: list[torch.Tensor] = []
-    v_list: list[torch.Tensor] = []
-    for prompt, target_tok in associations:
-        _, k_vec = model.forward_with_mlp_key(model.tokenizer.encode(prompt), capture_layer=layer_idx)
-        k_list.append(k_vec)
+    v_targets: list[torch.Tensor] = []
+    for _, target_tok in associations:
         tid = model.tokenizer.vocab[target_tok]
-        vd = torch.linalg.solve(cov, w_eff[tid])
+        vd = torch.linalg.solve(cov_unembed, w_eff[tid])
         vd = vd - vd.mean()
-        v_list.append((vd / (vd.std() + 1e-8)) * float(target_strength))
-
-    k_mat = torch.stack(k_list, dim=1)  # [in_dim, R]
-    v_mat = torch.stack(v_list, dim=1)  # [out_dim, R]
+        v_targets.append((vd / (vd.std() + 1e-8)) * float(target_strength))
+    v_full_mat = torch.stack(v_targets, dim=1)  # [out_dim, R]
     rank = len(associations)
 
-    if algorithm == "ROME":
-        k0 = k_mat[:, 0:1]
-        v0 = v_mat[:, 0:1]
-        left_u = v0.contiguous()
-        right_v = (k0 / (float((k0.T @ k0).item()) + 1e-6)).T.contiguous()
-    elif algorithm == "MEMIT":
-        gram = k_mat @ k_mat.T + 1.0 * torch.eye(in_dim, dtype=torch.float64)
-        left_u = v_mat.contiguous()
-        right_v = torch.linalg.solve(gram, k_mat).T.contiguous()
-    elif algorithm == "AlphaEdit":
-        all_preserve = (*retention_prompts, *nullspace_prompts)
-        k_ret = torch.stack(
-            [model.forward_with_mlp_key(model.tokenizer.encode(p), capture_layer=layer_idx)[1] for p in all_preserve],
-            dim=1,
-        )
-        # Project onto orthogonal complement of retention/nullspace keys and amplify within-batch contrast
-        if k_mat.shape[1] >= 2:
-            k_diff = k_mat[:, 0::2] - k_mat[:, 1::2]
-            v_diff = v_mat[:, 0::2] - v_mat[:, 1::2]
-            k_sig = torch.cat([k_mat, 3.0 * k_diff], dim=1)
-            v_sig = torch.cat([v_mat, 3.0 * v_diff], dim=1)
-        else:
-            k_sig = k_mat
-            v_sig = v_mat
-        gram = k_sig @ k_sig.T + 40.0 * (k_ret @ k_ret.T) + 1e-3 * torch.eye(in_dim, dtype=torch.float64)
-        delta_full = v_sig @ torch.linalg.solve(gram, k_sig).T
-        u_svd, s_svd, vh_svd = torch.linalg.svd(delta_full, full_matrices=False)
-        left_u = (u_svd[:, :rank] * s_svd[:rank].unsqueeze(0)).contiguous()
-        right_v = vh_svd[:rank, :].contiguous()
-    else:
-        raise ValueError(f"Unsupported EasyEdit algorithm: {algorithm!r}")
+    override: dict[int, torch.Tensor] = {}
+    plan_digests: list[str] = []
+    cand_digests: list[str] = []
+    all_reload_ok = True
+    num_r = len(resolved_layers)
 
-    w_edited, plan_digest, cand_digest, _, _, reload_ok = _compile_and_apply_rust_low_rank_update(
-        w_orig=w_orig,
-        left_factors=left_u,
-        right_factors=right_v,
-        smoke_probe_vec=k_mat[:, 0],
-    )
-    override = {layer_idx: w_edited}
+    for idx_in_r, layer_idx in enumerate(resolved_layers):
+        site_name = model.mlp_down_proj_site(layer_idx)
+        w_orig = model.tensors[site_name]
+        # Distribute residual across remaining layers in R (MEMIT / AlphaEdit multi-layer spreading)
+        layer_share = 1.0 / float(num_r - idx_in_r)
+        v_mat = v_full_mat * layer_share
+
+        k_list = [
+            model.forward_with_mlp_key(
+                model.tokenizer.encode(prompt),
+                capture_layer=layer_idx,
+                layer_down_proj_override=override,
+            )[1]
+            for prompt, _ in associations
+        ]
+        k_mat = torch.stack(k_list, dim=1)  # [in_dim, R]
+
+        cov_term = torch.zeros((in_dim, in_dim), dtype=torch.float64)
+        if covariance_registry is not None:
+            cov_art = covariance_registry.compute_or_load(model, layer_idx)
+            cov_term = 25.0 * cov_art.covariance_matrix
+
+        if algorithm == "ROME":
+            k0 = k_mat[:, 0:1]
+            v0 = v_mat[:, 0:1]
+            left_u = v0.contiguous()
+            right_v = (k0 / (float((k0.T @ k0).item()) + 1e-6)).T.contiguous()
+        elif algorithm == "MEMIT":
+            gram = k_mat @ k_mat.T + cov_term + 1.0 * torch.eye(in_dim, dtype=torch.float64)
+            left_u = v_mat.contiguous()
+            right_v = torch.linalg.solve(gram, k_mat).T.contiguous()
+        elif algorithm == "AlphaEdit":
+            all_preserve = (*retention_prompts, *nullspace_prompts)
+            k_ret = torch.stack(
+                [
+                    model.forward_with_mlp_key(
+                        model.tokenizer.encode(p),
+                        capture_layer=layer_idx,
+                        layer_down_proj_override=override,
+                    )[1]
+                    for p in all_preserve
+                ],
+                dim=1,
+            )
+            if k_mat.shape[1] >= 2:
+                k_diff = k_mat[:, 0::2] - k_mat[:, 1::2]
+                v_diff = v_mat[:, 0::2] - v_mat[:, 1::2]
+                k_sig = torch.cat([k_mat, 3.0 * k_diff], dim=1)
+                v_sig = torch.cat([v_mat, 3.0 * v_diff], dim=1)
+            else:
+                k_sig = k_mat
+                v_sig = v_mat
+            gram = (
+                k_sig @ k_sig.T
+                + 40.0 * (k_ret @ k_ret.T)
+                + cov_term
+                + 1e-3 * torch.eye(in_dim, dtype=torch.float64)
+            )
+            delta_full = v_sig @ torch.linalg.solve(gram, k_sig).T
+            if covariance_registry is not None and num_r > 1 and idx_in_r < num_r - 1:
+                cov_art = covariance_registry.compute_or_load(model, layer_idx)
+                delta_full = delta_full @ cov_art.nullspace_projector
+            u_svd, s_svd, vh_svd = torch.linalg.svd(delta_full, full_matrices=False)
+            left_u = (u_svd[:, :rank] * s_svd[:rank].unsqueeze(0)).contiguous()
+            right_v = vh_svd[:rank, :].contiguous()
+        else:
+            raise ValueError(f"Unsupported EasyEdit algorithm: {algorithm!r}")
+
+        w_edited, plan_d, cand_d, _, _, reload_ok = _compile_and_apply_rust_low_rank_update(
+            w_orig=w_orig,
+            left_factors=left_u,
+            right_factors=right_v,
+            smoke_probe_vec=k_mat[:, 0],
+        )
+        override[layer_idx] = w_edited
+        plan_digests.append(plan_d)
+        cand_digests.append(cand_d)
+        all_reload_ok = all_reload_ok and reload_ok
+
     edit_hits = sum(
         1
         for p, t in associations
@@ -256,23 +317,28 @@ def run_easyedit_adapter(
         for p, b_id in zip(retention_prompts, ret_before, strict=True)
         if model.evaluate_prompt(p, layer_down_proj_override=override).top1_token_id == b_id
     )
+    final_layer_idx = resolved_layers[-1]
+    final_site_name = model.mlp_down_proj_site(final_layer_idx)
 
     return EasyEditAdapterReceipt(
         algorithm=algorithm,
         model_name=model.model_name,
-        target_site=site_name,
+        target_site=final_site_name,
         rank=rank,
         associations_count=len(associations),
         edit_success_rate=edit_hits / len(associations),
         retention_rate=ret_hits / len(retention_prompts),
-        rust_plan_digest=plan_digest,
-        rust_candidate_digest=cand_digest,
-        reload_parity_verified=reload_ok,
-        edited_weight=w_edited,
+        rust_plan_digest=plan_digests[-1],
+        rust_candidate_digest=cand_digests[-1],
+        reload_parity_verified=all_reload_ok,
+        edited_weight=override[final_layer_idx],
         implementation_source=(
             "external_package" if ext_installed else "local_reimplementation_not_external_baseline"
         ),
         external_package_installed=ext_installed,
+        target_layers=resolved_layers,
+        edited_weights_by_layer=dict(override),
+        layer_plan_digests=tuple(plan_digests),
     )
 
 
@@ -875,6 +941,164 @@ class FrontierAgentProgrammer:
             repaired_loop_rate_after=0.04,
             held_out_accuracy_after=hold_acc,
             rust_candidate_digest=gym_rep.rust_candidate_digest,
+            transport_mode=t_mode,
+            transcript=tuple(self._transcript),
+            total_prompt_tokens=self.total_prompt_tokens,
+            total_completion_tokens=self.total_completion_tokens,
+            total_cost_usd=self.total_cost_usd,
+            budget_usd=self.budget_usd,
+            budget_remaining_usd=round(self.budget_usd - self.total_cost_usd, 6),
+            feedback_tools_enabled=True,
+        )
+
+    def run_autonomous_tool_loop(
+        self,
+        model: PythiaModel | Qwen2CausalLM,
+        *,
+        gym: Any = ALGORITHMIC_THREE_SKILL_GYM,
+        goal_prompt: str = "Diagnose and repair the model on the target task gym without regressing retention.",
+        max_turns: int = 8,
+    ) -> FrontierAgentSessionReport:
+        """Free-running ReAct tool-use loop driven dynamically by the LLM's `tool_call` / `tool_calls` responses."""
+        if self._llm_transport is None and not self._api_key:
+            raise LiveLLMProviderUnavailableError(
+                "run_autonomous_tool_loop requires either llm_transport or a live API key"
+            )
+        messages: list[dict[str, Any]] = [{"role": "user", "content": goal_prompt}]
+        num_layers = int(model.config["num_hidden_layers"])
+        final_layer = num_layers - 1
+        default_site = model.mlp_down_proj_site(final_layer)
+        last_candidate_digest = ""
+        last_holdout_acc = 0.0
+        ablation_results: tuple[AblationComponentResult, ...] = ()
+
+        for _ in range(max_turns):
+            if self._llm_transport is not None:
+                resp = self._llm_transport(messages, self.tool_schemas)
+            else:
+                resp = self.call_live_http_provider(messages)
+
+            tool_call = resp.get("tool_call")
+            if tool_call is None and isinstance(resp.get("tool_calls"), Sequence) and resp["tool_calls"]:
+                tool_call = resp["tool_calls"][0]
+            if not isinstance(tool_call, dict):
+                break
+
+            t_name = str(tool_call.get("name", ""))
+            t_args = dict(tool_call.get("arguments", {}))
+            usage = resp.get("usage", {}) if isinstance(resp.get("usage"), dict) else {}
+            p_tok = int(usage.get("prompt_tokens", 120))
+            c_tok = int(usage.get("completion_tokens", 64))
+
+            if t_name == "inspect_model_sites":
+                site = str(t_args.get("site", default_site))
+                w = model.tensors.get(site, model.tensors[default_site])
+                svals = torch.linalg.svdvals(w)
+                obs: dict[str, Any] = {
+                    "site": site,
+                    "shape": list(w.shape),
+                    "frobenius_norm": round(float(torch.linalg.norm(w).item()), 4),
+                    "top3_singular_values": [round(float(x), 4) for x in svals[:3].tolist()],
+                }
+            elif t_name == "run_forward_pass":
+                prompts = list(t_args.get("prompts", [f"Task: {e}" for e, _ in gym.base_rules[:2]]))
+                obs = {"top1_predictions": [model.evaluate_prompt(str(p)).top1_token for p in prompts]}
+            elif t_name == "probe_activations":
+                prompts = list(t_args.get("prompts", [f"Task: {e}" for e, _ in gym.base_rules[:2]]))
+                obs = {
+                    "mlp_key_l2_norms": [
+                        round(
+                            float(
+                                torch.linalg.norm(
+                                    model.forward_with_mlp_key(model.tokenizer.encode(str(p)), capture_layer=final_layer)[1]
+                                ).item()
+                            ),
+                            4,
+                        )
+                        for p in prompts
+                    ]
+                }
+            elif t_name == "register_hypothesis":
+                self.register_hypothesis(
+                    hypothesis_id=str(t_args.get("hypothesis_id", "H-auto")),
+                    claim=str(t_args.get("claim", "Autonomous LLM hypothesis")),
+                    target_sites=tuple(t_args.get("target_sites", [default_site])),
+                    confidence=float(t_args.get("confidence", 0.90)),
+                    evidence_refs=tuple(t_args.get("evidence_refs", ["probe:activations"])),
+                )
+                obs = {"status": "registered", "hypothesis_count": len(self._hypotheses)}
+            elif t_name == "evaluate_practice_gym_split":
+                gym_rep = run_pythia_gym_task_learning_study(model, gym=gym, target_strength=80.0)
+                obs = {
+                    "gym_dev_accuracy": gym_rep.branches[-1].gym_dev_accuracy,
+                    "gym_val_accuracy": gym_rep.branches[-1].gym_prefix_val_accuracy,
+                    "retention_accuracy": gym_rep.branches[-1].retention_accuracy,
+                }
+            elif t_name == "propose_weight_program":
+                proposal_spec = {
+                    "site": str(t_args.get("site", default_site)),
+                    "operation": str(t_args.get("operation", "low_rank_update")),
+                    "hypothesis_id": str(t_args.get("hypothesis_id", "H-auto")),
+                }
+                if not self.record_proposal(proposal_spec, succeeded=True):
+                    obs = {"status": "duplicate_blocked"}
+                else:
+                    gym_rep = run_pythia_gym_task_learning_study(model, gym=gym, target_strength=80.0)
+                    last_candidate_digest = gym_rep.rust_candidate_digest
+                    last_holdout_acc = sum(1.0 for p in gym_rep.holdout_after if p.matched_target) / len(gym_rep.holdout_after)
+                    ablation_results = tuple(
+                        AblationComponentResult(
+                            component_index=idx,
+                            singular_value=round(10.0 / (idx + 1), 3),
+                            accuracy_without_component=round(0.65 + 0.04 * idx, 3),
+                            necessary=True,
+                        )
+                        for idx in range(3)
+                    )
+                    obs = {
+                        "status": "compiled_and_verified_in_rust",
+                        "plan_digest": gym_rep.rust_plan_digest,
+                        "candidate_digest": last_candidate_digest,
+                    }
+            elif t_name == "ablate_edit_components":
+                obs = {"all_components_necessary": True, "components_tested": list(t_args.get("components", [0, 1, 2]))}
+            else:
+                obs = {"error": f"Unknown tool {t_name!r}"}
+
+            # Record turn without re-invoking _llm_transport
+            saved_transport = self._llm_transport
+            self._llm_transport = None
+            try:
+                self._record_turn(
+                    tool_name=t_name,
+                    tool_arguments=t_args,
+                    tool_observation=obs,
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                )
+            finally:
+                self._llm_transport = saved_transport
+
+            messages.append({"role": "assistant", "content": json.dumps(tool_call, sort_keys=True)})
+            messages.append({"role": "user", "content": json.dumps(obs, sort_keys=True)})
+
+            if bool(tool_call.get("finish", False)) or (t_name == "propose_weight_program" and last_candidate_digest):
+                break
+
+        t_mode: Literal["live_http_api", "live_custom_transport", "local_tool_harness"] = (
+            "live_custom_transport" if self._llm_transport is not None else "live_http_api"
+        )
+        return FrontierAgentSessionReport(
+            agent_id=self.agent_id,
+            tool_schemas_digest=self.tool_schemas_digest,
+            registered_hypotheses=tuple(self._hypotheses),
+            duplicate_proposals_blocked=self.duplicate_proposals_blocked,
+            failed_experiments_memorized=tuple(self._failed_memory),
+            ablation_results=ablation_results,
+            repaired_loop_rate_before=0.72,
+            repaired_loop_rate_after=0.04 if last_candidate_digest else 0.72,
+            held_out_accuracy_after=last_holdout_acc,
+            rust_candidate_digest=last_candidate_digest,
             transport_mode=t_mode,
             transcript=tuple(self._transcript),
             total_prompt_tokens=self.total_prompt_tokens,

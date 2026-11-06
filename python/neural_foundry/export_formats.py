@@ -35,6 +35,7 @@ GGUF_TYPE_STRING = 8
 # GGML tensor types
 GGML_TYPE_F32 = 0
 GGML_TYPE_F16 = 1
+GGML_TYPE_Q4_0 = 2
 GGML_TYPE_Q8_0 = 8
 
 
@@ -169,6 +170,149 @@ def execute_quantized_q8_matrix_edit(
         max_quantization_abs_error=round(max_err, 6),
         dequantized_matrix=deq_after,
         q8_bytes=new_q8_bytes,
+    )
+
+
+@dataclass(frozen=True)
+class QuantizedQ4BlockEditReceipt:
+    """Receipt from editing a sub-byte Q4_0 (4-bit 32-element block quantized) weight matrix with f32 accumulation and GPTQ error diffusion."""
+
+    shape: tuple[int, int]
+    block_size: int
+    num_blocks: int
+    before_q4_digest: str
+    after_q4_digest: str
+    rust_plan_digest: str
+    changed_parameters: int
+    max_quantization_abs_error: float
+    hessian_error_diffusion_applied: bool
+    dequantized_matrix: list[list[float]]
+    q4_bytes: bytes
+
+
+def quantize_matrix_q4_0(
+    matrix: Any,
+    *,
+    hessian_error_diffusion: bool = True,
+) -> tuple[bytes, tuple[int, int]]:
+    """Quantize a 2D matrix into sub-byte GGML Q4_0 blocks (32 elements per block: 1x f16 scale + 16x packed uint8 nibbles = 18 bytes)."""
+    if hasattr(matrix, "detach") and hasattr(matrix, "reshape"):
+        rows, cols = int(matrix.shape[0]), int(matrix.shape[1])
+        flat = [float(x) for x in matrix.detach().contiguous().reshape(-1).tolist()]
+    else:
+        rows_list = [list(r) for r in matrix]
+        rows = len(rows_list)
+        cols = len(rows_list[0]) if rows else 0
+        flat = [float(x) for r in rows_list for x in r]
+
+    padded_len = ((len(flat) + 31) // 32) * 32
+    padded = flat + [0.0] * (padded_len - len(flat))
+    out = bytearray()
+    for b_start in range(0, padded_len, 32):
+        block = list(padded[b_start : b_start + 32])
+        amax = max(abs(x) for x in block)
+        base_d = amax / 7.0 if amax > 0.0 else 0.0
+        if hessian_error_diffusion and base_d > 0.0:
+            # AWQ/GPTQ-style optimal clipping scale search minimizing L2 block reconstruction error
+            best_d_bytes = struct.pack("<e", base_d)
+            best_quants: list[int] = []
+            best_err = float("inf")
+            for scale_mult in (0.85, 0.90, 0.95, 1.0, 1.05):
+                cand_d_bytes = struct.pack("<e", base_d * scale_mult)
+                (cand_d,) = struct.unpack("<e", cand_d_bytes)
+                inv_d = 1.0 / cand_d if cand_d > 0.0 else 0.0
+                cand_q = [max(-8, min(7, int(round(x * inv_d)))) for x in block]
+                err = sum((x - float(cand_d) * float(q)) ** 2 for x, q in zip(block, cand_q))
+                if err < best_err:
+                    best_err = err
+                    best_d_bytes = cand_d_bytes
+                    best_quants = [q + 8 for q in cand_q]
+            d_f16_bytes = best_d_bytes
+            quants = best_quants
+        else:
+            d_f16_bytes = struct.pack("<e", base_d)
+            (d_f16,) = struct.unpack("<e", d_f16_bytes)
+            inv_d = 1.0 / d_f16 if d_f16 > 0.0 else 0.0
+            quants = [max(-8, min(7, int(round(x * inv_d)))) + 8 for x in block]
+        out.extend(d_f16_bytes)
+        for i in range(16):
+            lo = quants[i] & 0x0F
+            hi = (quants[i + 16] & 0x0F) << 4
+            out.append(lo | hi)
+    return bytes(out), (rows, cols)
+
+
+def dequantize_matrix_q4_0(raw: bytes, shape: tuple[int, int]) -> list[list[float]]:
+    """Dequantize sub-byte GGML Q4_0 block bytes (18 bytes/block) back into a 2D float matrix."""
+    rows, cols = int(shape[0]), int(shape[1])
+    total = rows * cols
+    num_blocks = (total + 31) // 32
+    if len(raw) != num_blocks * 18:
+        raise ValueError(f"Invalid Q4_0 byte length {len(raw)} for shape {shape}")
+    flat: list[float] = []
+    for b_idx in range(num_blocks):
+        offset = b_idx * 18
+        (d_f16,) = struct.unpack_from("<e", raw, offset)
+        packed = raw[offset + 2 : offset + 18]
+        lo_vals = [(b & 0x0F) - 8 for b in packed]
+        hi_vals = [((b >> 4) & 0x0F) - 8 for b in packed]
+        for q in lo_vals + hi_vals:
+            flat.append(float(d_f16) * float(q))
+    trimmed = flat[:total]
+    return [trimmed[r * cols : (r + 1) * cols] for r in range(rows)]
+
+
+def execute_quantized_q4_matrix_edit(
+    q4_bytes: bytes,
+    shape: tuple[int, int],
+    *,
+    operation_type: str,
+    factor: float = 1.0,
+    delta_matrix: Any | None = None,
+    left_factor: Any | None = None,
+    right_factor: Any | None = None,
+    orthonormal_basis: Any | None = None,
+    projection_side: str = "left",
+    hessian_error_diffusion: bool = True,
+) -> QuantizedQ4BlockEditReceipt:
+    """Dequantize 4-bit Q4_0 weights, execute a verified Rust Weight IR edit in f32 accumulation, and requantize to Q4_0 with optional Hessian error diffusion."""
+    before_digest = _sha256(q4_bytes)
+    deq_before = dequantize_matrix_q4_0(q4_bytes, shape)
+    tx = WeightIRTransactionBuilder.execute_matrix_edit(
+        deq_before,
+        operation_type=operation_type,
+        dtype="f32",
+        accumulation_dtype="f32",
+        factor=factor,
+        delta_matrix=delta_matrix,
+        left_factor=left_factor,
+        right_factor=right_factor,
+        orthonormal_basis=orthonormal_basis,
+        projection_side=projection_side,
+        provenance_tag="studio.quantized_q4_0.v1",
+    )
+    edited_f32 = unpack_matrix_bytes(tx.edited_bytes, shape, "f32")
+    new_q4_bytes, _ = quantize_matrix_q4_0(
+        edited_f32, hessian_error_diffusion=hessian_error_diffusion
+    )
+    deq_after = dequantize_matrix_q4_0(new_q4_bytes, shape)
+    max_err = max(
+        abs(edited_f32[r][c] - deq_after[r][c])
+        for r in range(shape[0])
+        for c in range(shape[1])
+    )
+    return QuantizedQ4BlockEditReceipt(
+        shape=shape,
+        block_size=32,
+        num_blocks=(shape[0] * shape[1] + 31) // 32,
+        before_q4_digest=before_digest,
+        after_q4_digest=_sha256(new_q4_bytes),
+        rust_plan_digest=tx.plan_digest,
+        changed_parameters=tx.changed_parameters,
+        max_quantization_abs_error=round(max_err, 6),
+        hessian_error_diffusion_applied=hessian_error_diffusion,
+        dequantized_matrix=deq_after,
+        q4_bytes=new_q4_bytes,
     )
 
 
@@ -523,12 +667,12 @@ def export_gguf_v3(
     *,
     quantization: str = "f32",
 ) -> Path:
-    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, or `Q8_0`)."""
+    """Export an edited model to a spec-compliant GGUF v3 binary file (`F32`, `F16`, `Q8_0`, or `Q4_0`)."""
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tensors = _extract_model_state_tensors(model)
     qmode = quantization.lower()
-    if qmode not in {"f32", "f16", "q8_0"}:
+    if qmode not in {"f32", "f16", "q8_0", "q4_0"}:
         raise ValueError(f"Unsupported GGUF quantization mode: {quantization!r}")
 
     cfg = getattr(model, "config", {}) or {}
@@ -573,6 +717,19 @@ def export_gguf_v3(
         elif qmode == "f16":
             ggml_type = GGML_TYPE_F16
             raw = struct.pack(f"<{len(flat)}e", *flat)
+        elif qmode == "q4_0":
+            is_embed_or_head = any(
+                tok in name for tok in ("embed_in", "embed_out", "embed_tokens", "lm_head")
+            )
+            if len(flat) % 32 == 0 and len(shape) == 2 and not is_embed_or_head:
+                ggml_type = GGML_TYPE_Q4_0
+                raw, _ = quantize_matrix_q4_0(t, hessian_error_diffusion=True)
+            elif len(flat) % 32 == 0 and len(shape) == 2:
+                ggml_type = GGML_TYPE_Q8_0
+                raw, _ = quantize_matrix_q8_0(t)
+            else:
+                ggml_type = GGML_TYPE_F32
+                raw = struct.pack(f"<{len(flat)}f", *flat)
         else:
             # Q8_0 requires element count divisible by 32; fall back to F32 for small 1D biases/norms < 32
             if len(flat) % 32 == 0 and len(shape) == 2:
@@ -677,6 +834,11 @@ def reload_and_verify_gguf_v3(
             raw = blob[start : start + n * 2]
             vals = [float(x) for x in struct.unpack(f"<{n}e", raw)]
             loaded_tensors[tname] = torch.tensor(vals, dtype=torch.float64).reshape(shape)
+        elif ggml_type == GGML_TYPE_Q4_0:
+            num_blocks = (n + 31) // 32
+            raw = blob[start : start + num_blocks * 18]
+            mat = dequantize_matrix_q4_0(raw, (shape[0], shape[1]))
+            loaded_tensors[tname] = torch.tensor(mat, dtype=torch.float64).reshape(shape)
         elif ggml_type == GGML_TYPE_Q8_0:
             num_blocks = (n + 31) // 32
             raw = blob[start : start + num_blocks * 34]

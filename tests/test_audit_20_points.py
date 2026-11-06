@@ -530,3 +530,197 @@ def test_points_17_18_19_20_flagship_bundle_patch_ux_and_ci_workflows(tmp_path: 
     assert "uv==0.13.5" not in m1_yml
     assert "uv==0.13.5" not in m2_yml
     assert "test_sandbox_isolation.py" in m2_yml
+
+
+def test_modular_nextgen_features_a_through_e_and_studio_integration(tmp_path: Path) -> None:
+    """Verifies A-E and Features 1-5: Multi-layer causal tracing + distributed MEMIT/AlphaEdit, covariance cache, Ed25519 asymmetric signing + orthogonal patch compose, Q4_0 sub-byte GGUF + subprocess evals, and ReAct autonomous tool loop."""
+    st = studio.WeightProgrammingStudio()
+    model = st.select_model("nf/mini-pythia-fixture")
+    assocs = [("The capital of France is", "ĠParis"), ("The capital of Japan is", "ĠTokyo")]
+
+    # A & Feature 1: Causal tracing across layers + distributed multi-layer AlphaEdit + autoregressive decoding
+    trace_rep = st.trace_critical_layers(model, assocs, top_k_layers=2)
+    assert trace_rep.selected_layer_range == (0, 1)
+    cov_dir = tmp_path / "cov_cache"
+    cov_map = st.build_covariance_cache(model, cache_dir=cov_dir)
+    assert len(cov_map) == 2
+    assert len(list(cov_dir.glob("*.safetensors"))) == 2
+
+    dist_edit = st.run_easyedit(
+        model,
+        algorithm="AlphaEdit",
+        associations=assocs,
+        target_layers="auto_causal_trace",
+        use_covariance_cache=True,
+        target_strength=80.0,
+    )
+    assert dist_edit.target_layers == (0, 1)
+    assert len(dist_edit.layer_plan_digests) == 2
+    assert dist_edit.edit_success_rate == 1.0
+    assert dist_edit.reload_parity_verified is True
+
+    gen_out = model.generate_autoregressive(
+        "The capital of France is",
+        max_new_tokens=4,
+        layer_down_proj_override=dist_edit.edited_weights_by_layer,
+    )
+    assert gen_out["generated_tokens"][0] == "ĠParis"
+    assert gen_out["mean_nll"] >= 0.0
+
+    # Feature 3: Interactive / Markdown Logit-Lens & Spectral Trajectory Inspector + Studio CLI
+    traj = st.inspect_trajectory(
+        model,
+        "The capital of France is",
+        target_token="ĠParis",
+        layer_down_proj_override=dist_edit.edited_weights_by_layer,
+    )
+    assert traj.final_after_token == "Paris"
+    assert "Weight-Space Logit-Lens & Spectral Trajectory" in traj.markdown_table
+    assert studio.main(["covariance", "--model", "nf/mini-pythia-fixture"]) == 0
+    assert studio.main(["inspect-trajectory", "--model", "nf/mini-pythia-fixture"]) == 0
+
+    # C & Feature 5: Asymmetric Ed25519-compatible keypair generation, signing, and public-key-only verification (Rust CLI & Python parity)
+    keygen_cli = subprocess.run(
+        [str(CLI), "patch", "keygen", "--seed", "audit-ed25519-seed"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cli_kp = json.loads(keygen_cli.stdout)["result"]
+    py_kp = patch_ux.generate_ed25519_keypair("audit-ed25519-seed")
+    assert cli_kp["private_key"] == py_kp["private_key"]
+    assert cli_kp["public_key"] == py_kp["public_key"]
+
+    patch_doc = {"kind": "test_patch", "plan_digest": dist_edit.rust_plan_digest}
+    asym_env = patch_ux.sign_patch_envelope(
+        patch_doc,
+        signer_id="ed25519.auditor",
+        signing_key=py_kp["private_key"],
+    )
+    assert "private_key" not in json.dumps(asym_env)
+    # Verify in Python using ONLY public_key!
+    py_ver = patch_ux.verify_patch_signature(asym_env, public_key=py_kp["public_key"])
+    assert py_ver["verified"] is True
+    assert py_ver["signature_scheme"] == "ed25519_wots_v1"
+
+    # Verify in Rust CLI using ONLY --pubkey!
+    asym_file = tmp_path / "asym_signed.json"
+    asym_file.write_bytes(canonicalize(asym_env))
+    cli_ver = subprocess.run(
+        [str(CLI), "patch", "verify-signature", str(asym_file), "--pubkey", py_kp["public_key"]],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(cli_ver.stdout)["result"]["verified"] is True
+
+    # Wrong public key MUST fail closed in both Python and Rust CLI
+    other_kp = patch_ux.generate_ed25519_keypair("wrong-seed")
+    with pytest.raises(ValueError, match="public key"):
+        patch_ux.verify_patch_signature(asym_env, public_key=other_kp["public_key"])
+    bad_pub_cli = subprocess.run(
+        [str(CLI), "patch", "verify-signature", str(asym_file), "--pubkey", other_kp["public_key"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_pub_cli.returncode != 0
+
+    # Subspace-orthogonal multi-patch conflict resolution (`studio.methods.run("orthogonal_compose", ...)`)
+    edit_b = st.run_easyedit(
+        model,
+        algorithm="AlphaEdit",
+        associations=[("Boolean True AND False gives", "ĠFalse"), ("Boolean True OR False gives", "ĠTrue")],
+        target_strength=80.0,
+    )
+    w_base = model.tensors[model.mlp_down_proj_site(1)]
+    orth_rec = st.methods.run(
+        "orthogonal_compose",
+        w_base,
+        [dist_edit.edited_weight, edit_b.edited_weight],
+        target_site=model.mlp_down_proj_site(1),
+        subspace_rank_per_patch=2,
+    )
+    assert orth_rec.reload_parity_verified is True
+    assert orth_rec.max_subspace_interference_after <= 1e-6
+
+    # D & Feature 4: Sub-byte 4-bit Q4_0 block quantization + Hessian error diffusion + GGUF v3 Q4_0 round-trip + subprocess evaluator
+    q4_mat = [[float((r * 32 + c) % 13 - 6) * 0.15 for c in range(32)] for r in range(2)]
+    q4_bytes, q4_shape = export_formats.quantize_matrix_q4_0(q4_mat, hessian_error_diffusion=True)
+    assert len(q4_bytes) == 2 * 18  # 18 bytes per 32-weight 4-bit block
+    q4_rec = export_formats.execute_quantized_q4_matrix_edit(
+        q4_bytes,
+        q4_shape,
+        operation_type="scale",
+        factor=1.25,
+        hessian_error_diffusion=True,
+    )
+    assert q4_rec.changed_parameters > 0
+    assert q4_rec.hessian_error_diffusion_applied is True
+
+    tensors = export_formats._extract_model_state_tensors(model)
+    for l_idx, w_t in (dist_edit.edited_weights_by_layer or {}).items():
+        tensors[model.mlp_down_proj_site(l_idx)] = w_t
+    edited_model = export_formats._apply_state_tensors_to_clone(model, tensors)
+    gguf_q4 = tmp_path / "edited_q4_0.gguf"
+    export_formats.export_gguf_v3(edited_model, gguf_q4, quantization="q4_0")
+    _, q4_ver = export_formats.reload_and_verify_gguf_v3(
+        gguf_q4, edited_model, ["The capital of France is", "The capital of Japan is"]
+    )
+    assert q4_ver.gain_preserved_after_rebuild is True
+
+    # Subprocess evaluator for runtime="llama.cpp"
+    suite = _minimal_suite()
+    subproc_cmds: list[list[str]] = []
+    subproc_answers = {
+        "2+2": "4",
+        "3+3": "6",
+        "5+5": "10",
+        "Hi": "Hello",
+        "Bad": "Refuse",
+        "2 + 2": "4",
+        "eff": "ok",
+    }
+
+    def _mock_llama_cli(cmd: list[str]) -> str:
+        subproc_cmds.append(cmd)
+        prompt = cmd[cmd.index("--prompt") + 1]
+        return subproc_answers[prompt]
+
+    llama_run = evals.run_eval(
+        model={
+            "model_id": "edited-q4-gguf",
+            "runtime": "llama.cpp",
+            "gguf_path": str(gguf_q4),
+            "subprocess_runner": _mock_llama_cli,
+            "edit_lineage": {"changed_parameters": 2048, "total_parameters": 49920},
+        },
+        suite=suite,
+    )
+    assert llama_run["evidence_label"]["origin"] == "measured_result"
+    assert len(subproc_cmds) == len(suite.tasks)
+
+    # E: Free-running ReAct autonomous LLM tool-use loop (`run_autonomous_tool_loop`)
+    scripted_tool_calls = [
+        {"name": "inspect_model_sites", "arguments": {"model_id": model.model_name}},
+        {"name": "run_forward_pass", "arguments": {"prompts": ["Task: Number 9 has parity"]}},
+        {"name": "probe_activations", "arguments": {"site": model.mlp_down_proj_site(1), "prompts": ["Task: Number 9 has parity"]}},
+        {"name": "register_hypothesis", "arguments": {"hypothesis_id": "H-react-1", "claim": "Final MLP subspace encodes parity"}},
+        {"name": "propose_weight_program", "arguments": {"hypothesis_id": "H-react-1", "operation": "low_rank_update", "site": model.mlp_down_proj_site(1)}, "finish": True},
+    ]
+    turn_counter = {"idx": 0}
+
+    def _react_llm_transport(messages: list[dict[str, object]], tools: object) -> dict[str, object]:
+        idx = turn_counter["idx"]
+        turn_counter["idx"] += 1
+        return {
+            "tool_call": scripted_tool_calls[min(idx, len(scripted_tool_calls) - 1)],
+            "usage": {"prompt_tokens": 110, "completion_tokens": 55},
+        }
+
+    react_agent = st.agents.create("claude-4-5-sonnet", llm_transport=_react_llm_transport, budget_usd=2.0)
+    react_rep = react_agent.run_autonomous_tool_loop(model, max_turns=8)
+    assert len(react_rep.transcript) == 5
+    assert react_rep.held_out_accuracy_after == 1.0
+    assert react_rep.rust_candidate_digest.startswith("sha256:")
+

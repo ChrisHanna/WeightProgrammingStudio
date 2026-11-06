@@ -57,6 +57,7 @@ pub enum ReconciliationMode {
     None,
     OrderedSequential,
     ExplicitMergeRecipe,
+    OrthogonalProject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

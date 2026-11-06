@@ -356,6 +356,63 @@ assert bundle.holdout_accuracy_after == 1.0
 assert bundle.signature_verified and bundle.hf_roundtrip_verified and bundle.gguf_roundtrip_verified
 ```
 
+### 7. Multi-Layer Causal Tracing, Covariance Cache, Logit-Lens Inspector, Orthogonal Composition & Asymmetric `Ed25519` Signing
+Leverage the modular Studio engines (`studio.tracer`, `studio.covariance`, `studio.inspector`, `orthogonal_compose`, `Q4_0` sub-byte quantization, asymmetric public-key signing, and `agent.run_autonomous_tool_loop`):
+
+```python
+from neural_foundry import export_formats, patch_ux
+from neural_foundry.studio import WeightProgrammingStudio
+
+studio = WeightProgrammingStudio()
+model = studio.select_model("nf/mini-pythia-fixture")
+
+# A. Auto-discover critical MLP layer range R via Causal Tracing + build cached background covariance Sigma_l = E[k_l k_l^T]
+trace = studio.trace_critical_layers(model, [("The capital of France is", "ĠParis")], top_k_layers=2)
+studio.build_covariance_cache(model, cache_dir="/tmp/nf_cov_cache")
+
+# B. Distributed multi-layer AlphaEdit across R = (0, 1) with covariance null-space projection
+dist_edit = studio.run_easyedit(
+    model,
+    algorithm="AlphaEdit",
+    associations=[("The capital of France is", "ĠParis"), ("The capital of Japan is", "ĠTokyo")],
+    target_layers="auto_causal_trace",
+    use_covariance_cache=True,
+)
+
+# C. Inspect layer-by-layer Logit-Lens token trajectory & singular value spectrum before vs. after edit
+traj = studio.inspect_trajectory(
+    model,
+    "The capital of France is",
+    target_token="ĠParis",
+    layer_down_proj_override=dist_edit.edited_weights_by_layer,
+)
+print(traj.markdown_table)
+
+# D. Subspace-orthogonal multi-patch conflict resolution (`orthogonal_compose`)
+logic_edit = studio.run_easyedit(
+    model,
+    algorithm="AlphaEdit",
+    associations=[("Boolean True AND False gives", "ĠFalse"), ("Boolean True OR False gives", "ĠTrue")],
+)
+orth = studio.methods.run(
+    "orthogonal_compose",
+    model.tensors[model.mlp_down_proj_site(1)],
+    [dist_edit.edited_weight, logic_edit.edited_weight],
+)
+assert orth.reload_parity_verified and orth.max_subspace_interference_after <= 1e-6
+
+# E. Asymmetric keypair generation & public-key-only verification (`ed25519_priv:` / `ed25519_pub:`)
+kp = patch_ux.generate_ed25519_keypair("release-signing-seed")
+signed_env = patch_ux.sign_patch_envelope({"plan": dist_edit.rust_plan_digest}, signing_key=kp["private_key"])
+verified = patch_ux.verify_patch_signature(signed_env, public_key=kp["public_key"])
+assert verified["verified"] is True
+
+# F. Sub-byte 4-bit Q4_0 quantized editing & GGUF v3 Q4_0 export
+q4_bytes, q4_shape = export_formats.quantize_matrix_q4_0([[0.1 * ((r * 32 + c) % 13 - 6) for c in range(32)] for r in range(2)])
+q4_rec = export_formats.execute_quantized_q4_matrix_edit(q4_bytes, q4_shape, operation_type="scale", factor=1.25)
+assert q4_rec.hessian_error_diffusion_applied is True
+```
+
 ---
 
 ## Measured Results on Open-Weight Models (`Pythia-14m`, `Pythia-31m`, `Qwen2`)
@@ -378,10 +435,12 @@ See [Weight Programming Studio Architecture & PRD Guide](docs/weight-programming
 Both the native Rust binaries (`weightctl` and `nf`) and the Python Studio CLI (`python -m neural_foundry.studio`) are included:
 
 ```sh
-# High-level Studio CLI (inspect catalogs, run Gym studies, run Experiments A-D, emit conformance)
+# High-level Studio CLI (inspect catalogs, run Gym studies, build covariance cache, inspect trajectories, emit conformance)
 .venv/bin/python -m neural_foundry.studio catalog
 .venv/bin/python -m neural_foundry.studio run-gym --model nf/mini-pythia-fixture --gym algorithmic_three_skill
 .venv/bin/python -m neural_foundry.studio run-experiments --model nf/mini-pythia-fixture
+.venv/bin/python -m neural_foundry.studio covariance --model nf/mini-pythia-fixture --cache-dir /tmp/nf_cov_cache
+.venv/bin/python -m neural_foundry.studio inspect-trajectory --model nf/mini-pythia-fixture --prompt "The capital of France is" --target "ĠParis"
 .venv/bin/python -m neural_foundry.studio conformance
 
 # First-class Evaluation Engine & Studio Rust CLI (available via both `weightctl` and `nf`)
@@ -396,16 +455,17 @@ weightctl eval run --model MODEL.json --suite SUITE.json --compare-to BASELINE.j
 weightctl eval compare BASELINE_RUN.json CANDIDATE_RUN.json
 weightctl eval verify --model CANDIDATE_RUN.json --policy production
 
-# Low-level Rust Weight IR, Search Space, Patch Diff/Sign/Audit/Rollback & Checkpoint CLI
+# Low-level Rust Weight IR, Search Space, Patch Diff/Keygen/Sign/Audit/Rollback & Checkpoint CLI
 nf core capabilities
 nf model inspect CHECKPOINT.safetensors
 nf ir validate PROGRAM.json
 nf search-space validate SPACE.json
 nf ir compile|explain|apply REQUEST.json
 nf patch diff PATCH.json
-nf patch sign PATCH.json --signer operator.v1 --key SECRET_KEY
-nf patch verify-signature SIGNED_PATCH.json --key SECRET_KEY
-nf patch audit SIGNED_PATCH.json
+nf patch keygen --seed RELEASE_SEED
+nf patch sign PATCH.json --signer operator.v1 --key ed25519_priv:...
+nf patch verify-signature SIGNED_PATCH.json --pubkey ed25519_pub:...
+nf patch audit SIGNED_PATCH.json --pubkey ed25519_pub:...
 nf patch rollback SIGNED_PATCH.json
 nf patch replay REQUEST.json
 nf checkpoint restore REQUEST.json

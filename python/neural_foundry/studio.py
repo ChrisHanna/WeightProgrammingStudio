@@ -31,6 +31,10 @@ from .m4_ecosystems import (
     run_m4_feature_acceptance_suite,
 )
 from .m5_surgery import execute_attention_head_surgery, execute_mlp_width_surgery
+from .patch_ux import (
+    OrthogonalPatchCompositionReceipt,
+    compose_overlapping_patches_orthogonal,
+)
 from .prd_adapters import (
     EasyEditAdapterReceipt,
     EasyEditAlgorithm,
@@ -48,6 +52,12 @@ from .pythia import (
     BUILTIN_ARCHITECTURE_PROFILES,
     FACTUAL_KNOWLEDGE_GYM,
     ArchitectureSiteProfile,
+    CausalTraceEngine,
+    CausalTraceSiteReport,
+    CovarianceCacheRegistry,
+    LayerCovarianceArtifact,
+    LogitLensTrajectoryInspector,
+    LogitLensTrajectoryReport,
     PythiaGymTaskReport,
     PythiaModel,
     Qwen2CausalLM,
@@ -278,6 +288,8 @@ class MethodRegistry:
                     associations: list[tuple[str, str]],
                     nullspace_prompts: Sequence[str] = (),
                     target_strength: float = 75.0,
+                    target_layers: Sequence[int] | Literal["auto_causal_trace"] | None = None,
+                    covariance_registry: CovarianceCacheRegistry | None = None,
                 ) -> EasyEditAdapterReceipt:
                     return run_easyedit_adapter(
                         self._resolve_model(model),
@@ -285,6 +297,8 @@ class MethodRegistry:
                         associations=associations,
                         nullspace_prompts=nullspace_prompts,
                         target_strength=target_strength,
+                        target_layers=target_layers,
+                        covariance_registry=covariance_registry,
                     )
 
                 return _runner
@@ -364,6 +378,12 @@ class MethodRegistry:
             run_lora_baseline,
             category="training_baseline",
             description="Authorized bounded low-rank gradient baseline (CG-11)",
+        )
+        self.register_method(
+            "orthogonal_compose",
+            compose_overlapping_patches_orthogonal,
+            category="model_merge",
+            description="Right-singular subspace-orthogonal multi-patch conflict resolver (compiled to Rust Weight IR)",
         )
 
     def register_method(
@@ -454,11 +474,14 @@ _DEFAULT_AGENTS = AgentRegistry()
 
 
 class WeightProgrammingStudio:
-    """Unified Studio facade connecting pluggable Models, Gyms, Methods, Agents, Rust Weight IR, and Evals."""
+    """Unified Studio facade connecting pluggable Models, Gyms, Methods, Agents, Covariance Cache, Causal Tracer, Inspector, Rust Weight IR, and Evals."""
 
     def __init__(self, *, vram_capacity_bytes: int = 32 * 1024 * 1024 * 1024) -> None:
         self.models = ModelRegistry()
         self.gyms = GymRegistry()
+        self.covariance = CovarianceCacheRegistry()
+        self.tracer = CausalTraceEngine
+        self.inspector = LogitLensTrajectoryInspector
         self.methods = MethodRegistry(self.models, self.gyms)
         self.agents = AgentRegistry()
         self.ir_builder = ir.WeightIRTransactionBuilder
@@ -536,8 +559,10 @@ class WeightProgrammingStudio:
         associations: list[tuple[str, str]],
         nullspace_prompts: list[str] | tuple[str, ...] = (),
         target_strength: float = 75.0,
+        target_layers: Sequence[int] | Literal["auto_causal_trace"] | None = None,
+        use_covariance_cache: bool = False,
     ) -> EasyEditAdapterReceipt:
-        """Executes EasyEdit (`ROME`, `MEMIT`, or `AlphaEdit`) on a selected model (`WP-13`)."""
+        """Executes EasyEdit (`ROME`, `MEMIT`, or `AlphaEdit`) on a selected model across single or distributed layers (`WP-13`)."""
         resolved_model = (
             self.select_model(model)
             if isinstance(model, (str, Path))
@@ -549,6 +574,69 @@ class WeightProgrammingStudio:
             associations=associations,
             nullspace_prompts=nullspace_prompts,
             target_strength=target_strength,
+            target_layers=target_layers,
+            covariance_registry=self.covariance if use_covariance_cache else None,
+        )
+
+    def trace_critical_layers(
+        self,
+        model: str | Path | PythiaModel | Qwen2CausalLM,
+        associations: Sequence[tuple[str, str]],
+        *,
+        top_k_layers: int = 2,
+    ) -> CausalTraceSiteReport:
+        """Discovers the critical MLP layer range R = {l_1, ..., l_k} via causal tracing."""
+        resolved_model = (
+            self.select_model(model)
+            if isinstance(model, (str, Path))
+            else model
+        )
+        return self.tracer.trace_critical_layers(
+            resolved_model,
+            associations,
+            top_k_layers=top_k_layers,
+        )
+
+    def build_covariance_cache(
+        self,
+        model: str | Path | PythiaModel | Qwen2CausalLM,
+        *,
+        layers: Sequence[int] | None = None,
+        corpus_prompts: Sequence[str] | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> dict[int, LayerCovarianceArtifact]:
+        """Streams a reference corpus through the model and caches empirical key covariances C_l = E[k_l k_l^T] and null-space projectors P_l."""
+        resolved_model = (
+            self.select_model(model)
+            if isinstance(model, (str, Path))
+            else model
+        )
+        return self.covariance.build_model_covariance_cache(
+            resolved_model,
+            layers=layers,
+            corpus_prompts=corpus_prompts,
+            cache_dir=cache_dir,
+        )
+
+    def inspect_trajectory(
+        self,
+        model: str | Path | PythiaModel | Qwen2CausalLM,
+        prompt: str,
+        *,
+        target_token: str,
+        layer_down_proj_override: dict[int, Any] | None = None,
+    ) -> LogitLensTrajectoryReport:
+        """Renders per-layer singular-value spectra and logit-lens token trajectories before vs. after a weight edit."""
+        resolved_model = (
+            self.select_model(model)
+            if isinstance(model, (str, Path))
+            else model
+        )
+        return self.inspector.inspect_prompt_trajectory(
+            resolved_model,
+            prompt,
+            target_token=target_token,
+            layer_down_proj_override=layer_down_proj_override,
         )
 
     def run_mergekit(
@@ -765,6 +853,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     exp_p = sub.add_parser("run-experiments", help="Run PRD Priority Experiments A, B, C, and D")
     exp_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
 
+    cov_p = sub.add_parser("covariance", help="Build and cache per-layer MLP key covariances and null-space projectors")
+    cov_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
+    cov_p.add_argument("--cache-dir", default=None, help="Optional directory to write .safetensors covariance artifacts")
+
+    insp_p = sub.add_parser("inspect-trajectory", help="Inspect per-layer logit-lens token trajectory and singular spectra before vs. after edit")
+    insp_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
+    insp_p.add_argument("--prompt", default="The capital of France is", help="Prompt to trace across layers")
+    insp_p.add_argument("--target", default="ĠParis", help="Target vocabulary token")
+
     sub.add_parser("conformance", help="Generate T120 release conformance report")
 
     args = parser.parse_args(argv)
@@ -779,6 +876,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             "agents": studio.agents.list_agents(),
         }
         print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.command == "covariance":
+        cov_map = studio.build_covariance_cache(args.model, cache_dir=args.cache_dir)
+        print(
+            json.dumps(
+                {
+                    "model": args.model,
+                    "layers_cached": len(cov_map),
+                    "entries": studio.covariance.list_cached_entries(),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "inspect-trajectory":
+        loaded_m = studio.select_model(args.model)
+        edit_rec = studio.run_easyedit(
+            loaded_m,
+            algorithm="AlphaEdit",
+            associations=[(args.prompt, args.target)],
+            target_layers="auto_causal_trace",
+            use_covariance_cache=True,
+        )
+        traj = studio.inspect_trajectory(
+            loaded_m,
+            args.prompt,
+            target_token=args.target,
+            layer_down_proj_override=edit_rec.edited_weights_by_layer,
+        )
+        print(traj.markdown_table)
         return 0
 
     if args.command == "run-gym":

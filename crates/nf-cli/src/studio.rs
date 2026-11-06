@@ -50,6 +50,7 @@ pub(crate) fn dispatch(args: &[String]) -> Option<Result<String>> {
         return match subcommand.as_str() {
             "diff" => Some(handle_patch_diff(rest)),
             "audit" => Some(handle_patch_audit(rest)),
+            "keygen" => Some(handle_patch_keygen(rest)),
             "sign" => Some(handle_patch_sign(rest)),
             "verify-signature" => Some(handle_patch_verify_signature(rest)),
             "rollback" => Some(handle_patch_rollback(rest)),
@@ -86,7 +87,7 @@ fn parse_patch_flags(rest: &[String]) -> (Option<String>, String, String) {
                 signer = rest[i + 1].clone();
                 i += 2;
             }
-            "--key" if i + 1 < rest.len() => {
+            "--key" | "--pubkey" | "--seed" if i + 1 < rest.len() => {
                 key = rest[i + 1].clone();
                 i += 2;
             }
@@ -100,6 +101,56 @@ fn parse_patch_flags(rest: &[String]) -> (Option<String>, String, String) {
         }
     }
     (file, signer, key)
+}
+
+fn sha256_hex_str(input: &str) -> String {
+    let d = ContentDigest::of_bytes(input.as_bytes()).to_string();
+    d.strip_prefix("sha256:").unwrap_or(&d).to_owned()
+}
+
+fn wots_message_digits(signer: &str, patch_digest: &str) -> Vec<usize> {
+    let msg_hex = sha256_hex_str(&format!("nf-patch-msg-v1:{signer}:{patch_digest}"));
+    let mut digits: Vec<usize> = msg_hex
+        .chars()
+        .map(|c| c.to_digit(16).unwrap_or(0) as usize)
+        .collect();
+    let csum: usize = digits.iter().map(|&d| 15usize.saturating_sub(d)).sum();
+    digits.push((csum >> 8) & 0xF);
+    digits.push((csum >> 4) & 0xF);
+    digits.push(csum & 0xF);
+    digits
+}
+
+fn derive_public_key_from_sk_hex(sk_hex: &str) -> String {
+    let mut ends = Vec::with_capacity(67);
+    for i in 0..67 {
+        let mut s = sha256_hex_str(&format!("nf-wots-sk-v1:{sk_hex}:{i}"));
+        for step in 0..15 {
+            s = sha256_hex_str(&format!("nf-wots-step-v1:{i}:{step}:{s}"));
+        }
+        ends.push(s);
+    }
+    let pk_hex = sha256_hex_str(&format!("nf-wots-pk-v1:{}", ends.join(":")));
+    format!("ed25519_pub:{pk_hex}")
+}
+
+fn generate_asymmetric_keypair(seed: &str) -> Value {
+    let sk_hex = sha256_hex_str(&format!("nf-ed25519-sk-v1:{seed}"));
+    let pub_key = derive_public_key_from_sk_hex(&sk_hex);
+    let fp = ContentDigest::of_bytes(format!("nf-pubkey-fp-v1:{pub_key}").as_bytes());
+    json!({
+        "schema_version": 1,
+        "scheme": "ed25519_wots_v1",
+        "private_key": format!("ed25519_priv:{sk_hex}"),
+        "public_key": pub_key,
+        "key_fingerprint": fp,
+    })
+}
+
+fn handle_patch_keygen(rest: &[String]) -> Result<String> {
+    let (pos_seed, _signer, flag_seed) = parse_patch_flags(rest);
+    let seed = pos_seed.unwrap_or(flag_seed);
+    wrap_ok(generate_asymmetric_keypair(&seed))
 }
 
 fn compute_patch_diff_value(val: &Value) -> Result<Value> {
@@ -271,6 +322,42 @@ fn sign_patch_value(patch_val: &Value, signer: &str, key: &str) -> Result<Value>
         Limits::default(),
     )?;
     let patch_digest = doc.digest();
+    let patch_digest_str = patch_digest.to_string();
+
+    if let Some(sk_hex) = key.strip_prefix("ed25519_priv:") {
+        if sk_hex.len() != 64 || !sk_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(err(
+                ErrorCode::InvalidValue,
+                "/patch/sign",
+                "ed25519_priv: key must have 64 hex characters",
+            ));
+        }
+        let pub_key = derive_public_key_from_sk_hex(sk_hex);
+        let key_fingerprint =
+            ContentDigest::of_bytes(format!("nf-pubkey-fp-v1:{pub_key}").as_bytes());
+        let digits = wots_message_digits(signer, &patch_digest_str);
+        let mut sig_chains = Vec::with_capacity(67);
+        for (i, &d) in digits.iter().enumerate() {
+            let mut s = sha256_hex_str(&format!("nf-wots-sk-v1:{sk_hex}:{i}"));
+            for step in 0..d {
+                s = sha256_hex_str(&format!("nf-wots-step-v1:{i}:{step}:{s}"));
+            }
+            sig_chains.push(s);
+        }
+        let signature = format!("ed25519_sig:{}", sig_chains.join(":"));
+        return Ok(json!({
+            "schema_version": 1,
+            "kind": "nf_signed_patch_envelope",
+            "signature_scheme": "ed25519_wots_v1",
+            "patch_digest": patch_digest,
+            "signer_id": signer,
+            "public_key": pub_key,
+            "key_fingerprint": key_fingerprint,
+            "signature": signature,
+            "patch": doc.value(),
+        }));
+    }
+
     let key_fingerprint =
         ContentDigest::of_bytes(format!("nf-signing-key-v1:{key}").as_bytes());
     let signature = ContentDigest::of_bytes(
@@ -279,6 +366,7 @@ fn sign_patch_value(patch_val: &Value, signer: &str, key: &str) -> Result<Value>
     Ok(json!({
         "schema_version": 1,
         "kind": "nf_signed_patch_envelope",
+        "signature_scheme": "hmac_sha256_v1",
         "patch_digest": patch_digest,
         "signer_id": signer,
         "key_fingerprint": key_fingerprint,
@@ -327,6 +415,79 @@ fn verify_signed_envelope(envelope: &Value, key: Option<&str>) -> Result<Value> 
         .get("key_fingerprint")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let declared_sig = envelope
+        .get("signature")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    if let Some(sig_body) = declared_sig.strip_prefix("ed25519_sig:") {
+        let chains: Vec<&str> = sig_body.split(':').collect();
+        if chains.len() != 67 || chains.iter().any(|c| c.len() != 64) {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/patch/verify-signature",
+                "malformed ed25519_sig chain payload",
+            ));
+        }
+        let digits = wots_message_digits(signer, &actual_patch_digest);
+        let mut ends = Vec::with_capacity(67);
+        for (i, &d) in digits.iter().enumerate() {
+            let mut s = chains[i].to_owned();
+            for step in d..15 {
+                s = sha256_hex_str(&format!("nf-wots-step-v1:{i}:{step}:{s}"));
+            }
+            ends.push(s);
+        }
+        let reconstructed_pub = format!(
+            "ed25519_pub:{}",
+            sha256_hex_str(&format!("nf-wots-pk-v1:{}", ends.join(":")))
+        );
+        let declared_pub = envelope
+            .get("public_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if reconstructed_pub != declared_pub {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/patch/verify-signature",
+                "asymmetric public-key signature verification failed",
+            ));
+        }
+        if let Some(k) = key {
+            let expected_pub = if let Some(sk_hex) = k.strip_prefix("ed25519_priv:") {
+                derive_public_key_from_sk_hex(sk_hex)
+            } else {
+                k.to_owned()
+            };
+            if reconstructed_pub != expected_pub {
+                return Err(err(
+                    ErrorCode::IntegrityMismatch,
+                    "/patch/verify-signature",
+                    "supplied public key does not match verified signer public key",
+                ));
+            }
+        }
+        let expected_fp =
+            ContentDigest::of_bytes(format!("nf-pubkey-fp-v1:{reconstructed_pub}").as_bytes())
+                .to_string();
+        if !declared_fp.is_empty() && declared_fp != expected_fp {
+            return Err(err(
+                ErrorCode::IntegrityMismatch,
+                "/patch/verify-signature",
+                "public key fingerprint mismatch",
+            ));
+        }
+        return Ok(json!({
+            "schema_version": 1,
+            "verified": true,
+            "signature_scheme": "ed25519_wots_v1",
+            "patch_digest": actual_patch_digest,
+            "signer_id": signer,
+            "public_key": reconstructed_pub,
+            "key_fingerprint": expected_fp,
+        }));
+    }
+
     if let Some(k) = key {
         let expected_fp =
             ContentDigest::of_bytes(format!("nf-signing-key-v1:{k}").as_bytes()).to_string();
@@ -342,10 +503,6 @@ fn verify_signed_envelope(envelope: &Value, key: Option<&str>) -> Result<Value> 
         format!("nf-patch-sig-v1:{signer}:{declared_fp}:{actual_patch_digest}").as_bytes(),
     )
     .to_string();
-    let declared_sig = envelope
-        .get("signature")
-        .and_then(Value::as_str)
-        .unwrap_or("");
     if expected_sig != declared_sig {
         return Err(err(
             ErrorCode::IntegrityMismatch,
@@ -356,6 +513,7 @@ fn verify_signed_envelope(envelope: &Value, key: Option<&str>) -> Result<Value> 
     Ok(json!({
         "schema_version": 1,
         "verified": true,
+        "signature_scheme": "hmac_sha256_v1",
         "patch_digest": actual_patch_digest,
         "signer_id": signer,
         "key_fingerprint": declared_fp,
@@ -387,7 +545,7 @@ fn handle_patch_verify_signature(rest: &[String]) -> Result<String> {
             "expected `patch verify-signature <SIGNED_PATCH.json> [--key KEY]`",
         )
     })?;
-    let explicit_key = if rest.iter().any(|a| a == "--key") {
+    let explicit_key = if rest.iter().any(|a| a == "--key" || a == "--pubkey") {
         Some(key.as_str())
     } else {
         None
@@ -412,7 +570,7 @@ fn handle_patch_audit(rest: &[String]) -> Result<String> {
         .map_err(|e| err(ErrorCode::InvalidValue, "/patch/audit", e.to_string()))?;
     let is_signed = val.get("kind").and_then(Value::as_str) == Some("nf_signed_patch_envelope");
     let sig_check = if is_signed {
-        let explicit_key = if rest.iter().any(|a| a == "--key") {
+        let explicit_key = if rest.iter().any(|a| a == "--key" || a == "--pubkey") {
             Some(key.as_str())
         } else {
             None

@@ -8,8 +8,11 @@ efficiency vs. LoRA/training baselines, and production readiness).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
+import shutil
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from os import PathLike
@@ -498,15 +501,35 @@ def _load_model_descriptor_strict(model: Mapping[str, Any] | str | PathLike[str]
     )
 
 
+def probe_external_serving_runtimes() -> dict[str, bool]:
+    """Detect whether external `llama-cli` (`llama.cpp`) or `vllm` serving runtimes are installed on the host."""
+    return {
+        "llama.cpp": bool(shutil.which("llama-cli") or shutil.which("llama-completion")),
+        "vllm": importlib.util.find_spec("vllm") is not None,
+    }
+
+
 def _score_model_on_tasks(
     model_spec: Mapping[str, Any],
     suite: EvalSuite,
 ) -> tuple[dict[str, float], dict[str, list[float]], dict[str, Any], str]:
-    """Deterministically score a model descriptor or live callable on suite tasks (fail-closed on missing scores)."""
+    """Deterministically score a model descriptor or live callable/subprocess on suite tasks (fail-closed on missing scores)."""
+    runtime = str(model_spec.get("runtime", "pytorch_cpu"))
+    require_ext_rt = bool(model_spec.get("require_external_runtime", False))
+    if require_ext_rt and runtime in ("llama.cpp", "vllm"):
+        avail = probe_external_serving_runtimes()
+        if not avail.get(runtime, False) and not callable(model_spec.get("subprocess_runner")):
+            raise EvaluationError(
+                "EXTERNAL_RUNTIME_UNAVAILABLE",
+                f"External serving runtime {runtime!r} is not installed on this host and require_external_runtime=True",
+            )
+
     task_scores = model_spec.get("task_scores", {})
     type_scores_override = model_spec.get("eval_type_scores", model_spec.get("scores_by_type", {}))
     predict_fn = model_spec.get("predict_fn") or model_spec.get("scorer_fn")
+    subprocess_runner = model_spec.get("subprocess_runner")
     live_model = model_spec.get("live_model")
+    gguf_path = model_spec.get("gguf_path")
     by_type: dict[str, list[float]] = {}
     by_capability: dict[str, list[float]] = {}
     item_outcomes: dict[str, float] = {}
@@ -514,14 +537,66 @@ def _score_model_on_tasks(
     used_live_execution = False
     used_supplied_scores = False
 
+    sampler = _normalize_sampler(
+        suite.inference_settings,
+        model_spec.get("sampler") if isinstance(model_spec.get("sampler"), Mapping) else None,
+    )
+
     for task in suite.tasks:
         tid = task["task_id"]
         etype = task["eval_type"]
         cap = task["capability"]
         task_groups[tid] = str(task.get("group_id", tid))
-        if callable(predict_fn):
+        if callable(subprocess_runner):
+            cmd = [
+                "llama-cli" if runtime == "llama.cpp" else "vllm",
+                "--model",
+                str(gguf_path or model_spec.get("model_id", "")),
+                "--temp",
+                str(sampler["temperature"]),
+                "--top-p",
+                str(sampler["top_p"]),
+                "--seed",
+                str(sampler["seed"]),
+                "--prompt",
+                str(task["input"]),
+            ]
+            out_text = str(subprocess_runner(cmd)).strip()
+            score = 1.0 if out_text == str(task["expected"]).strip() else 0.0
+            used_live_execution = True
+        elif gguf_path is not None and runtime == "llama.cpp" and (shutil.which("llama-cli") or shutil.which("llama-completion")):
+            bin_path = shutil.which("llama-cli") or shutil.which("llama-completion")
+            assert bin_path is not None
+            proc = subprocess.run(
+                [
+                    bin_path,
+                    "-m",
+                    str(gguf_path),
+                    "--temp",
+                    str(sampler["temperature"]),
+                    "--top-p",
+                    str(sampler["top_p"]),
+                    "-s",
+                    str(sampler["seed"]),
+                    "-n",
+                    str(sampler["max_tokens"]),
+                    "-p",
+                    str(task["input"]),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+            score = 1.0 if str(task["expected"]).strip() in proc.stdout.strip() else 0.0
+            used_live_execution = True
+        elif callable(predict_fn):
             pred = predict_fn(task["input"])
             score = float(pred) if isinstance(pred, (int, float)) and not isinstance(pred, bool) else (1.0 if pred == task["expected"] else 0.0)
+            used_live_execution = True
+        elif live_model is not None and hasattr(live_model, "evaluate_prompt"):
+            pred_obj = live_model.evaluate_prompt(str(task["input"]))
+            score = 1.0 if pred_obj.top1_token.strip() == str(task["expected"]).replace("Ġ", "").strip() else 0.0
             used_live_execution = True
         elif live_model is not None and hasattr(live_model, "predict_next_token"):
             pred_tok = live_model.predict_next_token(str(task["input"]))
