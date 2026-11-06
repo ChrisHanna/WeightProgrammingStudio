@@ -29,13 +29,23 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .analysis import Interval, cluster_bootstrap_ci, holm_adjust, sign_flip_p_value
-from .decision import PromotionDecision, RetentionGate, TaskEffect, decide
+from .decision import ControlEffect, PromotionDecision, RetentionGate, TaskEffect, decide
 from .evaluators import Evaluator, build_evaluator
-from .generators import RETENTION_TASK, Item, draw_clusters, draw_retention, render
-from .plan import PlanError, PlanTamperedError, StudyPlan, digest_bytes, load_frozen_plan
+from .generators import RETENTION_TASK, GeneratorContractError, Item, check_clusters, get_item_generator, render
+from .plan import (
+    BASE_ARM,
+    PLACEBO_ARM,
+    TUNED_ARMS,
+    PlanError,
+    PlanTamperedError,
+    StudyPlan,
+    base_arm_artifact,
+    digest_bytes,
+    load_frozen_plan,
+)
 
 GENESIS = "sha256:" + "0" * 64
-NUMBER_TASKS = ("parity", "comparison")
+PLACEBO_NORM_TOLERANCE = 1e-6
 
 
 class Refused(Exception):
@@ -61,24 +71,24 @@ def draw_sealed_holdout(
     plan: StudyPlan, seeds: list[int], retention_seed: int, exposed: dict[str, list[str]]
 ) -> list[Item]:
     """Regenerate the holdout from sealed seeds. Draws are disjoint from exposure and each other."""
-    excluded_numbers = {operand for task in NUMBER_TASKS for operand in exposed.get(task, [])}
-    excluded_boolean = set(exposed.get("boolean", []))
+    generator = get_item_generator(plan.item_generator)
+    shared = {operand for task in generator.shared_operand_tasks for operand in exposed.get(task, [])}
+    excluded = {
+        task: shared if task in generator.shared_operand_tasks else set(exposed.get(task, [])) for task in plan.tasks
+    }
     items: list[Item] = []
     for draw_index, seed in enumerate(seeds):
         for task in plan.tasks:
-            exclude = excluded_boolean if task == "boolean" else excluded_numbers
-            clusters = draw_clusters(
-                task,
-                seed,
-                plan.clusters_per_task_per_draw,
-                domain=plan.number_domain,
-                exclude=exclude,
-                tag=f"draw{draw_index}",
+            exclude = excluded[task]
+            tag = f"draw{draw_index}"
+            clusters = generator.draw_clusters(
+                task, seed, plan.clusters_per_task_per_draw, domain=plan.number_domain, exclude=exclude, tag=tag
             )
+            check_clusters(clusters, task, plan.clusters_per_task_per_draw, exclude, tag)
             for cluster in clusters:
                 exclude.update(cluster.operands)
             items += render(clusters, plan.holdout_prefixes)
-    items += draw_retention(
+    items += generator.draw_retention(
         retention_seed, plan.retention_items, exclude=frozenset(exposed.get(RETENTION_TASK, [])), tag="sealed"
     )
     return items
@@ -101,7 +111,8 @@ def audit_sealed_state(state_dir: str | Path) -> dict[str, Any]:
     commitment = holdout_commitment(sealed["seeds"], sealed["retention_seed"], items)
     if commitment != sealed["commitment"]:
         raise ValueError("sealed holdout doesn't reproduce its commitment")
-    return {"commitment": commitment, "items": items, "exposed": sealed["exposed"]}
+    manifest = json.loads((root / "manifest.json").read_bytes())
+    return {"commitment": commitment, "items": items, "exposed": sealed["exposed"], "manifest": manifest}
 
 
 class Custodian:
@@ -179,44 +190,121 @@ class Custodian:
         seeds = [candidate.get("synthesis_seed") for candidate in candidates]
         if sorted(seeds) != sorted(self.plan.synthesis_seeds):
             raise Refused("SEED_MISMATCH", "candidates must match the planned synthesis seeds exactly")
-        digests = [candidate.get("candidate_digest") for candidate in candidates]
+        controls = manifest.get("controls", [])
+        if not isinstance(controls, list):
+            raise Refused("BAD_MANIFEST", "controls must be a list")
+        digests = [entry.get("candidate_digest") for entry in (*candidates, *controls)]
         if len(set(digests)) != len(digests):
-            raise Refused("BAD_MANIFEST", "candidate digests must be distinct")
+            raise Refused("BAD_MANIFEST", "candidate and control digests must all be distinct")
         exposed = manifest.get("exposed_operands")
         allowed = {*self.plan.tasks, RETENTION_TASK}
         if not isinstance(exposed, dict) or not set(exposed) <= allowed or not set(self.plan.tasks) <= set(exposed):
             raise Refused("BAD_MANIFEST", "exposed_operands must declare every task, even if empty")
+        self._validate_controls(controls)
+        self._validate_tuning(manifest.get("tuning", {}), exposed)
         return candidates
+
+    def _validate_controls(self, controls: list[dict[str, Any]]) -> None:
+        """Every planned arm must be present, for every seed: a control can't be left out of a study."""
+        wanted = {
+            (arm, None if arm == BASE_ARM else seed)
+            for arm in self.plan.arms
+            for seed in self.plan.synthesis_seeds
+        }
+        found = [(entry.get("arm"), entry.get("synthesis_seed")) for entry in controls]
+        if len(set(found)) != len(found) or set(found) - wanted:
+            raise Refused("UNPLANNED_CONTROL", "the manifest lists a control the plan doesn't name, or lists one twice")
+        missing = wanted - set(found)
+        if missing:
+            arms = sorted({arm for arm, _ in missing})
+            raise Refused("CONTROL_MISSING", f"the manifest is missing planned control arms: {arms}")
+        for entry in controls:
+            if entry["arm"] == BASE_ARM:
+                data = Path(str(entry.get("artifact_path"))).read_bytes()
+                if data != base_arm_artifact(self.plan_digest):
+                    raise Refused("BAD_MANIFEST", "the base arm must submit the base marker for this plan")
+
+    def _validate_tuning(self, tuning: Any, exposed: dict[str, list[str]]) -> None:
+        """Tuning is recorded in the frozen manifest, and all it saw must be excluded from the holdout."""
+        for arm in set(self.plan.arms) & set(TUNED_ARMS):
+            record = tuning.get(arm) if isinstance(tuning, dict) else None
+            if not isinstance(record, dict) or not record.get("trials") or not record.get("selected"):
+                raise Refused("TUNING_NOT_RECORDED", f"the manifest has no tuning record for the {arm} arm")
+            data = record.get("data") or {}
+            prefixes = data.get("prefixes")
+            if not prefixes or not set(prefixes) <= set(self.plan.development_prefixes):
+                raise Refused("TUNING_NOT_DEVELOPMENT", f"the {arm} arm wasn't tuned on development prefixes only")
+            operands = data.get("operands") or {}
+            retention = data.get("retention_prompts") or []
+            undeclared = [
+                task for task, values in operands.items() if not set(values) <= set(exposed.get(task, []))
+            ]
+            if undeclared or not set(retention) <= set(exposed.get(RETENTION_TASK, [])):
+                raise Refused("TUNING_NOT_DECLARED", f"the {arm} arm's tuning data isn't all declared as exposed")
+
+    def _validate_placebos(self, candidates: list[dict[str, Any]], controls: list[dict[str, Any]]) -> None:
+        """A placebo must match its candidate's norm and rank, or the comparison could be rigged with a big one."""
+        if PLACEBO_ARM not in self.plan.arms:
+            return
+        by_seed = {candidate["synthesis_seed"]: candidate for candidate in candidates}
+        evaluator = self._get_evaluator()
+
+        def profile_of(entry: dict[str, Any]) -> dict[str, dict[str, float]]:
+            name = entry["candidate_digest"].removeprefix("sha256:")  # The sealed copy, already digest-checked.
+            return evaluator.edit_profile((self.sealed / "candidates" / name).read_bytes())
+
+        for placebo in (entry for entry in controls if entry["arm"] == PLACEBO_ARM):
+            candidate = profile_of(by_seed[placebo["synthesis_seed"]])
+            profile = profile_of(placebo)
+            matches = set(candidate) == set(profile) and all(
+                candidate[site]["rank"] == profile[site]["rank"]
+                and abs(candidate[site]["norm"] - profile[site]["norm"])
+                <= PLACEBO_NORM_TOLERANCE * max(candidate[site]["norm"], 1e-12)
+                for site in candidate
+            )
+            if not matches:
+                raise Refused("PLACEBO_MISMATCH", f"the placebo for seed {placebo['synthesis_seed']} doesn't match")
 
     def freeze(self, manifest: dict[str, Any]) -> dict[str, Any]:
         self._check_plan()
         if self._event("freeze"):
             raise Refused("ALREADY_FROZEN", "this study has already frozen its only manifest")
+        if self.plan.label == "confirmatory" and not get_item_generator(self.plan.item_generator).confirmatory_ready:
+            raise Refused("GENERATOR_NOT_QUALIFIED", f"{self.plan.item_generator} isn't fit for a confirmatory study")
         candidates = self._validate_manifest(manifest)
-        for candidate in candidates:
+        controls = manifest.get("controls", [])
+        for candidate in (*candidates, *controls):
             data = Path(str(candidate.get("artifact_path"))).read_bytes()
             if digest_bytes(data) != candidate["candidate_digest"]:
-                raise Refused("DIGEST_MISMATCH", f"artifact for seed {candidate['synthesis_seed']} doesn't match its digest")
+                raise Refused("DIGEST_MISMATCH", f"artifact for seed {candidate.get('synthesis_seed')} doesn't match its digest")
             # Keep a private copy: later changes to the proposer's file can't reach evaluation.
             name = candidate["candidate_digest"].removeprefix("sha256:")
             _write_private(self.sealed / "candidates" / name, data)
+        self._validate_placebos(candidates, controls)
         seeds = [secrets.randbits(128) for _ in range(self.plan.holdout_draws)]
         retention_seed = secrets.randbits(128)
         exposed = manifest["exposed_operands"]
         try:
             items = draw_sealed_holdout(self.plan, seeds, retention_seed, exposed)
+        except GeneratorContractError as exc:
+            raise Refused("BAD_GENERATOR", str(exc)) from exc
         except ValueError as exc:
             raise Refused("DOMAIN_EXHAUSTED", "the holdout domain is too small after exclusions") from exc
         commitment = holdout_commitment(seeds, retention_seed, items)
         doc = {"seeds": seeds, "retention_seed": retention_seed, "exposed": exposed, "commitment": commitment}
         _write_private(self.sealed / "holdout.json", canonical(doc))
         manifest_digest = digest_bytes(canonical(manifest))
+        _write_private(self.state / "manifest.json", canonical(manifest))  # Holds no holdout data, and binds tuning.
         self._append(
             "freeze",
             manifest_digest=manifest_digest,
             holdout_commitment=commitment,
             candidates=[
                 {"candidate_digest": c["candidate_digest"], "synthesis_seed": c["synthesis_seed"]} for c in candidates
+            ],
+            controls=[
+                {"arm": c["arm"], "candidate_digest": c["candidate_digest"], "synthesis_seed": c["synthesis_seed"]}
+                for c in controls
             ],
         )
         self.items = items
@@ -266,7 +354,10 @@ class Custodian:
         return int(cluster_id.split(":")[1].removeprefix("draw"))
 
     def _candidate_aggregate(
-        self, base: dict[str, dict[str, float]], scores: dict[str, dict[str, float]], retention: dict[str, dict[str, float]]
+        self,
+        base: dict[str, dict[str, float]],
+        scores: dict[str, dict[str, float]],
+        retention: dict[str, dict[str, float]] | None,
     ) -> dict[str, Any]:
         plan = self.plan
         tasks: dict[str, Any] = {}
@@ -289,6 +380,8 @@ class Custodian:
                     **{key: getattr(interval, key) for key in ("mean", "low", "high", "level", "clusters")},
                 }
             tasks[task] = metrics
+        if retention is None:
+            return {"tasks": tasks, "retention": None}
         agreement, kl = self._retention_intervals(retention)
         return {"tasks": tasks, "retention": {"agreement": asdict(agreement), "kl": asdict(kl)}}
 
@@ -315,7 +408,9 @@ class Custodian:
         freeze = self._event("freeze")
         if freeze is None:
             raise Refused("NOT_FROZEN", "no manifest has been frozen")
-        if digest not in {candidate["candidate_digest"] for candidate in freeze["candidates"]}:
+        arms = {c["candidate_digest"]: "candidate" for c in freeze["candidates"]}
+        arms.update({c["candidate_digest"]: c["arm"] for c in freeze["controls"]})
+        if digest not in arms:
             raise Refused("UNKNOWN_CANDIDATE", "this digest is not in the frozen manifest")
         if any(event["kind"] == "query_started" and event["candidate_digest"] == digest for event in self.events):
             raise Refused("ALREADY_QUERIED", "this candidate has already used its only query")
@@ -327,8 +422,11 @@ class Custodian:
                 raise ValueError("sealed candidate copy doesn't match its digest")
             evaluator = self._get_evaluator()
             base = self._base_scores()
-            scores = evaluator.score(self._tasks_items(), data)
-            retention = evaluator.retention(self._retention_items(), data)
+            if arms[digest] == BASE_ARM:
+                scores, retention = base, None
+            else:
+                scores = evaluator.score(self._tasks_items(), data)
+                retention = evaluator.retention(self._retention_items(), data)
             aggregate = self._candidate_aggregate(base, scores, retention)
         except Exception:
             traceback.print_exc()
@@ -336,7 +434,7 @@ class Custodian:
             raise Refused("EVALUATION_FAILED", "evaluation failed; this candidate's query is spent") from None
         _write_private(self._score_path(digest), canonical({"scores": scores, "retention": retention}))
         self._append("query_finished", candidate_digest=digest, aggregate_digest=digest_bytes(canonical(aggregate)))
-        return {"candidate_digest": digest, "aggregate": aggregate}
+        return {"candidate_digest": digest, "arm": arms[digest], "aggregate": aggregate}
 
     # Decision -------------------------------------------------------------------------------
 
@@ -345,7 +443,10 @@ class Custodian:
         # A query started but never finished (a crash, say) counts as failed and can't be dropped.
         finished = {e["candidate_digest"] for e in self.events if e["kind"] == "query_finished"}
         failed = tuple(c["candidate_digest"] for c in freeze["candidates"] if c["candidate_digest"] not in finished)
-        if failed:
+        failed_controls = tuple(
+            f"{c['arm']}:{c['candidate_digest']}" for c in freeze["controls"] if c["candidate_digest"] not in finished
+        )
+        if failed or failed_controls:
             return decide(
                 plan,
                 plan_digest=self.plan_digest,
@@ -353,6 +454,7 @@ class Custodian:
                 effects=(),
                 retention=None,
                 failed_candidates=failed,
+                failed_controls=failed_controls,
             )
         results = {
             c["synthesis_seed"]: json.loads(self._score_path(c["candidate_digest"]).read_bytes())
@@ -360,7 +462,13 @@ class Custodian:
         }
         base = self._base_scores()
         metric = plan.primary_metric
+        control_results: dict[str, dict[int, dict[str, Any]]] = {}
+        for entry in freeze["controls"]:
+            if entry["arm"] != BASE_ARM:
+                scores = json.loads(self._score_path(entry["candidate_digest"]).read_bytes())
+                control_results.setdefault(entry["arm"], {})[entry["synthesis_seed"]] = scores
         rows = []
+        control_rows: list[tuple[str, str, list[float], list[float], list[float], Interval, float, dict[str, float]]] = []
         for task_index, task in enumerate(plan.tasks):
             ids, base_values = self._cluster_values(task, metric, base)
             per_seed = {seed: self._cluster_values(task, metric, r["scores"])[1] for seed, r in results.items()}
@@ -379,9 +487,51 @@ class Custodian:
                 for seed, values in per_seed.items()
             }
             rows.append((task, base_values, pooled, interval, p_value, seed_deltas))
-        adjusted = holm_adjust([row[4] for row in rows])
+            for arm_index, arm in enumerate(plan.comparator_arms, start=1):
+                per_control = {
+                    seed: self._cluster_values(task, metric, r["scores"])[1] for seed, r in control_results[arm].items()
+                }
+                control = [sum(column) / len(column) for column in zip(*per_control.values(), strict=True)]
+                paired = [p - c for p, c in zip(pooled, control, strict=True)]
+                analysis_seed = plan.analysis_seed + 100 * arm_index + task_index
+                arm_interval = cluster_bootstrap_ci(
+                    paired,
+                    [self._stratum(cluster) for cluster in ids],
+                    level=plan.corrected_ci_level,
+                    resamples=plan.bootstrap_resamples,
+                    seed=analysis_seed,
+                )
+                arm_p = sign_flip_p_value(paired, resamples=plan.permutation_resamples, seed=analysis_seed)
+                arm_seed_deltas = {
+                    str(seed): (sum(per_seed[seed]) - sum(per_control[seed])) / len(per_seed[seed]) for seed in per_seed
+                }
+                control_rows.append((arm, task, base_values, pooled, control, arm_interval, arm_p, arm_seed_deltas))
+        # One Holm family: every task against the base model and against every comparator.
+        adjusted = holm_adjust([row[4] for row in rows] + [row[6] for row in control_rows])
+        controls = tuple(
+            ControlEffect(
+                arm=arm,
+                task=task,
+                control_accuracy=sum(control) / len(control),
+                candidate_accuracy=sum(pooled) / len(pooled),
+                mean_delta=interval.mean,
+                ci_low=interval.low,
+                ci_high=interval.high,
+                ci_level=interval.level,
+                p_value=p_value,
+                p_adjusted=p_adjusted,
+                clusters=interval.clusters,
+                seed_deltas=seed_deltas,
+                control_minus_base=(sum(control) - sum(base_values)) / len(control),
+            )
+            for (arm, task, base_values, pooled, control, interval, p_value, seed_deltas), p_adjusted in zip(
+                control_rows, adjusted[len(rows) :], strict=True
+            )
+        )
         effects = []
-        for (task, base_values, pooled, interval, p_value, seed_deltas), p_adjusted in zip(rows, adjusted, strict=True):
+        for (task, base_values, pooled, interval, p_value, seed_deltas), p_adjusted in zip(
+            rows, adjusted[: len(rows)], strict=True
+        ):
             effects.append(
                 TaskEffect(
                     task=task,
@@ -410,6 +560,7 @@ class Custodian:
             manifest_digest=freeze["manifest_digest"],
             effects=tuple(effects),
             retention=retention,
+            controls=controls,
         )
 
     def decide(self) -> dict[str, Any]:
@@ -418,8 +569,8 @@ class Custodian:
         if freeze is None:
             raise Refused("NOT_FROZEN", "no manifest has been frozen")
         started = {e["candidate_digest"] for e in self.events if e["kind"] == "query_started"}
-        if started != {c["candidate_digest"] for c in freeze["candidates"]}:
-            raise Refused("INCOMPLETE", "every frozen candidate must be queried before the decision")
+        if started != {c["candidate_digest"] for c in (*freeze["candidates"], *freeze["controls"])}:
+            raise Refused("INCOMPLETE", "every frozen candidate and control must be queried before the decision")
         path = self.state / "decision.json"
         if path.exists():
             stored: dict[str, Any] = json.loads(path.read_bytes())

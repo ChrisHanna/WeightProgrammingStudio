@@ -273,8 +273,19 @@ CONFIRMATORY = make_plan(
 )
 
 
+def good_controls(plan: StudyPlan) -> tuple[decision.ControlEffect, ...]:
+    """Confirmatory plans now require control arms; these clear them, so each test still isolates its own gate."""
+    return tuple(
+        decision.ControlEffect(arm, task, 0.5, 0.9, 0.4, 0.3, 0.5, 0.99, 0.001, 0.01, 80, {"11": 0.4, "22": 0.4}, 0.0)
+        for arm in plan.comparator_arms
+        for task in plan.tasks
+    )
+
+
 def run_decide(plan: StudyPlan, effects: tuple[decision.TaskEffect, ...], retention: Any = GOOD_RETENTION) -> Any:
-    return decision.decide(plan, plan_digest="p", manifest_digest="m", effects=effects, retention=retention)
+    return decision.decide(
+        plan, plan_digest="p", manifest_digest="m", effects=effects, retention=retention, controls=good_controls(plan)
+    )
 
 
 ALL_GOOD = tuple(good_effect(task) for task in ("parity", "boolean", "comparison"))

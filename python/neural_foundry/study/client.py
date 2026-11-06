@@ -14,7 +14,7 @@ from typing import Any
 import neural_foundry
 
 from .generators import RETENTION_TASK, Cluster, Item
-from .plan import digest_bytes
+from .plan import base_arm_artifact, digest_bytes
 
 
 class CustodianRefused(RuntimeError):
@@ -26,6 +26,12 @@ class CustodianRefused(RuntimeError):
 def write_candidate(path: str | Path, artifact: bytes) -> str:
     Path(path).write_bytes(artifact)
     return digest_bytes(artifact)
+
+
+def write_base_arm(path: str | Path, plan_digest: str) -> dict[str, Any]:
+    """The base model's manifest entry. It has no weights, but it spends a query like any other arm."""
+    digest = write_candidate(path, base_arm_artifact(plan_digest))
+    return {"arm": "base", "synthesis_seed": None, "candidate_digest": digest, "artifact_path": str(path)}
 
 
 def declare_exposure(
