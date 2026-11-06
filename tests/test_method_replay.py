@@ -200,3 +200,45 @@ def test_real_pythia_association_edit_replays(tmp_path: Path, algorithm: Any, co
     pairs = [(f"Task: {e}", t) for e, t in GYM.base_rules[:count]]
     receipt = prd_adapters.run_easyedit_adapter(model, algorithm=algorithm, associations=pairs)
     _assert_replays(tmp_path, model, receipt.edit_steps, _weights_by_site(model, receipt), base_on_disk=True)
+
+
+# ---- Agent loop, driven by a scripted transcript. No live LLM is called.
+
+
+AGENT_PROPOSALS: dict[str, dict[str, Any]] = {
+    "dampen": {"operation": "dampen_singular_components", "components": [0, 1], "factor": 0.5},
+    "activation": {"operation": "project_out_activation_direction", "positive_prompts": ["Rule: hello"], "negative_prompts": ["Rule: the"], "factor": 0.5},
+    "output": {"operation": "project_out_output_direction", "token": ATTRACTOR, "factor": 0.5},
+    "associations": {"operation": "edit_associations", "associations": [{"prompt": f"Task: {GYM.base_rules[0][0]}", "target": GYM.base_rules[0][1]}]},
+}
+
+
+def _scripted_session(model: Any, proposal: Mapping[str, Any]) -> Any:
+    agent: Any = None
+
+    def transport(messages: list[dict[str, Any]], tools: object) -> dict[str, Any]:
+        turn = sum(1 for m in messages if m["role"] == "assistant")
+        if turn == 0:
+            return {"tool_call": {"name": "propose_weight_program", "arguments": dict(proposal)}}
+        observation = agent._transcript[-1].tool_observation
+        assert "candidate_id" in observation, observation
+        return {"tool_call": {"name": "submit_candidate", "arguments": {"candidate_id": observation["candidate_id"]}}}
+
+    agent = prd_adapters.FrontierAgentProgrammer("claude-4-5-sonnet", llm_transport=transport)
+    return agent.run_autonomous_tool_loop(model, max_turns=4)
+
+
+@pytest.mark.parametrize("label", sorted(AGENT_PROPOSALS))
+def test_scripted_agent_submission_replays(tmp_path: Path, label: str) -> None:
+    model = pythia.build_mini_pythia_model()
+    report = _scripted_session(model, AGENT_PROPOSALS[label])
+    assert report.session_kind == "agent_driven"
+    weights = {model.mlp_down_proj_site(layer): w for layer, w in report.submitted_weights_by_layer.items()}
+    _assert_replays(tmp_path, model, report.submitted_edit_steps, weights)
+
+
+def test_scripted_agent_without_submission_has_no_steps() -> None:
+    report = prd_adapters.FrontierAgentProgrammer("claude-4-5-sonnet", llm_transport=lambda m, t: {}).run_autonomous_tool_loop(
+        pythia.build_mini_pythia_model(), max_turns=2
+    )
+    assert report.submitted_edit_steps == ()

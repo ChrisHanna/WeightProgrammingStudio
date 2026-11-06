@@ -685,6 +685,7 @@ class FrontierAgentSessionReport:
     stop_reason: str = ""
     sealed_retention_accuracy: float | None = None
     submitted_practice_scores: dict[str, float] | None = None
+    submitted_edit_steps: tuple[MethodEditStep, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1295,21 +1296,30 @@ class FrontierAgentProgrammer:
                     "weight": edit.edited_weight.detach().clone().to(torch.float64),
                     "plan_digest": edit.rust_plan_digest,
                     "candidate_digest": edit.rust_candidate_digest,
+                    "edit_steps": edit.edit_steps,
                 }
             factor = float(args.get("factor", 1.0))
             if not 0.0 < factor <= 1.0:
                 raise ValueError("factor must be in (0, 1]")
             if operation == "project_out_output_direction":
-                from .repair import output_direction_for_token, project_out_output_direction
+                from .repair import output_direction_for_token, output_projection_factors, project_out_output_direction
 
                 token = vocab_token(str(args.get("token", "")))
+                direction = output_direction_for_token(model, model.tokenizer.vocab[token])
                 edited, plan, cand = project_out_output_direction(
                     w,
-                    output_direction_for_token(model, model.tokenizer.vocab[token]),
+                    direction,
                     factor=factor,
                     smoke_probe=key_vector("Hello world", layer),
                 )
-                return {"layer": layer, "weight": edited, "plan_digest": plan, "candidate_digest": cand}
+                left, right = output_projection_factors(w, direction, factor=factor)
+                return {
+                    "layer": layer,
+                    "weight": edited,
+                    "plan_digest": plan,
+                    "candidate_digest": cand,
+                    "edit_steps": (low_rank_step(site, f"agent_{operation}", left, right),),
+                }
             if operation == "dampen_singular_components":
                 components = [int(c) for c in args.get("components", [])]
                 u, s, vh = torch.linalg.svd(w, full_matrices=False)
@@ -1341,7 +1351,13 @@ class FrontierAgentProgrammer:
             )
             if not reload_ok:
                 raise ValueError("Rust executor reload parity failed")
-            return {"layer": layer, "weight": edited, "plan_digest": plan, "candidate_digest": cand}
+            return {
+                "layer": layer,
+                "weight": edited,
+                "plan_digest": plan,
+                "candidate_digest": cand,
+                "edit_steps": (low_rank_step(site, f"agent_{operation}", left, right),),
+            }
 
         def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
             nonlocal ablation_results, submitted, denied
@@ -1557,6 +1573,7 @@ class FrontierAgentProgrammer:
             stop_reason=stop_reason,
             sealed_retention_accuracy=sealed_retention,
             submitted_practice_scores=final_practice,
+            submitted_edit_steps=final["edit_steps"] if final else (),
         )
 
 def compare_weight_reading_only_vs_feedback_enabled_agent(
