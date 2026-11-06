@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from neural_foundry.pythia import (
     PythiaModel,
     build_mini_pythia_model,
@@ -24,11 +25,12 @@ def test_mini_pythia_weight_programming_via_rust_surgeon_and_evals() -> None:
     assert report.eval_comparison["dashboard"]["skill_retention_pct"] == 100.0
 
 
+@pytest.mark.qualification
 def test_real_eleutherai_pythia_14m_weight_programming_if_cached() -> None:
     """Runs live Weight-Space Programming on EleutherAI/pythia-14m when present at /tmp/pythia-14m."""
     pythia_dir = Path("/tmp/pythia-14m")
     if not (pythia_dir / "model.safetensors").is_file():
-        return
+        pytest.skip("checkpoint not present at /tmp/pythia-14m")
     model = PythiaModel.from_pretrained_dir(pythia_dir, model_name="EleutherAI/pythia-14m")
     report = run_pythia_weight_programming_study(model)
 

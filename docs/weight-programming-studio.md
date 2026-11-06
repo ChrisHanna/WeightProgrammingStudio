@@ -1,6 +1,6 @@
 # Weight Programming Studio — Architecture & PRD Traceability Guide
 
-This document maps the **Weight Programming Studio** product requirements (`WP-01`–`WP-24`, Experimental Search Intelligence, and Priority Experiments `A`–`D`) to their authoritative Rust and Python implementations in this repository.
+This document maps product requirements to code. A row showing where code lives is **not** evidence that the requirement is met. Evidence levels are in the [qualification matrix](qualification-matrix.md), and limits are in the [README](../README.md#limitations).
 
 ---
 
@@ -31,8 +31,8 @@ This document maps the **Weight Programming Studio** product requirements (`WP-0
 | `diagnostics.py` | Failure clustering, contrastive localization, causal activation patching, and structured hypothesis cards (`T048`–`T051`). |
 | `autonomous.py` | Interchangeable agent provider contracts, constrained IR synthesis, multi-branch search, ablation pruning, and Gym Scientist audits (`T052`–`T058`). |
 | `flagship.py` | Pretrained repetition-loop repair, matched LoRA baseline comparison, independent replay bundles, and M3 readiness reporting (`T060`–`T063`). |
-| `m4_modalities.py` & `m4_ecosystems.py` | Research memory, circuit tracing, sparse features, Pareto frontiers, cross-gym interference, symbolic rule construction (`CG-09`), weight transfer (`CG-10`), training/RL baselines (`CG-11`), external gym adapters, and library reuse (`CG-13`). |
-| `m5_surgery.py` | Coupled MLP width slicing, GQA/RoPE attention head surgery, layer reorganization, structural constructors, group quantization, compression accounting, and serving/efficiency benchmarks (`T102`–`T119`). |
+| `m4_modalities.py` & `m4_ecosystems.py` | Fixture-level rule construction and transfer, small linear baselines, and evaluators that score caller-supplied numbers (`evidence` field). External gym adapters don't run the named packages. Transfer benchmark and proposer training are unsupported. |
+| `m5_surgery.py` | Tensor slicing for surgery, grouped quantization, and evaluators over caller-supplied numbers. Serving qualification, systems profile and WeightEfficiencyBench are unsupported. |
 | `export_formats.py` | Native HuggingFace Safetensors and **GGUF v3** (`F32`, `F16`, `Q8_0`) export and reload round-trip verification, block-quantized `Q8_0` matrix editing (`execute_quantized_q8_matrix_edit`), and sharded Safetensors `mmap` copy-on-write checkpoint loader (`ShardedMmapCheckpoint`, up to `64 GiB`). |
 | `patch_ux.py` | Layer-by-layer weight diff summaries (`diff_model_weights`: Frobenius, spectral $\ell_2$, and $\ell_\infty$ norms), cryptographic patch signing (`sign_patch_envelope`, `verify_patch_signature`), and one-command rollback (`create_rollback_handle`, `rollback_model_patch`). |
 
@@ -40,32 +40,32 @@ This document maps the **Weight Programming Studio** product requirements (`WP-0
 
 ## 2. Product Requirements Traceability (`WP-01`–`WP-24`)
 
-| PRD ID | Requirement | Implementation |
-| :--- | :--- | :--- |
-| **WP-01** | Import & inspect open-weight models | `nf model inspect`, `neural_foundry.inspection.BoundedInspector`, `neural_foundry.pretrained.intake_local_qwen2`, `neural_foundry.pythia.PythiaModel.from_pretrained_dir` |
-| **WP-02** | Interchangeable Claude & GPT-6 agents | `neural_foundry.prd_adapters.FrontierAgentProgrammer` (`claude-4-5-sonnet`, `gpt-6-astra`) & `neural_foundry.autonomous.AgentProviderContract` |
-| **WP-03** | Versioned `weightctl` CLI & tool API | `crates/nf-cli/src/weightctl.rs`, `crates/nf-cli/src/evals.rs`, `crates/nf-cli/src/studio.rs` |
-| **WP-04** | Typed Weight IR & immutable outputs | `crates/nf-weight-ir/src/program.rs`, `crates/nf-weight-ir/src/compilation.rs`, `crates/nf-surgeon/src/transaction.rs` |
-| **WP-05** | Direct tensor ops, projections & deltas | `crates/nf-surgeon/src/basic.rs` & `crates/nf-surgeon/src/representation.rs` |
-| **WP-06** | Import custom gyms & feedback contracts | `crates/nf-experiments/src/intake.rs`, `crates/nf-experiments/src/validation.rs`, `neural_foundry.pythia.ReusableTaskGym` |
-| **WP-07** | External eval suites & promotion gates | `neural_foundry.evals` (`import_suite`, `import_lm_eval_harness_task`, `import_inspect_ai_eval_spec`, `verify_promotion`) |
-| **WP-08** | Agent loops with resource limits & resume | `crates/nf-experiments/src/coordinator.rs`, `crates/nf-experiments/src/manual_workflow.rs` |
-| **WP-09** | Sealed-test isolation & contamination checks | `crates/nf-experiments/src/coordinator/splits.rs`, `crates/nf-experiments/src/coordinator/exposure.rs`, `neural_foundry.evals.run_eval` |
-| **WP-10** | Full edit, probe, eval & lineage ledger | `crates/nf-patches/src/replay.rs`, `crates/nf-experiments/src/scientific_graph.rs` |
-| **WP-11** | Approval, atomic promotion, rollback & export | `crates/nf-experiments/src/coordinator/promotion.rs`, `crates/nf-checkpoint/src/export.rs` |
-| **WP-12** | Tenant isolation, permissions, budgets & audit | `crates/nf-experiments/src/sandbox.rs`, `neural_foundry.m4_ecosystems.enforce_private_gym_policy` |
-| **WP-13** | `EasyEdit` adapters (`ROME`, `MEMIT`, `AlphaEdit`) | `neural_foundry.prd_adapters.run_easyedit_adapter`, `WeightProgrammingStudio.run_easyedit` |
-| **WP-14** | `mergekit` adapters (`task_arithmetic`, `ties`, `dare`) | `neural_foundry.prd_adapters.run_mergekit_adapter`, `WeightProgrammingStudio.run_mergekit` |
-| **WP-15** | Causal activation patching & probes | `neural_foundry.diagnostics`, `neural_foundry.m4_modalities.evaluate_mechanism_confirmation` |
-| **WP-16** | Multi-candidate branch comparison | `neural_foundry.pythia.run_pythia_gym_task_learning_study`, `neural_foundry.autonomous` |
-| **WP-17** | Automated LoRA & fine-tuning baselines | `neural_foundry.m4_ecosystems` (`run_lora_baseline`, `run_sft_baseline`, `run_distillation_baseline`, `run_rl_baseline`) |
-| **WP-18** | Reusable compatibility-checked recipes | `crates/nf-experiments/src/library_lifecycle.rs`, `neural_foundry.m4_ecosystems.evaluate_library_recipe_reuse` |
-| **WP-19** | Checkpoint branching, composition & conflicts | `crates/nf-patches/src/composition.rs`, `WeightProgrammingStudio.compose_patches` |
-| **WP-20** | Evolutionary search over edit programs | `crates/nf-patches/src/evolutionary_ops.rs`, `neural_foundry.m4_modalities.compute_pareto_population_frontiers` |
-| **WP-21** | Program synthesis for small neural networks | `neural_foundry.m4_modalities.construct_algorithmic_relu_rule` (`CG-09`) |
-| **WP-22** | Cross-model / cross-version weight transfer | `neural_foundry.m4_modalities` (`estimate_permutation_alignment`, `solve_fitted_linear_alignment`, `execute_mapped_weight_transfer`) |
-| **WP-23** | Searchable registry of recipes & gym results | `VerifiedLibraryCatalog`, `ScientificGraphStore`, `ResearchMemoryStore` |
-| **WP-24** | Learned weight-space proposers | `neural_foundry.m4_ecosystems` (`build_proposer_dataset`, `run_proposer_training_study`, `evaluate_learned_proposer_inference`) |
+| PRD ID | Requirement | Implementation | Status |
+| :--- | :--- | :--- | :--- |
+| **WP-01** | Import & inspect open-weight models | `nf model inspect`, `neural_foundry.inspection.BoundedInspector`, `neural_foundry.pretrained.intake_local_qwen2`, `neural_foundry.pythia.PythiaModel.from_pretrained_dir` | experimental |
+| **WP-02** | Interchangeable agents | `neural_foundry.prd_adapters.FrontierAgentProgrammer`, `neural_foundry.autonomous.AgentProviderContract` | experimental; no live call audited |
+| **WP-03** | Versioned `weightctl` CLI & tool API | `crates/nf-cli/src/weightctl.rs`, `crates/nf-cli/src/evals.rs`, `crates/nf-cli/src/studio.rs` | not verified in this audit |
+| **WP-04** | Typed Weight IR & immutable outputs | `crates/nf-weight-ir/src/program.rs`, `crates/nf-weight-ir/src/compilation.rs`, `crates/nf-surgeon/src/transaction.rs` | verified for f32/f64 tensors |
+| **WP-05** | Direct tensor ops, projections & deltas | `crates/nf-surgeon/src/basic.rs`, `crates/nf-surgeon/src/representation.rs` | verified for f32/f64 tensors |
+| **WP-06** | Import custom gyms & feedback contracts | `crates/nf-experiments/src/intake.rs`, `crates/nf-experiments/src/validation.rs`, `neural_foundry.pythia.ReusableTaskGym` | not individually audited |
+| **WP-07** | External eval suites & promotion gates | `neural_foundry.evals` (`import_suite`, `import_lm_eval_harness_task`, `import_inspect_ai_eval_spec`, `verify_promotion`) | not individually audited |
+| **WP-08** | Agent loops with resource limits & resume | `crates/nf-experiments/src/coordinator.rs`, `crates/nf-experiments/src/manual_workflow.rs` | not individually audited |
+| **WP-09** | Sealed-test isolation & contamination checks | `crates/nf-experiments/src/coordinator/splits.rs`, `crates/nf-experiments/src/coordinator/exposure.rs`, `neural_foundry.evals.run_eval` | not individually audited |
+| **WP-10** | Full edit, probe, eval & lineage ledger | `crates/nf-patches/src/replay.rs`, `crates/nf-experiments/src/scientific_graph.rs` | not individually audited |
+| **WP-11** | Approval, atomic promotion, rollback & export | `crates/nf-experiments/src/coordinator/promotion.rs`, `crates/nf-checkpoint/src/export.rs` | not individually audited |
+| **WP-12** | Tenant isolation, permissions, budgets & audit | `crates/nf-experiments/src/sandbox.rs`; `enforce_private_gym_policy` only checks caller declarations | not verified; no tenant isolation found |
+| **WP-13** | `EasyEdit` adapters (`ROME`, `MEMIT`, `AlphaEdit`) | `neural_foundry.prd_adapters.run_easyedit_adapter`, `WeightProgrammingStudio.run_easyedit` | not individually audited |
+| **WP-14** | `mergekit` adapters (`task_arithmetic`, `ties`, `dare`) | `neural_foundry.prd_adapters.run_mergekit_adapter`, `WeightProgrammingStudio.run_mergekit` | not individually audited |
+| **WP-15** | Causal activation patching & probes | `neural_foundry.diagnostics`; `evaluate_mechanism_confirmation` scores caller-supplied effects | fixture-only |
+| **WP-16** | Multi-candidate branch comparison | `neural_foundry.pythia.run_pythia_gym_task_learning_study`, `neural_foundry.autonomous` | not individually audited |
+| **WP-17** | LoRA & fine-tuning baselines | `neural_foundry.m4_ecosystems` baselines train one linear matrix | fixture-only |
+| **WP-18** | Reusable compatibility-checked recipes | `crates/nf-experiments/src/library_lifecycle.rs`; `evaluate_library_recipe_reuse` takes the outcome as an argument | not verified in this audit |
+| **WP-19** | Checkpoint branching, composition & conflicts | `crates/nf-patches/src/composition.rs`, `WeightProgrammingStudio.compose_patches` | not individually audited |
+| **WP-20** | Evolutionary search over edit programs | `crates/nf-patches/src/evolutionary_ops.rs`, `neural_foundry.m4_modalities.compute_pareto_population_frontiers` | not individually audited |
+| **WP-21** | Program synthesis for small neural networks | `neural_foundry.m4_modalities.construct_algorithmic_relu_rule` (`CG-09`) | not individually audited |
+| **WP-22** | Cross-model / cross-version weight transfer | `neural_foundry.m4_modalities` transfer on a two-layer fixture; `run_transfer_benchmark` not implemented | fixture-only; no cross-model transfer |
+| **WP-23** | Searchable registry of recipes & gym results | `VerifiedLibraryCatalog`, `ScientificGraphStore`, `ResearchMemoryStore` | not individually audited |
+| **WP-24** | Learned weight-space proposers | `build_proposer_dataset` only; `run_proposer_training_study` raises `NotImplementedError` | unsupported |
 
 ---
 
@@ -85,7 +85,7 @@ print(gym_report.promotion_verification["markdown_dashboard"])
 
 # 2. Run PRD Priority Experiments A, B, C, and D end-to-end
 prd_report = studio.run_priority_experiments("nf/mini-pythia-fixture")
-assert prd_report.all_experiments_succeeded is True
+print(prd_report.all_experiments_succeeded)  # fixture run; not a qualification
 ```
 
 ---
@@ -113,7 +113,7 @@ assert prd_report.all_experiments_succeeded is True
 
 ## 5. 20-Point Scientific & Engineering Assurance Matrix
 
-All 20 audit requirements are enforced across the Rust core, Python SDK, CLI, and CI workflows (`tests/test_audit_20_points.py`):
+These gates describe the intended checks in `tests/test_audit_20_points.py`. They were audited at fixture scope only, and rows 15, 17 and 19 weren't exercised against a live provider, a Docker daemon or hosted CI. Two tests in that file failed in this audit against an older `nf` binary; they need a rebuild to be judged.
 
 | # | Assurance Gate | Enforcement & Implementation |
 | ---: | :--- | :--- |
@@ -130,7 +130,7 @@ All 20 audit requirements are enforced across the Rust core, Python SDK, CLI, an
 | **11** | **Native `f16`/`bf16` & Quantized `Q8_0` Support** | `crates/nf-surgeon` and `crates/nf-weight-ir` natively load, validate, and edit IEEE-754 `f16` and `bf16` tensors with `f32`/`f64` accumulation; `export_formats.execute_quantized_q8_matrix_edit` supports 32-element block-quantized `Q8_0` editing. |
 | **12** | **Large & Sharded `mmap` Checkpoints** | `StateLoadLimits::large_model()` and `CompilerBounds::large_model()` scale up to `64 GiB`, and `ShardedMmapCheckpoint` (`export_formats.py`) provides zero-copy `mmap` reads and copy-on-write per-shard export for `model.safetensors.index.json`. |
 | **13** | **Transactional GPU Execution Path** | `gpu.execute_transactional_gpu_edit_and_eval` unites DLPack GPU/device execution with Rust Weight IR parity verification, smoke probes, and source-immutability rollback guarantees. |
-| **14** | **HF Safetensors & GGUF v3 Round-Trip** | `export_huggingface_safetensors`, `reload_and_verify_huggingface_safetensors`, `export_gguf_v3` (`F32`, `F16`, `Q8_0`), and `reload_and_verify_gguf_v3` rebuild edited checkpoints from disk and verify 100% behavioral preservation. |
+| **14** | **HF Safetensors & GGUF v3 Round-Trip** | `export_huggingface_safetensors`, `reload_and_verify_huggingface_safetensors`, `export_gguf_v3` (`F32`, `F16`, `Q8_0`), and `reload_and_verify_gguf_v3` rebuild checkpoints through this package and compare a few probe prompts. Fixture-only. |
 | **15** | **Live LLM-Provider Agent Harness** | `FrontierAgentProgrammer` supports live HTTP API calls (Anthropic/OpenAI) and pluggable `llm_transport`, recording turn-by-turn `AgentTurnTranscript` logs, token counts, and USD costs, and failing closed on budget overrun (`AgentBudgetExceededError`). |
 | **16** | **Feedback-Tool vs. Weight-Reading Contrast** | `compare_weight_reading_only_vs_feedback_enabled_agent` compares weight-reading alone with feedback tools. Without holdout leakage the fixture reaches `4/6` with feedback, so necessity is not established. |
 | **17** | **Sandboxed Edit Execution in CI** | `.github/workflows/m1.yml` and `.github/workflows/m2.yml` pull the pinned rootless/no-network container image and run `tests/test_sandbox_isolation.py`. |
@@ -140,7 +140,9 @@ All 20 audit requirements are enforced across the Rust core, Python SDK, CLI, an
 
 ---
 
-## 6. Closing the Real-Model Gap, Easy Adoption & Supply-Chain Trust Layer
+## 6. Real-Model Gap, Adoption & Trust Layer (unaudited design intent)
+
+This table lists what the code is built for. Its levels are set by the [qualification matrix](qualification-matrix.md). The backdoor scan is a sanity check, and only GPT-NeoX and Qwen2 can be edited.
 
 | Pillar | Capability | Implementation |
 | :--- | :--- | :--- |
