@@ -96,6 +96,26 @@ def test_real_vllm_container_serves_verified_candidate() -> None:
         assert adapter.loaded_identity()["served_model_identity_verified"] is False
 
 
+def test_real_vllm_container_serves_published_sft_candidate() -> None:
+    artifact = os.environ.get("NF_VLLM_SFT_ARTIFACT")
+    if not artifact:
+        pytest.skip("set NF_VLLM_SFT_ARTIFACT to a published full SFT candidate")
+    root = Path(artifact)
+    manifest = json.loads((root / "artifact_manifest.json").read_bytes())
+    candidate = manifest["metadata"]["candidate"]
+    reference = CandidateRef(manifest["model_id"], manifest["kind"], manifest["base_digest"], manifest["model_digest"],
+                             candidate["artifact_digest"], str(root), candidate["candidate_id"], candidate["method_id"], "qwen3")
+    with VllmCandidateServer(reference, revision="c1899de289a04d12100db370d81485cdf75e47ca",
+                             max_new_tokens=32, timeout_seconds=300) as adapter:
+        response = adapter.infer({"format": "json_extraction_v1",
+                                  "messages": [{"role": "user", "content": 'Return the object {"answer":1}.'}],
+                                  "output_schema": {"type": "object", "properties": {"answer": {"type": "integer"}},
+                                                    "required": ["answer"], "additionalProperties": False}})
+        assert isinstance(response.response, dict) and type(response.response.get("answer")) is int
+        assert adapter.reference == reference
+        assert adapter.loaded_identity()["served_model_identity_verified"] is False
+
+
 def test_real_vllm_nonserving_diagnostic() -> None:
     if os.environ.get("NF_VLLM_DIAGNOSTIC") != "1":
         pytest.skip("set NF_VLLM_DIAGNOSTIC=1 for the isolated startup probe")
