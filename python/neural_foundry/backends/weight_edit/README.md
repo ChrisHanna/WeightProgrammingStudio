@@ -27,7 +27,9 @@ These are test targets, not a supported-model allowlist. Config and checkpoint r
 
 ## Implementation Status
 
-The initial loader uses the real Transformers model, extracts its text configuration and hidden size, and records the shared tensor-state digest. Structural discovery finds a uniquely largest homogeneous block stack and records standard Linear and Conv1D sites, including transposed storage. Optional profiles check tensor names and compatible shapes; they do not assign ambiguous roles. Square sites remain `residual_write_unknown` until activation-provenance evidence can distinguish reads and attention writes. Non-square fused GQA and fused gate/up semantics are not yet resolved from structure.
+The loader records shared-storage groups (including views) and compares runtime state names with actual safetensors keys, allowing only recorded tied aliases. The edit-permission guard rejects shared storage unless explicitly permitted; application of edits is not implemented yet.
+
+Discovery uses configured head and key/value dimensions, projection-group structure, and real-model output ablation to distinguish attention and MLP writers. It verifies that a writer produces the enclosing branch's output and that zeroing the writer zeroes that output. This is a branch-output check, not a general residual-dataflow proof. Unresolved writers remain unknown. GQA fused-QKV widths use query plus twice key/value width, not three times hidden size. Profiles check roles and names without assigning them. Every block parameter must be accounted for as a projection, norm, or bias. Unexplained parameters, including packed 3D experts, are refused; recognized routers are explicitly labelled rather than exposed as residual reads.
 
 Activation capture runs the real model under scoped forward hooks, stores selected token inputs and outputs as CPU float32, supports all tokens from an explicit response start, and can capture gradients of the model's own labeled loss without accumulating parameter gradients. Hooks are removed even when the forward fails. Capture assumes exclusive use of an evaluation-mode model.
 

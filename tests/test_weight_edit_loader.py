@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from neural_foundry.backends.weight_edit.loader import UnsupportedModel, load_model, text_configuration
+from neural_foundry.backends.weight_edit.loader import UnsupportedModel, WeightEditInputError, load_model, require_editable, text_configuration
 from neural_foundry.backends.weight_edit.discover import check_profile, find_blocks, find_sites
 from neural_foundry.backends.weight_edit.capture import capture
 from neural_foundry.model_digest import model_state_digest
@@ -39,10 +39,12 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
     else:
         if architecture == "GPTNeoX":
             common["rotary_pct"] = 1.0
-        if architecture == "Gemma":
-            common["head_dim"] = 8
+        if architecture in {"Qwen3", "Gemma"}:
+            common["head_dim"] = 12
+            common["num_key_value_heads"] = 1
         if architecture == "Phi3":
             common["original_max_position_embeddings"] = 64
+            common["num_key_value_heads"] = 1
         config = getattr(transformers, architecture + "Config")(**common)
     model = transformers.AutoModelForCausalLM.from_config(config).eval()
     model.save_pretrained(tmp_path, safe_serialization=True)
@@ -64,10 +66,29 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
     assert blocks.count == 2
     expected_path = {"GPTNeoX": "gpt_neox.layers", "GPT2": "transformer.h"}.get(architecture, "model.layers")
     assert blocks.path == expected_path
-    sites = find_sites(loaded.model, blocks, loaded.hidden_size)
+    sites = find_sites(loaded.model, blocks, loaded.hidden_size, checkpoint_tensor_names=loaded.checkpoint_tensor_names)
     assert any(site.role == "residual_write_mlp" for site in sites.sites)
-    assert sites.digest == find_sites(loaded.model, blocks, loaded.hidden_size).digest
+    assert sites.digest == find_sites(loaded.model, blocks, loaded.hidden_size, checkpoint_tensor_names=loaded.checkpoint_tensor_names).digest
+    assert sites.checkpoint_names_verified is True
+    with pytest.raises(UnsupportedModel, match="tensor index"):
+        find_sites(loaded.model, blocks, loaded.hidden_size, checkpoint_tensor_names=frozenset())
+    if loaded.shared_storage_groups:
+        with pytest.raises(WeightEditInputError, match="shared"):
+            require_editable(loaded, [loaded.shared_storage_groups[0][0]])
+        require_editable(loaded, [loaded.shared_storage_groups[0][0]], allow_shared=True)
     assert all(site.transposed == (architecture == "GPT2") for site in sites.sites)
+    role_names = {
+        "GPTNeoX": {"attention.query_key_value": "residual_read_fused", "attention.dense": "residual_write_attn",
+                    "mlp.dense_h_to_4h": "residual_read", "mlp.dense_4h_to_h": "residual_write_mlp"},
+        "GPT2": {"attn.c_attn": "residual_read_fused", "attn.c_proj": "residual_write_attn",
+                 "mlp.c_fc": "residual_read", "mlp.c_proj": "residual_write_mlp"},
+        "Phi3": {"self_attn.qkv_proj": "residual_read_fused", "self_attn.o_proj": "residual_write_attn",
+                 "mlp.gate_up_proj": "residual_read", "mlp.down_proj": "residual_write_mlp"},
+    }.get(architecture, {"self_attn.q_proj": "residual_read", "self_attn.k_proj": "residual_read",
+                         "self_attn.v_proj": "residual_read", "self_attn.o_proj": "residual_write_attn",
+                         "mlp.gate_proj": "residual_read", "mlp.up_proj": "residual_read", "mlp.down_proj": "residual_write_mlp"})
+    expected_roles = {f"{blocks.path}.{layer}.{name}.weight": role for layer in range(blocks.count) for name, role in role_names.items()}
+    assert {site.tensor_name: site.role for site in sites.sites} == expected_roles
     captured = capture(loaded, sites, ["hello hello"])
     for site in sites.sites:
         values = captured[site.tensor_name]
@@ -144,6 +165,42 @@ def test_discovery_rejects_tied_block_stack_candidates() -> None:
         find_blocks(model)
 
 
+@pytest.mark.parametrize("shape", [(2, 16, 32), (16, 16)])
+def test_discovery_rejects_unexplained_expert_or_matrix_weights(shape) -> None:
+    from neural_foundry.backends.weight_edit.discover import BlockList
+
+    block = torch.nn.Module()
+    block.projection = torch.nn.Linear(16, 32)
+    block.register_parameter("unexplained", torch.nn.Parameter(torch.zeros(shape)))
+    model = torch.nn.Module()
+    model.blocks = torch.nn.ModuleList([block])
+    model.config = SimpleNamespace(get_text_config=lambda: SimpleNamespace(hidden_size=16, num_attention_heads=2))
+    with pytest.raises(UnsupportedModel, match="unaccounted.*unexplained"):
+        find_sites(model, BlockList("blocks", 1), 16)
+
+
+def test_router_is_not_a_residual_edit_site() -> None:
+    from neural_foundry.backends.weight_edit.discover import BlockList
+
+    block = torch.nn.Module()
+    block.router = torch.nn.Linear(16, 4, bias=False)
+    model = torch.nn.Module()
+    model.blocks = torch.nn.ModuleList([block])
+    model.config = SimpleNamespace(get_text_config=lambda: SimpleNamespace(hidden_size=16, num_attention_heads=2, num_experts=4))
+    sites = find_sites(model, BlockList("blocks", 1), 16, checkpoint_tensor_names=frozenset({"blocks.0.router.weight"}))
+    assert {site.tensor_name: site.role for site in sites.sites} == {"blocks.0.router.weight": "router"}
+
+
+def test_storage_groups_include_shared_views() -> None:
+    from neural_foundry.backends.weight_edit.loader import storage_groups
+
+    model = torch.nn.Module()
+    weights = torch.randn(4, 4)
+    model.first = torch.nn.Parameter(weights)
+    model.second = torch.nn.Parameter(weights[1:])
+    assert storage_groups(model) == (("first", "second"),)
+
+
 def test_cached_qwen_checkpoint_loads_and_discovers_on_cuda() -> None:
     if os.environ.get("NF_WEIGHT_EDIT_LIVE") != "1":
         pytest.skip("set NF_WEIGHT_EDIT_LIVE=1 for the cached Qwen CUDA check")
@@ -152,10 +209,21 @@ def test_cached_qwen_checkpoint_loads_and_discovers_on_cuda() -> None:
     checkpoint = resolve_checkpoint("Qwen/Qwen3-0.6B", revision="c1899de289a04d12100db370d81485cdf75e47ca")
     loaded = load_model(checkpoint.path, dtype=torch.bfloat16, device="cuda:0")
     blocks = find_blocks(loaded.model)
-    sites = find_sites(loaded.model, blocks, loaded.hidden_size)
+    sites = find_sites(loaded.model, blocks, loaded.hidden_size, checkpoint_tensor_names=loaded.checkpoint_tensor_names)
     assert loaded.hidden_size == loaded.text_config.hidden_size
     assert blocks.count == loaded.text_config.num_hidden_layers
     assert any(site.role == "residual_write_mlp" for site in sites.sites)
+    from neural_foundry.pythia import BUILTIN_ARCHITECTURE_PROFILES
+    check_profile(sites, BUILTIN_ARCHITECTURE_PROFILES["qwen3"], blocks)
+    expected_roles = {f"{blocks.path}.{layer}.{name}.weight": role for layer in range(blocks.count)
+                      for name, role in {"self_attn.q_proj": "residual_read", "self_attn.k_proj": "residual_read",
+                                         "self_attn.v_proj": "residual_read", "self_attn.o_proj": "residual_write_attn",
+                                         "mlp.gate_proj": "residual_read", "mlp.up_proj": "residual_read",
+                                         "mlp.down_proj": "residual_write_mlp"}.items()}
+    assert {site.tensor_name: site.role for site in sites.sites} == expected_roles
+    assert any({"model.embed_tokens.weight", "lm_head.weight"} <= set(group) for group in loaded.shared_storage_groups)
+    with pytest.raises(WeightEditInputError, match="shared"):
+        require_editable(loaded, ["lm_head.weight"])
     inputs = loaded.tokenizer("hello", return_tensors="pt").to("cuda:0")
     with torch.no_grad():
         logits = loaded.model(**inputs).logits
