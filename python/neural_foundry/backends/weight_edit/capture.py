@@ -41,12 +41,15 @@ def capture(
     collected = {site.tensor_name: [[], [], []] for site in sites.sites}
     gradient_mode = loss_labels is not None
 
-    def hook_for(name: str):
+    def hook_for(site: Any):
+        name = site.tensor_name
         def hook(module: Any, args: Any, output: Any) -> None:
             if name in active or not args or not isinstance(args[0], torch.Tensor) or not isinstance(output, torch.Tensor):
                 raise UnsupportedModel("site was called repeatedly or returned unsupported activations")
             if args[0].ndim != 3 or output.ndim != 3 or args[0].shape[:2] != output.shape[:2]:
                 raise UnsupportedModel("site activations are not batch-by-token matrices")
+            if args[0].shape[-1] != site.input_size or output.shape[-1] != site.output_size:
+                raise UnsupportedModel("site activation dimensions differ from the discovered map")
             if gradient_mode:
                 output.retain_grad()
             active[name] = (args[0], output)
@@ -55,7 +58,7 @@ def capture(
     try:
         for site in sites.sites:
             module = loaded.model.get_submodule(site.tensor_name.removesuffix(".weight"))
-            handles.append(module.register_forward_hook(hook_for(site.tensor_name)))
+            handles.append(module.register_forward_hook(hook_for(site)))
         device = next(loaded.model.parameters()).device
         for index, prompt in enumerate(prompts):
             active.clear()

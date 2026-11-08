@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +84,10 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
     gradients = capture(loaded, selected_sites, ["hello hello"], loss_labels=[[4, 4]])
     assert next(iter(gradients.values())).output_gradients.shape[0] == 1
     assert all(parameter.grad is None for parameter in loaded.model.parameters())
+    stale_sites = type(sites)((replace(selected_sites.sites[0], input_size=999),))
+    with pytest.raises(UnsupportedModel, match="discovered map"):
+        capture(loaded, stale_sites, ["hello hello"])
+    assert all(not module._forward_hooks for module in loaded.model.modules())
     original_forward = loaded.model.forward
     def failing_forward(*args, **kwargs):
         raise RuntimeError("forward failed")
@@ -94,7 +99,6 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
     finally:
         loaded.model.forward = original_forward
     if architecture in {"GPTNeoX", "Qwen2", "Llama"}:
-        from dataclasses import replace
         from neural_foundry.pythia import BUILTIN_ARCHITECTURE_PROFILES
         profile = BUILTIN_ARCHITECTURE_PROFILES[loaded.config.model_type]
         check_profile(sites, profile, blocks)
