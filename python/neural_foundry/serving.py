@@ -10,6 +10,7 @@ import importlib
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -164,8 +165,16 @@ QUALIFIED_ATTENTION_BACKEND = "FLEX_ATTENTION"
 
 # FlashInfer can JIT-compile a sampler at startup, which fails with FileNotFoundError('ninja') where
 # ninja is missing. `vllm_qualification` serves with this off too; temperature 0 never uses that sampler.
-_VLLM_STARTUP_ENV = {"VLLM_USE_FLASHINFER_SAMPLER": "0"}
+_VLLM_STARTUP_ENV = {"VLLM_USE_FLASHINFER_SAMPLER": "0", "VLLM_ALLOW_INSECURE_SERIALIZATION": "0"}
 _vllm_startup_lock = threading.Lock()
+
+
+def _require_secure_vllm_serialization() -> None:
+    """Insecure serialization is restricted to isolated identity probes, never serving."""
+    loaded_envs = sys.modules.get("vllm.envs")
+    if (os.environ.get("VLLM_ALLOW_INSECURE_SERIALIZATION", "0") != "0"
+        or (loaded_envs is not None and bool(getattr(loaded_envs, "VLLM_ALLOW_INSECURE_SERIALIZATION", False)))):
+        raise ServingRuntimeUnavailableError("vLLM serving forbids insecure serialization")
 
 
 @contextmanager
@@ -176,6 +185,7 @@ def _vllm_startup_env() -> Iterator[None]:
     during startup.
     """
     with _vllm_startup_lock:
+        _require_secure_vllm_serialization()
         saved = {name: os.environ.get(name) for name in _VLLM_STARTUP_ENV}
         os.environ.update(_VLLM_STARTUP_ENV)
         try:
@@ -208,6 +218,7 @@ class VllmAdapter:
                 self._vllm = importlib.import_module("vllm")
             except ImportError as exc:
                 raise ServingRuntimeUnavailableError("vllm is not installed") from exc
+            _require_secure_vllm_serialization()
             try:
                 self.engine = self._vllm.LLM(
                     model=str(self.directory),

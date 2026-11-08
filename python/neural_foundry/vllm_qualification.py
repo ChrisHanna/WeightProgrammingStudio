@@ -172,9 +172,14 @@ class _VllmServer:
         return self.log_path.read_text(encoding="utf-8", errors="replace")[-3000:]
 
     def __enter__(self) -> _VllmServer:
+        try:
+            serving._require_secure_vllm_serialization()
+        except serving.ServingRuntimeUnavailableError as exc:
+            raise VllmQualificationFailure("VLLM_INSECURE_SERIALIZATION_FORBIDDEN", str(exc)) from exc
         env = {
             **os.environ, "PYTHONPATH": "", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
             "DO_NOT_TRACK": "1", "VLLM_NO_USAGE_STATS": "1",
+            "VLLM_ALLOW_INSECURE_SERIALIZATION": "0",
             # FlashInfer would JIT-compile a top-k sampler at startup; temperature 0 never uses it.
             "VLLM_USE_FLASHINFER_SAMPLER": "0", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "2"),
         }
