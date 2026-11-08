@@ -8,6 +8,7 @@ import torch
 
 from neural_foundry.backends.weight_edit.loader import UnsupportedModel, load_model, text_configuration
 from neural_foundry.backends.weight_edit.discover import check_profile, find_blocks, find_sites
+from neural_foundry.backends.weight_edit.capture import capture
 from neural_foundry.model_digest import model_state_digest
 
 
@@ -66,6 +67,32 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
     assert any(site.role == "residual_write_mlp" for site in sites.sites)
     assert sites.digest == find_sites(loaded.model, blocks, loaded.hidden_size).digest
     assert all(site.transposed == (architecture == "GPT2") for site in sites.sites)
+    captured = capture(loaded, sites, ["hello hello"])
+    for site in sites.sites:
+        values = captured[site.tensor_name]
+        assert values.inputs.shape == (1, site.input_size)
+        assert values.outputs.shape == (1, site.output_size)
+        module = loaded.model.get_submodule(site.tensor_name.removesuffix(".weight"))
+        weights = module.weight.detach().t() if site.transposed else module.weight.detach()
+        expected_output = torch.nn.functional.linear(values.inputs, weights, module.bias.detach() if module.bias is not None else None)
+        torch.testing.assert_close(values.outputs, expected_output, atol=1e-5, rtol=1e-5)
+        assert not module._forward_hooks
+    selected_sites = type(sites)((next(site for site in sites.sites if site.role == "residual_write_mlp"),))
+    response_tokens = capture(loaded, selected_sites, ["hello hello"], response_starts=[0])
+    assert next(iter(response_tokens.values())).inputs.shape[0] == 2
+    gradients = capture(loaded, selected_sites, ["hello hello"], loss_labels=[[4, 4]])
+    assert next(iter(gradients.values())).output_gradients.shape[0] == 1
+    assert all(parameter.grad is None for parameter in loaded.model.parameters())
+    original_forward = loaded.model.forward
+    def failing_forward(*args, **kwargs):
+        raise RuntimeError("forward failed")
+    loaded.model.forward = failing_forward
+    try:
+        with pytest.raises(RuntimeError, match="forward failed"):
+            capture(loaded, selected_sites, ["hello hello"])
+        assert all(not module._forward_hooks for module in loaded.model.modules())
+    finally:
+        loaded.model.forward = original_forward
     if architecture in {"GPTNeoX", "Qwen2", "Llama"}:
         from dataclasses import replace
         from neural_foundry.pythia import BUILTIN_ARCHITECTURE_PROFILES
