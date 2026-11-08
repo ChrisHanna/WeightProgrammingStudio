@@ -38,3 +38,7 @@ Activation capture runs the real model under scoped hooks and deterministic algo
 Working weights are read from verified original checkpoint tensors into owned float32/float64 matrices, rather than taken from a lower-precision inference copy. Conv1D orientation is normalized. Applying and casting edits back remains unimplemented; no edit method has been migrated before old-engine equivalence tests.
 
 The initial tests use tiny local instances of seven standard architectures and the already-cached Qwen3 checkpoint. Tensor-only edit methods, application/export, old-engine equivalence checks, the complete compatibility probe, lifecycle registration, and the evidence-generated catalog are subsequent work. Distributed loading is not yet implemented.
+
+## Advanced Methods
+
+The [methods contract](methods/README.md) records the next milestone: locate, calculated edits, and measured preservation, followed by sequential updates, merging, portable directions, and restricted training. It also specifies the frozen gym-to-edit request, bounded preservation panel, and receipts. These remain planned; holdout is final one-shot evaluation, never feedback for iterative stopping or target optimization.
