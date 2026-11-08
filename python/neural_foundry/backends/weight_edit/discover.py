@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import ExitStack
 from typing import Any
 
 import torch
@@ -129,12 +130,14 @@ def _branch_roles(block: nn.Module, hidden: int, config: Any) -> dict[str, tuple
 
 
 def _confirm_writers(model: nn.Module, candidates: dict[str, tuple[str, str]], config: Any) -> set[str]:
+    from .numerics import deterministic_execution
     if not candidates:
         return set()
     if model.training:
         raise UnsupportedModel("role ablation requires an evaluation-mode model")
     captured: dict[str, torch.Tensor] = {}
     handles = []
+    execution = ExitStack()
 
     def observe(name: str):
         def hook(module: Any, args: Any, output: Any) -> None:
@@ -145,6 +148,7 @@ def _confirm_writers(model: nn.Module, candidates: dict[str, tuple[str, str]], c
         return hook
 
     try:
+        execution.enter_context(deterministic_execution(model))
         names = set(candidates) | {branch for _, branch in candidates.values()}
         for name in names:
             handles.append(model.get_submodule(name).register_forward_hook(observe(name)))
@@ -172,6 +176,7 @@ def _confirm_writers(model: nn.Module, candidates: dict[str, tuple[str, str]], c
     finally:
         for handle in handles:
             handle.remove()
+        execution.close()
 
 
 def find_blocks(model: nn.Module) -> BlockList:

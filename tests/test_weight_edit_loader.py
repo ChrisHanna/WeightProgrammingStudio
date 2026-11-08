@@ -9,7 +9,8 @@ import torch
 
 from neural_foundry.backends.weight_edit.loader import UnsupportedModel, WeightEditInputError, load_model, require_editable, text_configuration
 from neural_foundry.backends.weight_edit.discover import check_profile, find_blocks, find_sites
-from neural_foundry.backends.weight_edit.capture import capture
+from neural_foundry.backends.weight_edit.capture import capture, capture_statistics
+from neural_foundry.backends.weight_edit.numerics import working_weight
 from neural_foundry.model_digest import model_state_digest
 
 
@@ -100,6 +101,26 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
         torch.testing.assert_close(values.outputs, expected_output, atol=1e-5, rtol=1e-5)
         assert not module._forward_hooks
     selected_sites = type(sites)((next(site for site in sites.sites if site.role == "residual_write_mlp"),))
+    site = selected_sites.sites[0]
+    weights = loaded.model.state_dict()[site.tensor_name]
+    expected_working = weights.T if site.transposed else weights
+    torch.testing.assert_close(working_weight(loaded, site), expected_working.to(torch.float64), rtol=0, atol=0)
+    lower_precision = load_model(tmp_path, dtype=torch.bfloat16, device="cpu")
+    torch.testing.assert_close(working_weight(lower_precision, site), expected_working.to(torch.float64), rtol=0, atol=0)
+    with pytest.raises(WeightEditInputError, match="float32 or float64"):
+        working_weight(loaded, site, compute_dtype=torch.bfloat16)
+    retained = capture(loaded, selected_sites, ["hello hello", "hello"])
+    streamed = capture_statistics(loaded, selected_sites, ["hello hello", "hello"])
+    inputs = next(iter(retained.values())).inputs.to(torch.float64)
+    outputs = next(iter(retained.values())).outputs.to(torch.float64)
+    statistics = next(iter(streamed.values()))
+    assert statistics.count == 2 and statistics.input_gram.dtype == torch.float64
+    torch.testing.assert_close(statistics.input_gram, inputs.T @ inputs, rtol=0, atol=1e-12)
+    torch.testing.assert_close(statistics.input_output_cross, inputs.T @ outputs, rtol=0, atol=1e-12)
+    with pytest.raises(WeightEditInputError, match="byte budget"):
+        capture(loaded, selected_sites, ["hello hello"], max_capture_bytes=1)
+    with pytest.raises(WeightEditInputError, match="byte budget"):
+        capture_statistics(loaded, selected_sites, ["hello hello"], max_statistics_bytes=1)
     response_tokens = capture(loaded, selected_sites, ["hello hello"], response_starts=[0])
     assert next(iter(response_tokens.values())).inputs.shape[0] == 2
     gradients = capture(loaded, selected_sites, ["hello hello"], loss_labels=[[4, 4]])
@@ -119,6 +140,24 @@ def test_loads_real_tiny_local_transformers_models(tmp_path, architecture) -> No
         assert all(not module._forward_hooks for module in loaded.model.modules())
     finally:
         loaded.model.forward = original_forward
+    loaded.tokenizer.chat_template = "{{bos_token}} {% for message in messages %}{{message['content']}} {% endfor %}{% if add_generation_prompt %}{{eos_token}}{% endif %}"
+    messages = [{"role": "user", "content": "hello hello"}]
+    expected_ids = loaded.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, enable_thinking=False)
+    captured_template = capture(loaded, selected_sites, ["hello hello"])
+    observed = []
+    module = loaded.model.get_submodule(selected_sites.sites[0].tensor_name.removesuffix(".weight"))
+    handle = module.register_forward_hook(lambda module, args, output: observed.append(args[0].detach().clone()))
+    try:
+        with torch.no_grad():
+            loaded.model(input_ids=torch.tensor([expected_ids]), attention_mask=torch.ones((1, len(expected_ids)), dtype=torch.long))
+    finally:
+        handle.remove()
+    values = next(iter(captured_template.values()))
+    torch.testing.assert_close(values.inputs, observed[0][:, -1], rtol=0, atol=0)
+    assert values.renderer_digest and len(values.prompt_digests) == 1
+    with pytest.raises(WeightEditInputError, match="positions"):
+        capture(loaded, selected_sites, ["hello hello"], positions=[[999]])
+    assert not module._forward_hooks
     if architecture in {"GPTNeoX", "Qwen2", "Llama"}:
         from neural_foundry.pythia import BUILTIN_ARCHITECTURE_PROFILES
         profile = BUILTIN_ARCHITECTURE_PROFILES[loaded.config.model_type]
@@ -199,6 +238,21 @@ def test_storage_groups_include_shared_views() -> None:
     model.first = torch.nn.Parameter(weights)
     model.second = torch.nn.Parameter(weights[1:])
     assert storage_groups(model) == (("first", "second"),)
+
+
+def test_determinism_policy_is_scoped_even_on_failure() -> None:
+    from neural_foundry.backends.weight_edit.numerics import deterministic_execution
+
+    model = torch.nn.Linear(2, 2)
+    original = (torch.are_deterministic_algorithms_enabled(), torch.backends.cudnn.benchmark,
+                torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    with pytest.raises(RuntimeError, match="probe"):
+        with deterministic_execution(model):
+            assert torch.are_deterministic_algorithms_enabled()
+            assert not torch.backends.cudnn.benchmark and not torch.backends.cuda.matmul.allow_tf32
+            raise RuntimeError("probe")
+    assert original == (torch.are_deterministic_algorithms_enabled(), torch.backends.cudnn.benchmark,
+                        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
 
 
 def test_cached_qwen_checkpoint_loads_and_discovers_on_cuda() -> None:
