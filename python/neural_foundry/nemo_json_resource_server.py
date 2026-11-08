@@ -27,6 +27,7 @@ class JsonVerifyRequest(BaseVerifyRequest):
     nf_scenario: dict[str, Any]
     nf_job_digest: str
     nf_scorer_digest: str
+    nf_prompt_projection_digest: str
 
 
 class JsonVerifyResponse(BaseVerifyResponse):
@@ -35,6 +36,7 @@ class JsonVerifyResponse(BaseVerifyResponse):
     nf_scenario: dict[str, Any]
     nf_job_digest: str
     nf_scorer_digest: str
+    nf_prompt_projection_digest: str
 
 
 def _score(body: JsonVerifyRequest, response_text: str) -> float:
@@ -57,6 +59,7 @@ def _score(body: JsonVerifyRequest, response_text: str) -> float:
     original = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
     if (row["nf_scenario"] != body.nf_scenario or row["nf_reference"] != body.nf_reference
         or row["nf_job_digest"] != body.nf_job_digest or row["nf_scorer_digest"] != body.nf_scorer_digest
+        or row["nf_prompt_projection_digest"] != body.nf_prompt_projection_digest
         or original.input != body.responses_create_params.input or original.text != body.responses_create_params.text):
         raise ValueError("request differs from the frozen public scenario")
     python = os.environ.get("NF_NEMO_SCORER_PYTHON", "")
@@ -74,8 +77,10 @@ def _score(body: JsonVerifyRequest, response_text: str) -> float:
     if result.returncode != 0:
         raise ValueError("scorer worker failed")
     scored = json.loads(result.stdout)
-    if scored.get("scorer_digest") != body.nf_scorer_digest or type(scored.get("score")) is not float:
+    if not isinstance(scored, dict) or scored.get("scorer_digest") != body.nf_scorer_digest or type(scored.get("score")) is not float:
         raise ValueError("scorer worker returned an invalid identity or score")
+    if scored.get("prompt_projection_digest") != body.nf_prompt_projection_digest:
+        raise ValueError("scorer prompt projection differs from the compiled request")
     if not 0 <= scored["score"] <= 1:
         raise ValueError("scorer worker returned an out-of-range score")
     return scored["score"]

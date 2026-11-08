@@ -17,6 +17,7 @@ from .gym_job import GymJobError
 from .gym_lifecycle import AdapterIdentity, ModelAdapter
 from .gym_service import CandidateIdentity, ExecutionResponse, _document_digest
 from .provenance import parse_strict_json, sha256_file
+from .prompt_rendering import PromptRenderer
 from .vllm_candidate_files import verify_vllm_candidate_files
 
 
@@ -130,15 +131,21 @@ class VllmCandidateServer:
             raise
 
     def _adapter(self, files: dict[str, str]) -> ModelAdapter:
+        from transformers import AutoTokenizer
+
         reference = self.reference
+        tokenizer = AutoTokenizer.from_pretrained(self._snapshot, local_files_only=True, trust_remote_code=False)
+        renderer = PromptRenderer(tokenizer)
         identity = AdapterIdentity("vllm_container", "1", _document_digest({
             "adapter": sha256_file(__file__), "candidate_verifier": sha256_file(Path(__file__).with_name("vllm_candidate_files.py")),
             "image": self.image,
+            "prompt_renderer": renderer.digest,
         }))
         candidate = CandidateIdentity(reference.candidate_id, reference.method_id, reference.base_digest,
                                       reference.model_digest, reference.artifact_digest)
         settings = {"image": self.image, "device": "cuda:0", "precision": "bfloat16", "context_tokens": self.context_tokens,
-                    "max_new_tokens": self.max_new_tokens, "network": "none", "seed": 0}
+                    "max_new_tokens": self.max_new_tokens, "network": "none", "seed": 0,
+                    "prompt_renderer_digest": renderer.digest}
 
         def loaded_identity() -> Mapping[str, Any]:
             if self._container is None or self._snapshot is None:
@@ -147,6 +154,7 @@ class VllmCandidateServer:
                     "model_family": reference.family, "device": "cuda:0", "precision": "bfloat16",
                     "mounted_files_verified": True, "local_loaded_files_verified": False,
                     "served_model_identity_verified": False, "artifact_digest": reference.artifact_digest,
+                    "prompt_renderer_digest": renderer.digest,
                     "config_digest": files["config.json"], "tokenizer_digest": files["tokenizer.json"]}
 
         def infer(interaction: Mapping[str, Any]) -> ExecutionResponse:
@@ -155,13 +163,16 @@ class VllmCandidateServer:
             kind = interaction.get("format")
             if kind not in {"chat_messages_v1", "json_extraction_v1"} or not isinstance(interaction.get("messages"), list):
                 raise GymJobError("vLLM requires chat or JSON extraction messages")
-            payload: dict[str, Any] = {"model": "nf-candidate", "messages": interaction["messages"], "temperature": 0,
-                                       "max_tokens": self.max_new_tokens, "chat_template_kwargs": {"enable_thinking": False}}
+            rendered = renderer.render(interaction)
+            if len(rendered.token_ids) + self.max_new_tokens > self.context_tokens:
+                raise GymJobError("rendered prompt exceeds the configured context budget")
+            payload: dict[str, Any] = {"model": "nf-candidate", "prompt": list(rendered.token_ids), "temperature": 0,
+                                       "max_tokens": self.max_new_tokens, "add_special_tokens": False, "seed": 0}
             if kind == "json_extraction_v1":
                 payload["response_format"] = {"type": "json_schema", "json_schema": {
                     "name": "nf_output", "strict": True, "schema": interaction.get("output_schema")}}
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
-            result = self._docker(["exec", "-i", self._container, "python3", "-c", _HTTP_CLIENT, "/v1/chat/completions"],
+            result = self._docker(["exec", "-i", self._container, "python3", "-c", _HTTP_CLIENT, "/v1/completions"],
                                   data=data, timeout=75)
             if result.returncode != 0:
                 raise GymJobError("vLLM inference failed")
@@ -169,13 +180,15 @@ class VllmCandidateServer:
                 choices = json.loads(result.stdout)["choices"]
                 if not isinstance(choices, list) or len(choices) != 1 or choices[0].get("finish_reason") != "stop":
                     raise ValueError("completion did not finish normally")
-                text = choices[0]["message"]["content"]
+                text = choices[0]["text"]
                 if not isinstance(text, str):
                     raise ValueError("completion has no text")
                 response = parse_strict_json(text.encode("utf-8")) if kind == "json_extraction_v1" else text
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise GymJobError("vLLM returned an incomplete or invalid completion") from exc
-            return ExecutionResponse(response, {"raw_text": text, "served_model_identity_verified": False})
+            return ExecutionResponse(response, {"raw_text": text, "served_model_identity_verified": False,
+                                                 "prompt_renderer_digest": renderer.digest,
+                                                 "rendered_prompt_digest": rendered.prompt_digest})
 
         return ModelAdapter(identity, candidate, reference.family, ("chat_messages_v1", "json_extraction_v1"), settings,
                             infer, loaded_identity, artifact_kinds=("full",), artifact_kind="full", reference=reference)

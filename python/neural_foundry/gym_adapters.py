@@ -16,6 +16,7 @@ from .gym_lifecycle import AdapterIdentity, ModelAdapter, TrainerAdapter
 from .gym_service import CandidateIdentity, ExecutionResponse, _document_digest, _wire_document
 from .model_digest import model_state_digest as _state_digest
 from .provenance import parse_strict_json, resolve_checkpoint, sha256_file
+from .prompt_rendering import PromptRenderer
 
 
 def _parse_generated_json(text: str) -> Any:
@@ -64,6 +65,8 @@ def _model_adapter(
     artifact_path: str | Path | None = None,
     loaded_asset_digests: Mapping[str, str] | None = None,
 ) -> ModelAdapter:
+    renderer = PromptRenderer(tokenizer)
+    settings = {**settings, "prompt_renderer_digest": renderer.digest}
     state_digest = _state_digest(model)
     assets = loaded_asset_digests or checkpoint.file_digests
     identity = {
@@ -71,6 +74,7 @@ def _model_adapter(
         "config_digest": assets["config.json"], "tokenizer_digest": assets["tokenizer.json"],
         "state_digest": state_digest, "model_family": model.config.model_type, "device": settings["device"],
         "precision": settings["precision"], "local_loaded_files_verified": True, "attention": "sdpa",
+        "prompt_renderer_digest": renderer.digest,
     }
 
     def infer(interaction):
@@ -97,8 +101,9 @@ def _model_adapter(
             messages = [{"role": "system", "content": instruction}, *messages]
 
         def generate(selected_messages: list[dict[str, Any]]) -> tuple[str, list[int]]:
-            prompt = tokenizer.apply_chat_template(selected_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-            inputs = tokenizer(prompt, return_tensors="pt").to(settings["device"])
+            rendered = renderer.render({"format": "chat_messages_v1", "messages": selected_messages})
+            ids = torch.tensor([rendered.token_ids], dtype=torch.long, device=settings["device"])
+            inputs = {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
             if inputs["input_ids"].shape[1] + settings["max_new_tokens"] > settings["context_tokens"]:
                 raise GymJobError("projected interaction exceeds the configured model context")
             with torch.inference_mode():
@@ -109,7 +114,7 @@ def _model_adapter(
         text, token_ids = generate(messages)
         generated_response = _parse_generated_json(text)
         evidence = {"raw_text": text, "generated_token_ids": token_ids, "loaded_identity": identity,
-                    "interaction_format": interaction_format}
+                    "interaction_format": interaction_format, "prompt_renderer_digest": renderer.digest}
         if interaction_format in {"chat_messages_v1", "json_extraction_v1"}:
             return ExecutionResponse(generated_response, evidence)
         if not isinstance(generated_response, Mapping) or set(generated_response) != {"tool", "arguments"}:

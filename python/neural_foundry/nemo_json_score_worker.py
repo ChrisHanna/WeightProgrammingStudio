@@ -12,6 +12,7 @@ from .gym_service import GymStudioService
 from .provenance import parse_strict_json
 from .records import canonicalize, content_digest
 from .reference_json_extraction import reference_task
+from .prompt_rendering import projection_digest
 
 
 def score_request(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -55,7 +56,8 @@ def score_request(request: Mapping[str, Any]) -> dict[str, Any]:
     score = metrics.get("exact_match") if isinstance(metrics, Mapping) else None
     if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
         raise GymJobError("registered scorer returned an invalid exact-match metric")
-    return {"score": float(score), "output_valid": output_valid, "scorer_digest": job.scorer.implementation_digest}
+    return {"score": float(score), "output_valid": output_valid, "scorer_digest": job.scorer.implementation_digest,
+            "prompt_projection_digest": projection_digest(expected.project(scenario["input"], None))}
 
 
 def main() -> None:

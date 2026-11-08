@@ -36,6 +36,14 @@ def test_transformers_adapter_parses_json_projection(tmp_path, monkeypatch) -> N
 
     class Tokenizer:
         eos_token_id = 0
+        chat_template = "template"
+        special_tokens_map = {}
+
+        def get_vocab(self):
+            return {"token": 1}
+
+        def encode(self, text, **kwargs):
+            return [1]
 
         def apply_chat_template(self, messages, **kwargs):
             return "prompt"

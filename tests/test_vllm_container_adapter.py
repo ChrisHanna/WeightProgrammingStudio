@@ -29,16 +29,24 @@ def _reference(tmp_path: Path) -> CandidateRef:
 
 
 def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    transformers = pytest.importorskip("transformers")
+    tokenizer = SimpleNamespace(chat_template="template", special_tokens_map={}, get_vocab=lambda: {"token": 1},
+                                 encode=lambda text, **kwargs: [1, 2, 3], apply_chat_template=lambda messages, **kwargs: "rendered")
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: tokenizer)
     reference = _reference(tmp_path)
     calls = []
     container_id = "a" * 64
-    completion = {"finish_reason": "stop", "message": {"content": '{"answer":1}'}}
+    completion = {"finish_reason": "stop", "text": '{"answer":1}'}
 
     def docker(command, **kwargs):
         calls.append((command, kwargs.get("input")))
         if command[1] == "create":
             output = container_id.encode() + b"\n"
-        elif command[1] == "exec" and command[-1] == "/v1/chat/completions":
+        elif command[1] == "exec" and command[-1] == "/v1/completions":
+            payload = json.loads(kwargs["input"])
+            assert payload["prompt"] == [1, 2, 3] and payload["add_special_tokens"] is False
+            assert "messages" not in payload
             output = json.dumps({"choices": [completion]}).encode()
         else:
             output = b""
@@ -53,6 +61,7 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         assert adapter.loaded_identity()["local_loaded_files_verified"] is False
         assert adapter.loaded_identity()["served_model_identity_verified"] is False
         assert "state_digest" not in adapter.loaded_identity()
+        assert result.interaction["prompt_renderer_digest"] == adapter.inference_config["prompt_renderer_digest"]
         completion["finish_reason"] = "length"
         with pytest.raises(GymJobError, match="incomplete"):
             adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})

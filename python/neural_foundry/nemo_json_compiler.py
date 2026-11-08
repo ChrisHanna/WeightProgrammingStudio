@@ -14,6 +14,7 @@ from .gym_job import GymJobError, _validate_schema
 from .gym_lifecycle import TaskAdapter
 from .gym_service import GymStudioService, _document_digest, _wire_document
 from .records import canonicalize, content_digest
+from .prompt_rendering import projection_digest
 
 
 def compile_json_gym(
@@ -52,6 +53,7 @@ def compile_json_gym(
             "nf_scenario": scenario,
             "nf_job_digest": task.job.digest,
             "nf_scorer_digest": task.job.scorer.implementation_digest,
+            "nf_prompt_projection_digest": projection_digest(interaction),
         })
     dataset = b"".join(_wire_document(row) + b"\n" for row in rows)
     config = {

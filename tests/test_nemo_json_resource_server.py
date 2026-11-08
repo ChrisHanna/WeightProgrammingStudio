@@ -57,6 +57,10 @@ tampered = copy.deepcopy(correct)
 tampered["nf_reference"]["customer"] = "forged"
 result = client.post("/verify", json=tampered)
 assert result.status_code == 200 and result.json()["mask_sample"] is True, result.text
+tampered = copy.deepcopy(correct)
+tampered["nf_prompt_projection_digest"] = "sha256:" + "0" * 64
+result = client.post("/verify", json=tampered)
+assert result.status_code == 200 and result.json()["mask_sample"] is True, result.text
 '''
     env = {**os.environ, "NF_NEMO_SCORER_PYTHON": sys.executable,
            "NF_NEMO_SCORER_PYTHONPATH": str(Path(__file__).resolve().parents[1] / "python")}
