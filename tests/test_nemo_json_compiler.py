@@ -25,7 +25,8 @@ def test_compile_public_json_package(tmp_path, split: str) -> None:
     config = json.loads((server / "configs" / "nf_json_extraction.yaml").read_text())
     assert len(rows) == receipt["rows"] == 4
     assert config["nf_json_resources_server"]["resources_servers"]["nf_json_extraction"]["verified"] is False
-    assert receipt["execution_ready"] is False and receipt["verifier_bound"] is False
+    assert receipt["execution_ready"] is False and receipt["verifier_bound"] is True
+    assert (server / "app.py").is_file()
     for row in rows:
         assert row["nf_scorer_digest"] == task.job.scorer.implementation_digest
         assert row["nf_scenario"]["split"] == split

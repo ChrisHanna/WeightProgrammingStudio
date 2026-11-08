@@ -71,7 +71,8 @@ def compile_json_gym(
         "scenario_manifest_digest": batch["manifest_digest"], "scorer": task.job.scorer.to_document(),
         "verifier": task.job.verifier.to_document(), "rows": len(rows),
         "dataset_digest": "sha256:" + hashlib.sha256(dataset).hexdigest(),
-        "execution_ready": False, "verifier_bound": False,
+        "scorer_worker_digest": "sha256:" + hashlib.sha256(Path(__file__).with_name("nemo_json_score_worker.py").read_bytes()).hexdigest(),
+        "execution_ready": False, "verifier_bound": True,
     }
     receipt["receipt_digest"] = _document_digest(receipt)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +83,7 @@ def compile_json_gym(
         (server / "configs").mkdir()
         (server / "data" / f"{split}.jsonl").write_bytes(dataset)
         (server / "configs" / "nf_json_extraction.yaml").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        (server / "app.py").write_bytes(Path(__file__).with_name("nemo_json_resource_server.py").read_bytes())
         (staging / "job.json").write_text(json.dumps(task.job.to_document(), indent=2) + "\n", encoding="utf-8")
         (staging / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
         if output.exists():
