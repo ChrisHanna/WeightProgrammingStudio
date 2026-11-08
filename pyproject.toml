@@ -16,6 +16,10 @@ dependencies = []
 nf-studio = "neural_foundry.studio:main"
 
 [project.optional-dependencies]
+peft = ["torch==2.9.1", "transformers==4.57.3", "peft==0.18.0"]
+peft-qlora = ["torch==2.9.1", "transformers==4.57.3", "peft==0.18.0", "bitsandbytes==0.49.1"]
+nemo-automodel = ["nemo-automodel==0.7.0", "torch==2.10.0", "triton==3.6.0", "transformers==5.18.0", "torchao==0.18.0", "torchdata==0.11.0", "datasets==5.1.0"]
+nemo-automodel-qlora = ["nemo-automodel==0.7.0", "torch==2.10.0", "triton==3.6.0", "transformers==5.18.0", "torchao==0.18.0", "torchdata==0.11.0", "datasets==5.1.0", "bitsandbytes==0.49.1"]
 # Install with the explicit CPU index documented in protocols/core-testing-v1.md.
 differential = ["torch==2.9.1+cpu"]
 dev = [
