@@ -75,6 +75,7 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
     report = json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
                                                  frontier_factory=lambda: _FakeModel())
     assert report["complete"] is True and report["comparison"]["scenario_count"] == 2
+    assert report["scorer_audit"]["passed"] is True and report["scorer_audit"]["cases"] == 12
     assert all(card["value"] == 0 for card in report["comparison"]["scorecards"].values())
     assert not list(output.glob("nemo_*/resources_servers/nf_json_extraction/data/holdout.jsonl"))
     assert json.loads((output / "report.json").read_text()) == report

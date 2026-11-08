@@ -14,6 +14,7 @@ from .gym_job import GymJobError
 from .gym_service import GymStudioService, _document_digest
 from .json_frontier_model import JsonFrontierModel
 from .json_proof_loop import compare_synthetic_holdout
+from .json_scorer_audit import audit_reference_scorer
 from .nemo_json_compiler import compile_json_gym
 from .reference_json_extraction import reference_task
 from .vllm_candidate_files import verify_vllm_candidate_files
@@ -31,9 +32,10 @@ def run_json_proof(
         if not isinstance(interpreter, str) or not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise GymJobError("synthetic proof requires absolute existing GPU and AutoModel interpreters")
     frontier = frontier_factory()
+    task = reference_task(rows_per_template=rows_per_template)
+    audit = audit_reference_scorer(task)
     output = Path(output_dir).absolute()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
-    task = reference_task(rows_per_template=rows_per_template)
     service = GymStudioService(state_dir=output / "compiler_state")
     task.bind(service)
     compiled = {split: compile_json_gym(task, service, split=split, seed=seed, output_dir=output / f"nemo_{split}")
@@ -67,6 +69,7 @@ def run_json_proof(
         "frontier": lambda: frontier,
     })
     report = {"kind": "nf_json_proof_workflow_v1", "job_digest": task.job.digest,
+              "scorer_audit": audit,
               "public_packages": {split: receipt["receipt_digest"] for split, receipt in compiled.items()},
               "training_request_digest": result["training_request_digest"],
               "candidate_record_digest": result["candidate_record_digest"], "vllm_image": VLLM_IMAGE,
