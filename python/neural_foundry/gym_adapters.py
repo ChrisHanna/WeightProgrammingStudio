@@ -75,8 +75,8 @@ def _model_adapter(
 
     def infer(interaction):
         interaction_format = interaction.get("format")
-        if interaction_format not in {"chat_messages_v1", "tool_messages_v1"}:
-            raise GymJobError("Transformers adapter requires a declared chat or bounded-tool projection")
+        if interaction_format not in {"chat_messages_v1", "json_extraction_v1", "tool_messages_v1"}:
+            raise GymJobError("Transformers adapter requires a declared chat, JSON, or bounded-tool projection")
         if interaction_format == "tool_messages_v1":
             declarations = interaction.get("tools")
             if not isinstance(declarations, list) or not 1 <= len(declarations) <= 8 or interaction.get("max_tool_calls") != 1:
@@ -110,7 +110,7 @@ def _model_adapter(
         generated_response = _parse_generated_json(text)
         evidence = {"raw_text": text, "generated_token_ids": token_ids, "loaded_identity": identity,
                     "interaction_format": interaction_format}
-        if interaction_format == "chat_messages_v1":
+        if interaction_format in {"chat_messages_v1", "json_extraction_v1"}:
             return ExecutionResponse(generated_response, evidence)
         if not isinstance(generated_response, Mapping) or set(generated_response) != {"tool", "arguments"}:
             evidence["tool_call_invalid"] = "expected exactly tool and arguments"
@@ -131,7 +131,7 @@ def _model_adapter(
         evidence["tool_trace"] = [{"name": declaration["name"], "arguments": json.loads(_wire_document(arguments)), "result": bounded_result}]
         return ExecutionResponse({"calls": evidence["tool_trace"]}, evidence)
 
-    formats = ("chat_messages_v1", "tool_messages_v1") if tool_handlers else ("chat_messages_v1",)
+    formats = ("chat_messages_v1", "json_extraction_v1", "tool_messages_v1") if tool_handlers else ("chat_messages_v1", "json_extraction_v1")
     kind = candidate.method_id if candidate.method_id in {"lora", "qlora"} else "full"
     reference = CandidateRef(checkpoint.model_id, kind, candidate.base_model_digest,
                              candidate.candidate_model_digest, candidate.artifact_digest,

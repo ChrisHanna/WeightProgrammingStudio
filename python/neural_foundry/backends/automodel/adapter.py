@@ -29,6 +29,22 @@ from .config import (
 )
 
 
+def _sft_rows(examples: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for example in examples:
+        interaction = example.get("interaction")
+        if not isinstance(interaction, Mapping) or interaction.get("format") not in {"chat_messages_v1", "json_extraction_v1"}:
+            raise GymJobError("AutoModel SFT requires chat or JSON message demonstrations")
+        messages = interaction.get("messages")
+        if (not isinstance(messages, list) or len(messages) < 2 or not isinstance(messages[-1], Mapping)
+            or messages[-1].get("role") != "assistant"):
+            raise GymJobError("AutoModel SFT requires completed assistant demonstrations")
+        rows.append({"messages": messages})
+    if not rows:
+        raise GymJobError("AutoModel SFT requires a nonempty training dataset")
+    return rows
+
+
 def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
     python = Path(config.python_executable)
     executable = python.parent / "automodel"
@@ -146,18 +162,7 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
         runtime_info = runtime(directory.parent)
         reload_python, reload_info = (reload_runtime(directory.parent, quantized=recipe.method == "qlora")
                           if recipe.method in {"lora", "qlora"} else (None, None))
-        rows = []
-        for example in examples:
-            interaction = example.get("interaction")
-            if not isinstance(interaction, Mapping) or interaction.get("format") != "chat_messages_v1":
-                raise GymJobError("AutoModel SFT requires chat message demonstrations")
-            messages = interaction.get("messages")
-            if (not isinstance(messages, list) or len(messages) < 2 or not isinstance(messages[-1], Mapping)
-                or messages[-1].get("role") != "assistant"):
-                raise GymJobError("AutoModel SFT requires completed assistant demonstrations")
-            rows.append({"messages": messages})
-        if not rows:
-            raise GymJobError("AutoModel SFT requires a nonempty training dataset")
+        rows = _sft_rows(examples)
         with tempfile.TemporaryDirectory(prefix=".nf-automodel-", dir=directory.parent) as temp:
             work = Path(temp)
             dataset = work / "train.jsonl"
@@ -264,4 +269,4 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
             else:
                 supported["qlora"] = "qlora"
     return TrainerAdapter(AdapterIdentity("nemo_automodel.sft", "1", implementation),
-                          ("chat_messages_v1",), ("qwen3", "llama"), tuple(supported), train, load, supported)
+                          ("chat_messages_v1", "json_extraction_v1"), ("qwen3", "llama"), tuple(supported), train, load, supported)
