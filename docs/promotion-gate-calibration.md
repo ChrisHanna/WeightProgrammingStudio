@@ -1,22 +1,23 @@
 # Promotion gate calibration
 
-This records how reference edits behave under the unchanged promotion gate. **No thresholds were changed because of it, and no real candidate passes.** That is a valid result: it means the gate has not yet been shown to pass any real edit, not that its limits are proven right.
+This records how reference edits behave under the promotion gate, including its **0.90 minimum absolute target accuracy** and 0.01 minimum target-accuracy gain. The absolute floor was fixed before this calibration rerun; the calibration arms did not set it. No arm is promotion-eligible. This does not establish that the thresholds are statistically calibrated or appropriate for another task.
 
-Made by `scripts/calibrate_promotion_gate.py` at commit `db15959` on `EleutherAI/pythia-14m`, one arm at a time on one thread, using public data. Raw results are in [`docs/evidence/promotion_gate_calibration.json`](evidence/promotion_gate_calibration.json).
+Made by `scripts/calibrate_promotion_gate.py` on `EleutherAI/pythia-14m`, one arm at a time on one thread, using public data. The runner was the working tree based on `b4dc845eb36f1d841b2cccc2bab275b856273235`; the generated record includes the complete thresholds and working-tree provenance. Raw results are in [`docs/evidence/promotion_gate_calibration.json`](evidence/promotion_gate_calibration.json).
 
-| Arm | Status | Target gain (at least 0.01) | Task agreement (at least 0.98) | Free-text agreement (at least 0.98) | KL, nats per token (at most 0.0488) | Perplexity ratio (at most 1.05) |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| No-op, exact | not evaluated | n/a | n/a | n/a | n/a | n/a |
-| No-op, scaled by 1 + 1e-9 | rejected | 0.00 | 1.000 | 1.000 | 1.5e-15 | 1.00 |
-| Random, branch 3's norm | rejected | 0.00 | 0.000 | 0.011 | 8.48 | 6,295 |
-| Direct low-rank edit | rejected | 1.00 | 0.000 | 0.000 | 10.40 | 47,802 |
-| Gym branch 3 | rejected | 1.00 | 0.000 | 0.008 | 12.85 | 696,994 |
-| LoRA, the study's 25 steps | rejected | 0.50 | 0.000 | 0.000 | 13.12 | 920,937 |
-| Fine-tuning, 25 untuned steps | rejected | 1.00 | 0.385 | 0.311 | 1.25 | 4.01 |
+| Arm | Status | Absolute target accuracy (at least 0.90) | Target gain (at least 0.01) | Task agreement (at least 0.98) | Free-text agreement (at least 0.98) | KL, nats per token (at most 0.0488) | Perplexity ratio (at most 1.05) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| No-op, exact | not evaluated | n/a | n/a | n/a | n/a | n/a | n/a |
+| No-op, scaled by 1 + 1e-9 | rejected | 0.00 | 0.00 | 1.000 | 1.000 | 1.5e-15 | 1.00 |
+| Random, branch 3's norm | rejected | 0.00 | 0.00 | 0.000 | 0.011 | 8.48 | 6,295 |
+| Direct low-rank edit | rejected | 1.00 | 1.00 | 0.000 | 0.000 | 10.40 | 47,802 |
+| Gym branch 3 | rejected | 1.00 | 1.00 | 0.000 | 0.008 | 12.85 | 696,994 |
+| LoRA, the study's 25 steps | rejected | 0.50 | 0.50 | 0.000 | 0.000 | 13.12 | 920,937 |
+| Fine-tuning, 25 untuned steps | rejected | 1.00 | 1.00 | 0.385 | 0.311 | 1.25 | 4.01 |
 
 ## What this shows
 
 - **The no-op can't be promoted.** The evaluator refuses an exact no-op as identical to the base model. A near no-op passes every retention, KL and perplexity limit, then fails on target gain. It also fails both random-control checks, because noise of that size changes almost nothing either.
+- **Relative gain cannot rescue low absolute accuracy.** The near no-op and random control both score 0.00, below the 0.90 task floor. LoRA scores 0.50, also below the floor, despite a 0.50 target gain.
 - **The retention limits can be met.** The near no-op shows this, but only for an edit that does nothing.
 - **Every real edit that gained its target failed all retention limits.** Fine-tuning came closest, and it is still far outside them.
 

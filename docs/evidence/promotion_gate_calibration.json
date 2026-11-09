@@ -25,16 +25,18 @@
         "retention_task_agreement:collocations": 1.0,
         "retention_task_agreement:opposites": 1.0,
         "retention_task_agreement:sequences": 1.0,
+        "target_accuracy_floor": 0.0,
         "target_accuracy_gain": 0.0
       },
       "failed_checks": [
+        "target_accuracy_floor",
         "target_accuracy_gain",
         "kl_below_every_random_control",
         "agreement_above_every_random_control"
       ],
       "promote_eligible": false,
       "reason": null,
-      "seconds": 13.9,
+      "seconds": 12.4,
       "status": "rejected"
     },
     {
@@ -42,10 +44,10 @@
       "checks": {
         "agreement_above_every_random_control": 0.010582010582010581,
         "free_text_agreement": 0.010582010582010581,
-        "kl_below_every_random_control": 8.483903332758507,
-        "kl_nats_per_token": 8.483903332758507,
+        "kl_below_every_random_control": 8.482210067741386,
+        "kl_nats_per_token": 8.482210067741386,
         "noop_control": true,
-        "perplexity_ratio": 6294.984463718098,
+        "perplexity_ratio": 6283.892408117098,
         "pooled_retention_task_agreement": 0.0,
         "retention_task_agreement:agreement": 0.0,
         "retention_task_agreement:arithmetic": 0.0,
@@ -53,9 +55,11 @@
         "retention_task_agreement:collocations": 0.0,
         "retention_task_agreement:opposites": 0.0,
         "retention_task_agreement:sequences": 0.0,
+        "target_accuracy_floor": 0.0,
         "target_accuracy_gain": 0.0
       },
       "failed_checks": [
+        "target_accuracy_floor",
         "target_accuracy_gain",
         "pooled_retention_task_agreement",
         "retention_task_agreement:agreement",
@@ -71,7 +75,7 @@
       ],
       "promote_eligible": false,
       "reason": null,
-      "seconds": 12.1,
+      "seconds": 11.5,
       "status": "rejected"
     },
     {
@@ -90,6 +94,7 @@
         "retention_task_agreement:collocations": 0.0,
         "retention_task_agreement:opposites": 0.0,
         "retention_task_agreement:sequences": 0.0,
+        "target_accuracy_floor": 1.0,
         "target_accuracy_gain": 1.0
       },
       "failed_checks": [
@@ -108,18 +113,18 @@
       ],
       "promote_eligible": false,
       "reason": null,
-      "seconds": 13.6,
+      "seconds": 11.7,
       "status": "rejected"
     },
     {
       "arm": "Gym branch 3",
       "checks": {
-        "agreement_above_every_random_control": 0.007936507936507936,
-        "free_text_agreement": 0.007936507936507936,
-        "kl_below_every_random_control": 12.84599365874578,
-        "kl_nats_per_token": 12.84599365874578,
+        "agreement_above_every_random_control": 0.003968253968253968,
+        "free_text_agreement": 0.003968253968253968,
+        "kl_below_every_random_control": 12.712621383931095,
+        "kl_nats_per_token": 12.712621383931095,
         "noop_control": true,
-        "perplexity_ratio": 696993.636815372,
+        "perplexity_ratio": 606792.6348151232,
         "pooled_retention_task_agreement": 0.0,
         "retention_task_agreement:agreement": 0.0,
         "retention_task_agreement:arithmetic": 0.0,
@@ -127,6 +132,7 @@
         "retention_task_agreement:collocations": 0.0,
         "retention_task_agreement:opposites": 0.0,
         "retention_task_agreement:sequences": 0.0,
+        "target_accuracy_floor": 1.0,
         "target_accuracy_gain": 1.0
       },
       "failed_checks": [
@@ -145,7 +151,7 @@
       ],
       "promote_eligible": false,
       "reason": null,
-      "seconds": 11.9,
+      "seconds": 11.8,
       "status": "rejected"
     },
     {
@@ -164,9 +170,11 @@
         "retention_task_agreement:collocations": 0.0,
         "retention_task_agreement:opposites": 0.0,
         "retention_task_agreement:sequences": 0.0,
+        "target_accuracy_floor": 0.5,
         "target_accuracy_gain": 0.5
       },
       "failed_checks": [
+        "target_accuracy_floor",
         "pooled_retention_task_agreement",
         "retention_task_agreement:agreement",
         "retention_task_agreement:arithmetic",
@@ -182,7 +190,7 @@
       ],
       "promote_eligible": false,
       "reason": null,
-      "seconds": 11.9,
+      "seconds": 11.5,
       "status": "rejected"
     },
     {
@@ -190,10 +198,10 @@
       "checks": {
         "agreement_above_every_random_control": 0.31084656084656087,
         "free_text_agreement": 0.31084656084656087,
-        "kl_below_every_random_control": 1.2500983732421302,
-        "kl_nats_per_token": 1.2500983732421302,
+        "kl_below_every_random_control": 1.2500983732421314,
+        "kl_nats_per_token": 1.2500983732421314,
         "noop_control": true,
-        "perplexity_ratio": 4.00863648622197,
+        "perplexity_ratio": 4.008636486221979,
         "pooled_retention_task_agreement": 0.3854166666666667,
         "retention_task_agreement:agreement": 0.125,
         "retention_task_agreement:arithmetic": 0.0,
@@ -201,6 +209,7 @@
         "retention_task_agreement:collocations": 0.25,
         "retention_task_agreement:opposites": 0.6875,
         "retention_task_agreement:sequences": 0.375,
+        "target_accuracy_floor": 1.0,
         "target_accuracy_gain": 1.0
       },
       "failed_checks": [
@@ -219,17 +228,27 @@
       ],
       "promote_eligible": false,
       "reason": null,
-      "seconds": 14.8,
+      "seconds": 14.6,
       "status": "rejected"
     }
   ],
-  "commit": "db15959",
+  "base_commit": "b4dc845eb36f1d841b2cccc2bab275b856273235",
+  "calibration_source": "working_tree_with_frozen_gate_policy",
   "fine_tuning_recipe": {
     "kind": "sft",
     "lr": 0.0001,
     "note": "low steps and untuned, not a converged baseline",
     "retention_weight": 1.0,
     "steps": 25
+  },
+  "gate_thresholds": {
+    "maximum_kl_nats_per_token": 0.04879016416943205,
+    "maximum_perplexity_ratio": 1.05,
+    "minimum_per_task_agreement": 0.95,
+    "minimum_pooled_task_agreement": 0.98,
+    "minimum_target_accuracy": 0.9,
+    "minimum_target_accuracy_gain": 0.01,
+    "minimum_text_agreement": 0.98
   },
   "kind": "nf_promotion_gate_calibration_v1",
   "model": "EleutherAI/pythia-14m",

@@ -8,7 +8,6 @@ import math
 from pathlib import Path
 
 import pytest
-
 from neural_foundry import promotion_gate as pg
 from neural_foundry import pythia
 
@@ -29,7 +28,7 @@ def _report(*, agreement: float = 1.0, kl: float = 0.001, ratio: float = 1.001, 
     text = {"top1_agreement": _measure(agreement), "kl_nats_per_token": _measure(kl), "perplexity_ratio": _measure(ratio)}
     return {
         "kind": pg.EVALUATOR_REPORT_KIND,
-        "target": {"metrics": {"accuracy_delta": _measure(gain)}},
+        "target": {"metrics": {"accuracy_delta": _measure(gain), "candidate_accuracy": _measure(1.0)}},
         "candidate": {"all_tasks": {"top1_agreement": _measure(agreement)}, "text": text},
         "retention_matrix": {"capitals": {"candidate": {"top1_agreement": _measure(agreement)}}},
         "controls": {
@@ -97,11 +96,32 @@ def test_recorded_calibration_promotes_nothing_and_the_no_op_fails_on_target_gai
     assert len(arms) == 7 and not any(row["promote_eligible"] for row in arms.values())
     assert arms["no-op (exact)"]["status"] == "not_evaluated"
     assert "target_accuracy_gain" in arms["no-op (near, scale 1 + 1e-9)"]["failed_checks"]
+    calibration = json.loads(EVIDENCE.parents[1].joinpath("promotion_gate_calibration.json").read_text(encoding="utf-8"))
+    assert calibration["gate_thresholds"]["minimum_target_accuracy"] == pg.MIN_TARGET_ACCURACY
+    assert calibration["calibration_source"] == "working_tree_with_frozen_gate_policy"
+    assert all("target_accuracy_floor" in row["checks"] for row in calibration["arms"] if row["status"] != "not_evaluated")
 
 
 def test_thresholds_are_the_frozen_values() -> None:
     assert (pg.MIN_POOLED_TASK_AGREEMENT, pg.MIN_TEXT_AGREEMENT, pg.MIN_PER_TASK_AGREEMENT) == (0.98, 0.98, 0.95)
     assert (pg.MAX_PERPLEXITY_RATIO, pg.MIN_TARGET_ACCURACY_GAIN) == (1.05, 0.01)
+    assert pg.MIN_TARGET_ACCURACY == 0.90
+
+
+@pytest.mark.parametrize("change", [
+    {"agreement": 2.0}, {"kl": -0.1}, {"ratio": -1.0}, {"gain": True},
+    {"control_kl": math.nan}, {"control_agreement": math.nan},
+])
+def test_impossible_gate_observations_are_refused(change: dict) -> None:
+    report = _report(**change)
+    report["controls"]["random"]["another-valid-control"] = _report()["controls"]["random"]["random_seed_1"]
+    assert pg.decide_promotion(report)["promote_eligible"] is False
+
+
+def test_relative_gain_cannot_replace_an_absolute_task_floor() -> None:
+    report = _report(gain=0.02)
+    report["target"]["metrics"]["candidate_accuracy"] = _measure(0.02)
+    assert "target_accuracy_floor" in pg.decide_promotion(report)["failed_checks"]
 
 
 def test_kl_limit_is_the_perplexity_limit_in_nats() -> None:

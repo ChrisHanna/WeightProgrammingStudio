@@ -15,14 +15,27 @@ from pathlib import Path
 from typing import Any
 
 import torch
-
 from neural_foundry import baselines as bl
 from neural_foundry import independent_eval as ie
 from neural_foundry.edit_plan import apply_edit_graph
 from neural_foundry.gpt_neox_adapter import compile_to_edit_graph
-from neural_foundry.promotion_gate import decide_promotion, not_evaluated
+from neural_foundry.promotion_gate import (
+    MAX_KL_NATS_PER_TOKEN,
+    MAX_PERPLEXITY_RATIO,
+    MIN_PER_TASK_AGREEMENT,
+    MIN_POOLED_TASK_AGREEMENT,
+    MIN_TARGET_ACCURACY,
+    MIN_TARGET_ACCURACY_GAIN,
+    MIN_TEXT_AGREEMENT,
+    decide_promotion,
+    not_evaluated,
+)
 from neural_foundry.pythia import ALGORITHMIC_THREE_SKILL_GYM as GYM
-from neural_foundry.pythia import PythiaModel, run_pythia_gym_task_learning_study, run_pythia_weight_programming_study
+from neural_foundry.pythia import (
+    PythiaModel,
+    run_pythia_gym_task_learning_study,
+    run_pythia_weight_programming_study,
+)
 
 MODEL_ID = "EleutherAI/pythia-14m"
 NEAR_NOOP_SCALE = 1.0 + 1e-9
@@ -89,9 +102,19 @@ def main() -> int:
 
     document = {
         "kind": "nf_promotion_gate_calibration_v1",
-        "commit": args.commit,
+        "base_commit": args.commit,
+        "calibration_source": "working_tree_with_frozen_gate_policy",
         "model": MODEL_ID,
         "threads": 1,
+        "gate_thresholds": {
+            "minimum_target_accuracy": MIN_TARGET_ACCURACY,
+            "minimum_target_accuracy_gain": MIN_TARGET_ACCURACY_GAIN,
+            "minimum_pooled_task_agreement": MIN_POOLED_TASK_AGREEMENT,
+            "minimum_per_task_agreement": MIN_PER_TASK_AGREEMENT,
+            "minimum_text_agreement": MIN_TEXT_AGREEMENT,
+            "maximum_kl_nats_per_token": MAX_KL_NATS_PER_TOKEN,
+            "maximum_perplexity_ratio": MAX_PERPLEXITY_RATIO,
+        },
         "fine_tuning_recipe": {"kind": "sft", "lr": SFT_LOW_STEPS.lr, "steps": SFT_LOW_STEPS.steps, "retention_weight": SFT_LOW_STEPS.retention_weight, "note": "low steps and untuned, not a converged baseline"},
         "arms": rows,
     }

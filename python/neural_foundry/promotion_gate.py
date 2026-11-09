@@ -31,6 +31,35 @@ MIN_PER_TASK_AGREEMENT = 0.95
 MAX_PERPLEXITY_RATIO = 1.05
 MAX_KL_NATS_PER_TOKEN = math.log(MAX_PERPLEXITY_RATIO)
 MIN_TARGET_ACCURACY_GAIN = 0.01  # `min_target_gain` in the production policy.
+MIN_TARGET_ACCURACY = 0.90
+
+
+def _validate_observations(value: Any, metric: str = "") -> None:
+    if not isinstance(value, Mapping):
+        return
+    if "value" in value:
+        observed = value["value"]
+        if observed is None and value.get("n") == 0:
+            return
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+            raise ValueError(f"{metric} must be numeric")
+        try:
+            finite = math.isfinite(observed)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise ValueError(f"{metric} must be finite")
+        if ("agreement" in metric or "accuracy" in metric) and "delta" not in metric and not 0 <= observed <= 1:
+            raise ValueError(f"{metric} must be between zero and one")
+        if "delta" in metric and "accuracy" in metric and not -1 <= observed <= 1:
+            raise ValueError(f"{metric} must be between minus one and one")
+        if "kl" in metric and observed < 0:
+            raise ValueError(f"{metric} must be non-negative")
+        if "perplexity_ratio" in metric and observed <= 0:
+            raise ValueError(f"{metric} must be positive")
+    for name, child in value.items():
+        if isinstance(child, Mapping):
+            _validate_observations(child, str(name) if "value" in child else metric)
 
 
 def _check(name: str, observed: float, threshold: float, *, at_most: bool = False) -> dict[str, Any]:
@@ -61,7 +90,8 @@ def _control_checks(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _checks(report: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _checks(report: Mapping[str, Any], minimum_target_accuracy: float) -> list[dict[str, Any]]:
+    _validate_observations(report)
     if report.get("kind") != EVALUATOR_REPORT_KIND:
         raise KeyError(f"kind is {report.get('kind')!r}")
     tasks = report["retention_matrix"]
@@ -70,6 +100,7 @@ def _checks(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     text = report["candidate"]["text"]
     target = report["target"]["metrics"]
     checks = [
+        _check("target_accuracy_floor", float(target["candidate_accuracy"]["value"]), minimum_target_accuracy),
         _check("target_accuracy_gain", float(target["accuracy_delta"]["value"]), MIN_TARGET_ACCURACY_GAIN),
         _check("pooled_retention_task_agreement", float(report["candidate"]["all_tasks"]["top1_agreement"]["value"]), MIN_POOLED_TASK_AGREEMENT),
         *(_check(f"retention_task_agreement:{name}", float(row["candidate"]["top1_agreement"]["value"]), MIN_PER_TASK_AGREEMENT) for name, row in sorted(tasks.items())),
@@ -118,11 +149,13 @@ def not_evaluated(reason: str) -> dict[str, Any]:
     return _decision("not_evaluated", [], reason)
 
 
-def decide_promotion(report: Mapping[str, Any]) -> dict[str, Any]:
+def decide_promotion(report: Mapping[str, Any], *, minimum_target_accuracy: float = MIN_TARGET_ACCURACY) -> dict[str, Any]:
     """Promote only if every check passes. An incomplete report is refused, never given the benefit of the doubt."""
     try:
-        checks = _checks(report)
-    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(minimum_target_accuracy, bool) or not isinstance(minimum_target_accuracy, (int, float)) or not 0 <= minimum_target_accuracy <= 1:
+            raise ValueError("minimum_target_accuracy must be a finite probability")
+        checks = _checks(report, minimum_target_accuracy)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         return not_evaluated(f"The evaluator report is incomplete: {exc!r}")
     passed = all(c["passed"] for c in checks)
     return _decision("passed" if passed else "rejected", checks, None)
