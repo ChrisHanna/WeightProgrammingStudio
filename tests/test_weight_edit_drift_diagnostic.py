@@ -144,17 +144,19 @@ def test_generation_truncation_requires_budget_exhaustion_and_incomplete_json():
     truncated_at_budget = '{"customer":"Aster"'
     assert _completion_was_truncated([1, 2, 3, 4], complete_at_budget, 4) is False
     assert _completion_was_truncated([1, 2, 3, 4], complete_with_preamble, 4) is False
-    assert _completion_was_truncated([1, 2, 3, 4], truncated_at_budget, 4) is True
-    assert _completion_was_truncated([1, 2, 3, 4], '[{"customer":"Aster"}', 4) is True
-    assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is False
+    assert _completion_was_truncated([1, 2, 3, 4], truncated_at_budget, 4) is False
+    assert _completion_was_truncated([1, 2, 3, 4], '[{"customer":"Aster"}', 4) is False
+    assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is True
 
 
 def test_truncation_audit_reports_count_and_binds_source_digest(tmp_path):
     response_rows = [{"scenario_id": "case:complete", "execution_evidence": {
         "generated_token_ids": list(range(4)), "raw_text": '{"answer":1}'}},
         {"scenario_id": "case:truncated", "execution_evidence": {
-        "generated_token_ids": list(range(4)), "raw_text": '{"answer":'}}]
-    score = {"cases": 2, "responses": response_rows}
+        "generated_token_ids": list(range(4)), "raw_text": '{"answer":'}},
+        {"scenario_id": "case:short-truncated", "execution_evidence": {
+        "generated_token_ids": list(range(3)), "raw_text": '{"answer":'}}]
+    score = {"cases": 3, "responses": response_rows}
     report = {"kind": "nf_weight_edit_layer_strength_diagnostic_v2", "run_digest": "sha256:" + "a" * 64,
         "base_train": {"task": score}, "base_validation": {"task": score}, "results": []}
     report["evidence_digest"] = _document_digest(report)
@@ -162,7 +164,8 @@ def test_truncation_audit_reports_count_and_binds_source_digest(tmp_path):
     source.write_bytes(json.dumps(report).encode())
     audit_path = tmp_path / "truncation-audit.json"
     audit = audit_generation_truncation(source, audit_path, max_new_tokens=4)
-    assert audit["total_scored_answers"] == 4
+    assert audit["total_scored_answers"] == 6
+    assert audit["generation_cap_failures"] == 4
     assert audit["total_truncated_answers"] == 2
     assert audit["zero_truncated_answers"] is False
     assert audit["source_report_digest"] == report["evidence_digest"]

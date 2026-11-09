@@ -23,6 +23,23 @@ def _factory(responses, *, fail=False):
     return factory
 
 
+def test_generation_that_hits_token_cap_is_a_failure_even_when_answer_matches() -> None:
+    task = reference_task(rows_per_template=1)
+    row = generate_scenarios(split="validation", seed=17, parameters={"rows_per_template": 1})[0]
+
+    class Model:
+        def loaded_identity(self):
+            return {"served_model_identity_verified": False}
+
+        def infer(self, interaction):
+            return ExecutionResponse(row["reference"], {"hit_generation_cap": True})
+
+    score = json_proof_loop.score_public_rows(task, Model(), [row])
+    assert score["exact_match"] == 0.0
+    assert score["format_valid"] == 0.0
+    assert score["responses"][0]["hit_generation_cap"] is True
+
+
 def test_synthetic_holdout_compares_three_models_with_common_scorer() -> None:
     task = reference_task(rows_per_template=1)
     rows = generate_scenarios(split="holdout", seed=31, parameters={"rows_per_template": 1})

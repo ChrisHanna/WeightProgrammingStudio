@@ -33,7 +33,7 @@ from .demonstrations import prepare_demonstration
 
 STRENGTHS = (0.0, 1e-5, 1e-4, 1e-3)
 LAYER_SWEEP_STRENGTHS = (1e-2, 0.1, 0.5, 1.0)
-LAYER_SWEEP_MAX_NEW_TOKENS = 40
+LAYER_SWEEP_MAX_NEW_TOKENS = 128
 LAYER_SWEEP_EXACT_LAYER_COUNT = 3
 
 
@@ -113,8 +113,12 @@ def _compact_score(score: dict[str, Any]) -> dict[str, Any]:
 
 
 def _completion_was_truncated(generated_token_ids: list[int], text: str, max_new_tokens: int) -> bool:
-    if len(generated_token_ids) < max_new_tokens:
+    if len(generated_token_ids) >= max_new_tokens:
         return False
+    return not _has_complete_json_value(text)
+
+
+def _has_complete_json_value(text: str) -> bool:
     start = text.rfind("```json")
     if start >= 0:
         start += len("```json")
@@ -127,8 +131,8 @@ def _completion_was_truncated(generated_token_ids: list[int], text: str, max_new
     try:
         value, _ = json.JSONDecoder().raw_decode(text, start)
     except json.JSONDecodeError:
-        return True
-    return not isinstance(value, (dict, list))
+        return False
+    return isinstance(value, (dict, list))
 
 
 def _validation_template_scores(rows: list[dict[str, Any]], score: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -234,9 +238,11 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
                     generated = generated[:generated.index(eos) + 1]
                 text = loaded.tokenizer.decode(generated, skip_special_tokens=True)
                 parsed = _parse_generated_json(text)
+                hit_generation_cap = len(generated) >= max_new_tokens
                 results.append(ExecutionResponse(parsed,
                     {"raw_text": text, "generated_token_ids": generated,
                      "max_new_tokens": max_new_tokens,
+                     "hit_generation_cap": hit_generation_cap,
                      "truncated": _completion_was_truncated(generated, text, max_new_tokens),
                      "renderer_digest": renderer.digest, "batch_size": len(chunk)}))
         return results
@@ -843,7 +849,6 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                 try:
                     edited = apply(loaded, {selected.tensor_name: delta}, sites=SiteMap((selected,), checkpoint_names_verified=True),
                         method="diagnostic_layer_strength_sweep", settings={"target_step": strength, "diagnostic_only": True})
-                    train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
                     train_score = score_public_rows(task, validation_model(loaded, batch_size=16,
                         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
                     validation_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
@@ -974,7 +979,7 @@ def audit_generation_truncation(report_path: Path, output_path: Path, *, max_new
         if not isinstance(responses, list) or len(responses) != score.get("cases"):
             raise WeightEditInputError("truncation audit found an incomplete scored response roster")
         token_counts = []
-        truncated = 0
+        truncated, cap_failures = 0, 0
         for response in responses:
             evidence = response.get("execution_evidence")
             token_ids = evidence.get("generated_token_ids") if isinstance(evidence, dict) else None
@@ -982,16 +987,18 @@ def audit_generation_truncation(report_path: Path, output_path: Path, *, max_new
             if not isinstance(token_ids, list) or not isinstance(raw_text, str):
                 raise WeightEditInputError("truncation audit requires raw text and generated token IDs")
             token_counts.append(len(token_ids))
-            if len(token_ids) >= max_new_tokens and isinstance(_parse_generated_json(raw_text), str):
-                truncated += 1
+            cap_failures += int(len(token_ids) >= max_new_tokens)
+            truncated += int(_completion_was_truncated(token_ids, raw_text, max_new_tokens))
         records.append({"panel": name, "cases": len(responses), "max_generated_tokens": max(token_counts, default=0),
                         "at_generation_limit": sum(count >= max_new_tokens for count in token_counts),
-                        "truncated_answers": truncated})
+                        "generation_cap_failures": cap_failures, "truncated_answers": truncated})
     truncated_count = sum(row["truncated_answers"] for row in records)
+    cap_failure_count = sum(row["generation_cap_failures"] for row in records)
     audit = {"kind": "nf_generation_truncation_audit_v1", "source_report_digest": report["evidence_digest"],
              "run_digest": report["run_digest"], "max_new_tokens": max_new_tokens,
              "panels": records, "total_scored_answers": sum(row["cases"] for row in records),
              "total_truncated_answers": truncated_count, "zero_truncated_answers": truncated_count == 0,
+             "generation_cap_failures": cap_failure_count,
              "holdout_accessed": False, "candidate_published": False}
     audit["evidence_digest"] = _document_digest(audit)
     output_path.parent.mkdir(parents=True, exist_ok=True)

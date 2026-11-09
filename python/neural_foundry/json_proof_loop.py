@@ -43,14 +43,21 @@ def score_public_rows(task: TaskAdapter, model: Any, rows: Sequence[Mapping[str,
     records = []
     for row, result in zip(rows, outputs, strict=True):
         response = result.response if isinstance(result, ExecutionResponse) else result
+        execution_evidence = dict(result.interaction) if isinstance(result, ExecutionResponse) else None
+        hit_generation_cap = bool(execution_evidence and execution_evidence.get("hit_generation_cap"))
         try:
             validate_task_instance(task.job.task_output_schema, response, field="response")
             valid = True
         except GymJobError:
             valid = False
+        if hit_generation_cap:
+            valid = False
+        exact_match = score_response(reference=row["reference"], response=response)["exact_match"]
+        if hit_generation_cap:
+            exact_match = 0.0
         records.append({"scenario_id": row["scenario_id"], "response": response, "format_valid": valid,
-                        "execution_evidence": dict(result.interaction) if isinstance(result, ExecutionResponse) else None,
-                        "exact_match": score_response(reference=row["reference"], response=response)["exact_match"]})
+                        "execution_evidence": execution_evidence, "hit_generation_cap": hit_generation_cap,
+                        "exact_match": exact_match})
     return {"split": split, "cases": len(rows), "exact_match": sum(row["exact_match"] for row in records) / len(rows),
             "format_valid": sum(row["format_valid"] for row in records) / len(rows), "responses": records,
             "panel_digest": _document_digest({"rows": rows}), "model_identity": model.loaded_identity()}
