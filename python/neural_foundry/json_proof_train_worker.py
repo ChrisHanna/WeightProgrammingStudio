@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends.automodel.config import AutoModelBackendConfig
-from .backends.weight_edit.adapter import WeightEditBackendConfig
+from .backends.weight_edit.adapter import MAX_PRESERVATION_INTERACTIONS, WeightEditBackendConfig
 from .gym_adapters import transformers_model
 from .gym_artifacts import CandidateRef
 from .gym_lifecycle import AdapterIdentity, EvaluatorAdapter, GymLifecycle, public_panel_evaluator
@@ -20,6 +20,10 @@ from .base_failure_selection import MINIMUM_BASE_FAILURES, load_base_failure_rep
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
+def bound_preservation_panel(interactions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return interactions[:MAX_PRESERVATION_INTERACTIONS]
 
 
 def train_reference(*, state_dir: Path, automodel_python: str, seed: int, rows_per_template: int,
@@ -50,6 +54,7 @@ def train_reference(*, state_dir: Path, automodel_python: str, seed: int, rows_p
             preservation.append(task.project(row["input"], None))
     if not preservation:
         raise ValueError("no separate public preservation cases passed the base scorer")
+    preservation = bound_preservation_panel(preservation)
     request = {
         "run_id": "json-reference-proof", "task": "reference_invoice_extraction@1",
         "model": base.identity.adapter_id + "@1", "trainer": "nemo_automodel.sft@1", "evaluator": "public@1",

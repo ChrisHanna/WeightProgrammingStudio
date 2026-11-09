@@ -61,6 +61,15 @@ def _failure_report(tmp_path: Path, *, rows_per_template: int = 1, seed: int = 1
     return path
 
 
+def test_weight_edit_preservation_panel_respects_backend_limit() -> None:
+    from neural_foundry.json_proof_train_worker import bound_preservation_panel
+
+    interactions = [{"scenario": index} for index in range(165)]
+    panel = bound_preservation_panel(interactions)
+    assert len(panel) == 128
+    assert panel == interactions[:128]
+
+
 class _FakeModel:
     def __init__(self, *, fail=False):
         self.fail = fail

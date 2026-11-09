@@ -14,6 +14,8 @@ from ...gym_lifecycle import AdapterIdentity, TrainerAdapter
 from ...gym_service import _document_digest, _wire_document
 from ...provenance import parse_strict_json, sha256_file
 
+MAX_PRESERVATION_INTERACTIONS = 128
+
 
 @dataclass(frozen=True)
 class WeightEditBackendConfig:
@@ -74,7 +76,7 @@ def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     if recipe["preservation_source"] != "public_train":
         raise GymJobError("weight-edit preservation cannot use holdout or selection validation")
     panel = recipe["preservation_interactions"]
-    if not isinstance(panel, (list, tuple)) or not 1 <= len(panel) <= 128:
+    if not isinstance(panel, (list, tuple)) or not 1 <= len(panel) <= MAX_PRESERVATION_INTERACTIONS:
         raise GymJobError("weight-edit preservation panel must be bounded and nonempty")
     protected = recipe.get("protected_training_interactions", ())
     if not isinstance(protected, (list, tuple)) or len(protected) > 1024:
