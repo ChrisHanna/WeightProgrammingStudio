@@ -632,6 +632,7 @@ impl QualifiedTorch {
         // Failed registration/gate release follows the SAME wait4 measurement
         // path as cancellation. Never discard real CPU/RSS or claim no spawn.
         let gate_failure = gate_result.err().map(|e| e.to_string());
+        let gate_cancelled = gate_failure.is_some() && cancel.is_cancelled();
         drop(owned.child.stdin.take());
         let overflow = Arc::new(AtomicBool::new(false));
         let o = overflow.clone();
@@ -661,7 +662,9 @@ impl QualifiedTorch {
                 || boot_ms() - start >= limits.wall_ms as i64
                 || overflow.load(Ordering::Acquire)
             {
-                reason = if gate_failure.is_some() {
+                reason = if gate_cancelled {
+                    "cancelled"
+                } else if gate_failure.is_some() {
                     "launch_gate_failed"
                 } else if cancel.is_cancelled() {
                     "cancelled"
@@ -684,7 +687,11 @@ impl QualifiedTorch {
             + (usage.ru_utime.tv_usec as u64 + usage.ru_stime.tv_usec as u64) / 1000;
         let wall = (boot_ms() - start).max(0) as u64;
         if gate_failure.is_some() {
-            reason = "launch_gate_failed";
+            reason = if gate_cancelled {
+                "cancelled"
+            } else {
+                "launch_gate_failed"
+            };
         }
         if reason == "completed" && overflow.load(Ordering::Acquire) {
             reason = "output_limit";
@@ -704,7 +711,9 @@ impl QualifiedTorch {
             cpu_ms: cpu,
             rss_bytes: usage.ru_maxrss.max(0) as u64 * 1024,
             wall_ms: wall,
-            status: if let Some(failure) = gate_failure {
+            status: if gate_cancelled {
+                "cancelled".into()
+            } else if let Some(failure) = gate_failure {
                 format!("launch_gate_failed: {failure}")
             } else if success {
                 "completed".into()

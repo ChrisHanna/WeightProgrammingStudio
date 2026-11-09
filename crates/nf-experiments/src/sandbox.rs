@@ -850,7 +850,9 @@ impl QualifiedDocker {
                 "sandbox creation failed",
             ));
         }
-        let inspect = self.inspect_authorized(name, cancel, authorize)?;
+        let Some(inspect) = self.inspect_authorized(name, cancel, authorize)? else {
+            return Ok(("cancelled".into(), None));
+        };
         record(job, &path.join("observed.json"), &inspect)?;
         Self::verify_configuration(&inspect, name, path)?;
         record(job, &path.join("configured.json"), &inspect)?;
@@ -874,7 +876,9 @@ impl QualifiedDocker {
                 None,
             ));
         }
-        let inspect = self.inspect_authorized(name, cancel, authorize)?;
+        let Some(inspect) = self.inspect_authorized(name, cancel, authorize)? else {
+            return Ok(("cancelled".into(), None));
+        };
         record(job, &path.join("exit.json"), &inspect)?;
         if inspect["State"]["Running"] != false
             || inspect["State"]["OOMKilled"] != false
@@ -921,14 +925,20 @@ impl QualifiedDocker {
         name: &str,
         cancel: &AtomicBool,
         authorize: Option<&dyn Fn() -> Result<()>>,
-    ) -> Result<Value> {
+    ) -> Result<Option<Value>> {
         let capture = command_authorized(
             &strings(&["inspect", name]),
             Duration::from_secs(10),
             cancel,
             authorize,
         )?;
-        if !capture.ok || capture.interrupted {
+        if capture.interrupted {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            return Err(error(ErrorCode::LimitExceeded, "Docker inspect timed out"));
+        }
+        if !capture.ok {
             return Err(error(
                 ErrorCode::UnsupportedCapability,
                 "authorized Docker inspect failed",
@@ -936,7 +946,7 @@ impl QualifiedDocker {
         }
         let value: Value = serde_json::from_slice(&capture.stdout)
             .map_err(|_| error(ErrorCode::InvalidJson, "invalid Docker control JSON"))?;
-        Ok(value[0].clone())
+        Ok(Some(value[0].clone()))
     }
     /// Controller-only observation for real lifecycle tests and supervision.
     #[cfg(test)]

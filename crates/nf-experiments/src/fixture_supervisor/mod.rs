@@ -236,9 +236,19 @@ impl Supervisor {
                 identity: PreparedIdentity,
             }
             let line: Vec<u8> = self.bytes.drain(..=newline).collect();
-            let response: Prepared = serde_json::from_slice(&line).map_err(|_| {
-                invalid("qualification failed; unsupported host/runtime/static ELF")
-            })?;
+            let response: Prepared = match serde_json::from_slice(&line) {
+                Ok(response) => response,
+                Err(_) => {
+                    let failure: serde_json::Value = serde_json::from_slice(&line)
+                        .map_err(|_| invalid("qualification response is malformed"))?;
+                    let requirement = failure
+                        .get("requirement")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| value.len() <= 256)
+                        .unwrap_or("unsupported host/runtime/static ELF");
+                    return Err(invalid(&format!("qualification failed: {requirement}")));
+                }
+            };
             if response.kind != "prepared"
                 || response.identity.policy != self.policy
                 || response.identity.guardian_pid != self.child.id()
