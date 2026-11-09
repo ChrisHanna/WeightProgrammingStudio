@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
 from neural_foundry.backends.weight_edit.loader import UnsupportedModel
 from neural_foundry.backends.weight_edit.near_ties import calibrate_near_ties, verify_near_tie_tokens
 from neural_foundry.backends.weight_edit.serving_probes import calibrate_portability, verify_identity, verify_portability
+from neural_foundry.gym_service import _document_digest
 
 
 def _bases(ties):
@@ -63,3 +66,33 @@ def test_near_tie_portability_never_weakens_exact_token_identity():
     altered_identity = {**first, "kind": "nf_vllm_weight_identity_v2"}
     with pytest.raises(UnsupportedModel, match="greedy tokens"):
         verify_identity(second, altered_identity)
+
+
+def test_reference_tie_is_allowed_when_observed_gap_reflects_two_token_noise():
+    first, second = _bases(0)
+    first["records"][0] = {"prompt_token_ids": [1], "greedy_token_id": 10, "greedy_logprob": -1.5,
+                           "top_two": [{"token_id": 10, "logprob": -1.5}, {"token_id": 11, "logprob": -1.5}]}
+    second["records"][0] = {"prompt_token_ids": [1], "greedy_token_id": 11, "greedy_logprob": -1.412,
+                            "top_two": [{"token_id": 11, "logprob": -1.412}, {"token_id": 10, "logprob": -1.537}]}
+    policy = calibrate_near_ties(first, second)
+    probe = policy["probes"][0]
+    assert probe["near_tie"] is True and probe["transformers_gap"] == 0
+    assert probe["vllm_gap"] > policy["measured_base_noise"]
+    assert probe["vllm_gap"] <= probe["gap_difference_bound"]
+    assert policy["decisive_probes"] == 15
+
+
+def test_retained_smollm2_base_measurements_have_fifteen_decisive_probes():
+    root = Path(__file__).resolve().parents[1] / "docs" / "evidence"
+    trial = json.loads((root / "weight-edit-smollm2-bf16-near-ties.json").read_bytes())
+    analysis = json.loads((root / "weight-edit-smollm2-bf16-near-tie-calibration.json").read_bytes())
+    for report in (trial, analysis):
+        assert report["evidence_digest"] == _document_digest({key: value for key, value in report.items() if key != "evidence_digest"})
+    assert analysis["source_evidence_digest"] == trial["evidence_digest"]
+    recomputed = calibrate_portability(trial["transformers_base_record"], trial["vllm_base_record"])
+    assert analysis["calibration_passed"] is True and analysis["calibration"] == recomputed
+    policy = recomputed["near_tie_policy"]
+    assert policy["decisive_probes"] == 15
+    assert [probe["index"] for probe in policy["probes"] if probe["near_tie"]] == [6]
+    assert verify_portability(trial["transformers_base_record"], trial["vllm_base_record"], recomputed)["verified"] is True
+    assert verify_identity(trial["vllm_base_record"], trial["vllm_base_record"])["verified"] is True

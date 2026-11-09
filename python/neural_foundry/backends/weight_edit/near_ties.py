@@ -52,13 +52,15 @@ def calibrate_near_ties(base_transformers: Mapping[str, Any], base_vllm: Mapping
     for index, (first, second, first_values, second_values) in enumerate(pairs):
         first_gap = abs(first["top_two"][0]["logprob"] - first["top_two"][1]["logprob"])
         second_gap = abs(second["top_two"][0]["logprob"] - second["top_two"][1]["logprob"])
-        near = (first_values.keys() == second_values.keys() and first_gap < measured_noise and second_gap < measured_noise)
+        near = (first_values.keys() == second_values.keys() and first_gap < measured_noise
+            and abs(first_gap - second_gap) <= 2 * measured_noise)
         if first["greedy_token_id"] != second["greedy_token_id"] and not near:
             raise UnsupportedModel(f"base probe {index} differs outside the measured near-tie policy")
         probes.append({"index": index, "prompt_token_ids": first["prompt_token_ids"], "near_tie": near,
                        "allowed_tokens": sorted(first_values) if near else [],
                        "transformers_gap": first_gap, "vllm_gap": second_gap,
-                       "reason": "both base gaps below measured cross-runtime bf16 discrepancy" if near else "decisive base probe"})
+                       "gap_difference_bound": 2 * measured_noise,
+                       "reason": "reference base gap below measured per-token discrepancy; two-token gap difference bounded by twice that discrepancy" if near else "decisive base probe"})
     decisive = sum(not probe["near_tie"] for probe in probes)
     if decisive < MIN_DECISIVE_PROBES:
         raise UnsupportedModel("precision is unqualified: fewer than 12 of 16 decisive base probes")
