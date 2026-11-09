@@ -118,6 +118,16 @@ def _aggregate_logprobs(reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "sum_logprob": sum_logprob, "case_logprobs": case_logprobs}
 
 
+def strength_one_stop_gate(layer: int, row: dict[str, Any] | None) -> dict[str, Any]:
+    measured = row is not None and row.get("status") == "measured" and row.get("layer") == layer
+    effective_change = bool(measured and row.get("effective_change_norm", 0) > 0)
+    task_gain = row.get("validation_exact_match_gain") if measured else None
+    continue_to_multilayer = effective_change and isinstance(task_gain, (int, float)) and task_gain > 0
+    return {"evaluated_layer": layer, "effective_change": effective_change,
+            "validation_exact_match_gain": task_gain, "continue_to_multilayer": continue_to_multilayer,
+            "rule": "stop if strength 1.0 has no effective change or no positive public-validation exact-match gain"}
+
+
 def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
     renderer = PromptRenderer(loaded.tokenizer)
     if type(batch_size) is not int or not 1 <= batch_size <= 16:
@@ -736,6 +746,19 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
         append_sweep_checkpoint(checkpoint_path, selection)
         by_key[selection_key] = selection
 
+    preservation_panel = [*request["recipe"]["preservation_interactions"], *passing_interactions]
+    layers_needing_exact = [layer for layer in selected_layers
+        if any(f"exact:{layer}:{strength:.8g}" not in by_key for strength in strengths)]
+    preservation_calibrations = {}
+    preservation_before = []
+    float32_preservation_before = []
+    if layers_needing_exact:
+        preservation_before = preservation_logits(loaded, preservation_panel)
+        float32_preservation_before = float32_logits_of_exact_weights(loaded, preservation_panel)
+        for layer in layers_needing_exact:
+            site = next(site for site in writers if site.layer == layer)
+            preservation_calibrations[layer] = calibrate_one_ulp(loaded, site, preservation_panel)
+
     for layer in selected_layers:
         selected, calculated, calculation = calculated_by_layer.get(layer, (None, None, None))
         site = next(site for site in writers if site.layer == layer)
@@ -759,6 +782,11 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                     validation_logprob_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
                         for family, interactions in validation_by_template.items()}
                     validation_logprob = _aggregate_logprobs(validation_logprob_by_template)
+                    preservation_after = preservation_logits(loaded, preservation_panel)
+                    float32_preservation_after = float32_logits_of_exact_weights(loaded, preservation_panel)
+                    preservation_v2 = verify_v2(
+                        metrics(float32_preservation_before, float32_preservation_after),
+                        metrics(preservation_before, preservation_after), preservation_calibrations[layer])
                     screen = by_key[f"screen:{layer}:{strength:.8g}"]
                     row = {"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": key, "phase": "exact",
                         "run_digest": run_digest, "layer": layer, "tensor_name": selected.tensor_name,
@@ -778,6 +806,9 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                             "mean_token_logprob_gain": report["mean_token_logprob"]
                                 - baseline_validation_by_template[family]["mean_token_logprob"]}
                             for family, report in validation_logprob_by_template.items()},
+                        "preservation_v2_report_only": preservation_v2,
+                        "preservation_panel_cases": len(preservation_panel),
+                        "preservation_calibration_digest": preservation_calibrations[layer]["calibration_digest"],
                         "effective_change_norm": edited.receipt["change_norms"][selected.tensor_name],
                         "changed_tensors": edited.receipt["edited_tensors"],
                         "candidate_model_digest": model_state_digest(loaded.model), "calculation_evidence": calculation}
@@ -805,6 +836,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     best = max(exact_measured, key=lambda row: (row["validation"]["exact_match"], row["validation_logprob_gain"]))
     strength_one_rows = [row for row in screen_rows if row["target_step"] == 1.0]
     best_strength_one = next((row for row in strength_one_rows if row["layer"] == best["layer"]), None)
+    strength_one_gate = strength_one_stop_gate(best["layer"], by_key.get(f"exact:{best['layer']}:1"))
     report = {"kind": "nf_weight_edit_layer_strength_diagnostic_v2", "evidence_status": "measured",
               "selection_split": "public_validation", "task_scorer": "frozen_exact_match_v1",
               "job_digest": job.digest, "training_request_digest": request["training_request_digest"],
@@ -825,6 +857,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                   row.get("status") == "measured" and row.get("effective_change_norm", 0) > 0 for row in strength_one_rows),
                   "best_layer_nonzero": bool(best_strength_one and best_strength_one.get("status") == "measured"
                                               and best_strength_one.get("effective_change_norm", 0) > 0)},
+              "strength_1_stop_gate": strength_one_gate,
               "checkpoint_path": str(checkpoint_path), "run_digest": run_digest,
               "base_restored": True, "specialist_policy_approval": "pending",
               "candidate_published": False, "holdout_accessed": False, "release_authorized": False}

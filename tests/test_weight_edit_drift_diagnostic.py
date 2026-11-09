@@ -7,7 +7,7 @@ from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
     _aggregate_logprobs, _validation_template_scores, expected_answer_logprob, measure_mode, open_sweep_checkpoint,
-    select_top_third, select_validation_screen)
+    select_top_third, select_validation_screen, strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -152,6 +152,17 @@ def test_validation_results_and_logprobs_are_reported_by_template():
     family_logprobs = {family: {"cases": 1, "response_tokens": 2, "sum_logprob": -2.0,
                                 "case_logprobs": [-2.0]} for family in ("invoice_a", "invoice_b")}
     assert _aggregate_logprobs(family_logprobs)["mean_token_logprob"] == -1.0
+
+
+def test_strength_one_stop_gate_requires_effective_change_and_task_gain():
+    passing = {"status": "measured", "layer": 14, "effective_change_norm": 0.1,
+               "validation_exact_match_gain": 1 / 64}
+    assert strength_one_stop_gate(14, passing)["continue_to_multilayer"] is True
+    no_gain = {**passing, "validation_exact_match_gain": 0.0}
+    assert strength_one_stop_gate(14, no_gain)["continue_to_multilayer"] is False
+    no_change = {**passing, "effective_change_norm": 0.0}
+    assert strength_one_stop_gate(14, no_change)["continue_to_multilayer"] is False
+    assert strength_one_stop_gate(13, passing)["continue_to_multilayer"] is False
 
 
 def test_layer_specific_calculation_reuses_verified_site_map(numerical_fixture):
