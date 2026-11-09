@@ -30,6 +30,14 @@ TEMPLATES = {
     "train": {
         "order": "Order for {customer}: {quantity} units of {product}.",
         "fields": "Customer: {customer}; product: {product}; quantity: {quantity}.",
+        "dispatch": "Dispatch {quantity} {product} to {customer}.",
+        "recipient": "Recipient {customer}; send {product}, count {quantity}.",
+        "need": "{customer} needs {quantity} units: {product}.",
+        "line_item": "Record this line: {product} x {quantity}; account {customer}.",
+        "packing": "Pack {quantity} of {product} for delivery to {customer}.",
+        "inventory": "Customer={customer} // item={product} // count={quantity}",
+        "procurement": "Purchase request: {customer} / {quantity} {product}.",
+        "fulfillment": "Deliver {product} ({quantity}) to {customer}; confirm the order.",
     },
     "validation": {
         "shipment": "Ship {quantity} {product} to customer {customer}.",

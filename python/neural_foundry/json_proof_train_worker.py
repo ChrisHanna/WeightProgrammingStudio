@@ -13,7 +13,7 @@ from .gym_adapters import transformers_model
 from .gym_artifacts import CandidateRef
 from .gym_lifecycle import AdapterIdentity, EvaluatorAdapter, GymLifecycle, public_panel_evaluator
 from .gym_service import GymStudioService
-from .reference_json_extraction import generate_scenarios, reference_task, score_response
+from .reference_json_extraction import TEMPLATES, generate_scenarios, reference_task, score_response
 from .gym_service import ExecutionResponse
 
 
@@ -49,7 +49,9 @@ def train_reference(*, state_dir: Path, automodel_python: str, seed: int, rows_p
         "run_id": "json-reference-proof", "task": "reference_invoice_extraction@1",
         "model": base.identity.adapter_id + "@1", "trainer": "nemo_automodel.sft@1", "evaluator": "public@1",
         "recipe": {"method": "sft", "seed": seed, "steps": sft_steps, "max_sequence_tokens": 256,
-                   "tokens_per_batch": 256, "max_dataset_tokens": 512 * rows_per_template, "learning_rate": 0.00001},
+                   "tokens_per_batch": 256,
+                   "max_dataset_tokens": 512 * rows_per_template * len(TEMPLATES["train"]),
+                   "learning_rate": 0.00001},
         "approved_responses": {row["scenario_id"]: row["reference"] for row in rows},
     }
     run = lifecycle.run(request)

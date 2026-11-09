@@ -16,8 +16,12 @@ def test_synthetic_reference_splits_and_exact_scoring(tmp_path) -> None:
     panels = {split: generate_scenarios(split=split, seed=17, parameters={"rows_per_template": 4})
               for split in ("train", "validation", "holdout")}
     assert panels["train"] == generate_scenarios(split="train", seed=17, parameters={"rows_per_template": 4})
-    assert all(len(rows) == 8 for rows in panels.values())
-    assert not (set(TEMPLATES["holdout"]) & (set(TEMPLATES["train"]) | set(TEMPLATES["validation"])))
+    assert {split: len(rows) for split, rows in panels.items()} == {"train": 40, "validation": 8, "holdout": 8}
+    for left, right in (("train", "validation"), ("train", "holdout"), ("validation", "holdout")):
+        assert not (set(TEMPLATES[left]) & set(TEMPLATES[right]))
+        left_text = {row["input"]["text"] for row in panels[left]}
+        right_text = {row["input"]["text"] for row in panels[right]}
+        assert left_text.isdisjoint(right_text)
     assert all(set(row["family_id"] for row in rows) == set(TEMPLATES[split]) for split, rows in panels.items())
     for split, rows in panels.items():
         for row in rows:

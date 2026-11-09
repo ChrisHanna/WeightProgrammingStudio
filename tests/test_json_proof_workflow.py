@@ -13,7 +13,7 @@ from neural_foundry.gym_artifacts import CandidateRef, artifact_files, write_can
 from neural_foundry.gym_job import GymJobError
 from neural_foundry.gym_service import _document_digest
 from neural_foundry.provenance import resolve_checkpoint
-from neural_foundry.reference_json_extraction import reference_task
+from neural_foundry.reference_json_extraction import TEMPLATES, reference_task
 
 
 def _references(tmp_path: Path):
@@ -86,7 +86,8 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
     report = json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
                                                  rows_per_template=1, frontier_factory=lambda: _FakeModel())
     assert report["complete"] is True and report["comparison"]["scenario_count"] == 2
-    assert report["scorer_audit"]["passed"] is True and report["scorer_audit"]["cases"] == 12
+    assert report["scorer_audit"]["passed"] is True
+    assert report["scorer_audit"]["cases"] == 3 * (len(TEMPLATES["train"]) + len(TEMPLATES["validation"]))
     assert all(card["value"] == 0 for card in report["comparison"]["scorecards"].values())
     assert not list(output.glob("nemo_*/resources_servers/nf_json_extraction/data/holdout.jsonl"))
     assert json.loads((output / "report.json").read_text()) == report
