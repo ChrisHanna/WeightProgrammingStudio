@@ -10,6 +10,15 @@ from ...gym_service import _document_digest
 from .loader import UnsupportedModel
 
 MIN_DECISIVE_PROBES = 12
+POLICY_V2_DEFINITION = {
+    "policy_id": "bf16_base_near_ties", "version": 2, "precision": "bfloat16", "probe_count": 16,
+    "minimum_decisive_probes": 12, "gap_difference_multiplier": 2,
+    "noise_measurement": "maximum absolute log-probability discrepancy on common top-two token IDs across the unedited base runtimes",
+    "reference_gap_rule": "reference top-two gap strictly less than measured base noise",
+    "pair_rule": "both unedited-base runtimes have the same top-two token pair",
+    "candidate_rule": "exact tokens on decisive probes; mismatches only within the frozen base pair, with same-token log-probability comparison",
+    "identity_rule": "same-runtime identity remains exact-token",
+}
 
 
 def top_two(record: Mapping[str, Any]) -> dict[int, float]:
@@ -64,7 +73,9 @@ def calibrate_near_ties(base_transformers: Mapping[str, Any], base_vllm: Mapping
     decisive = sum(not probe["near_tie"] for probe in probes)
     if decisive < MIN_DECISIVE_PROBES:
         raise UnsupportedModel("precision is unqualified: fewer than 12 of 16 decisive base probes")
-    policy = {"kind": "nf_bf16_base_near_ties_v1", "precision": "bfloat16", "decisive_probes": decisive,
+    policy = {"kind": "nf_bf16_base_near_ties_v2", "policy_version": 2,
+              "policy_definition_digest": _document_digest(POLICY_V2_DEFINITION),
+              "precision": "bfloat16", "decisive_probes": decisive,
               "minimum_decisive_probes": MIN_DECISIVE_PROBES, "measured_base_noise": measured_noise,
               "transformers_base_record_digest": _document_digest(dict(base_transformers)),
               "vllm_base_record_digest": _document_digest(dict(base_vllm)), "probes": probes}
@@ -75,7 +86,9 @@ def calibrate_near_ties(base_transformers: Mapping[str, Any], base_vllm: Mapping
 def verify_near_tie_tokens(first: Mapping[str, Any], second: Mapping[str, Any], index: int,
                            policy: Mapping[str, Any]) -> float:
     payload = {key: value for key, value in policy.items() if key != "policy_digest"}
-    if (policy.get("policy_digest") != _document_digest(payload)
+    if (policy.get("kind") != "nf_bf16_base_near_ties_v2" or policy.get("policy_version") != 2
+        or policy.get("policy_definition_digest") != _document_digest(POLICY_V2_DEFINITION)
+        or policy.get("policy_digest") != _document_digest(payload)
         or policy.get("minimum_decisive_probes") != MIN_DECISIVE_PROBES
         or policy.get("decisive_probes", 0) < MIN_DECISIVE_PROBES):
         raise UnsupportedModel("base near-tie policy is invalid or changed")

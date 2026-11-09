@@ -1,0 +1,25 @@
+{
+  "policy_id": "bf16_base_near_ties",
+  "version": 2,
+  "status": "frozen",
+  "precision": "bfloat16",
+  "probe_count": 16,
+  "minimum_decisive_probes": 12,
+  "noise_measurement": "maximum absolute log-probability discrepancy on common top-two token IDs across the unedited base runtimes",
+  "reference_gap_rule": "reference top-two gap strictly less than measured base noise",
+  "pair_rule": "both unedited-base runtimes have the same top-two token pair",
+  "gap_difference_multiplier": 2,
+  "candidate_rule": "exact tokens on decisive probes; mismatches only within the frozen base pair, with same-token log-probability comparison",
+  "identity_rule": "same-runtime identity remains exact-token",
+  "change_control": "no adjustment after another model result; any future numerical change requires a new policy version and approval",
+  "revision_reason": "v1 additionally required the observed gap below single-token noise; an observed gap involves two probabilities and may differ by twice the per-token error bound",
+  "prompting_evidence": {
+    "model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+    "probe_index": 6,
+    "reference_gap": 0.0,
+    "observed_gap": 0.125,
+    "measured_base_noise": 0.10782361030578613,
+    "measurement_file": "docs/evidence/weight-edit-smollm2-bf16-near-ties.json",
+    "analysis_file": "docs/evidence/weight-edit-smollm2-bf16-near-tie-calibration.json"
+  }
+}

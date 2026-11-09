@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from neural_foundry.backends.weight_edit.loader import UnsupportedModel
-from neural_foundry.backends.weight_edit.near_ties import calibrate_near_ties, verify_near_tie_tokens
+from neural_foundry.backends.weight_edit.near_ties import POLICY_V2_DEFINITION, calibrate_near_ties, verify_near_tie_tokens
 from neural_foundry.backends.weight_edit.serving_probes import calibrate_portability, verify_identity, verify_portability
 from neural_foundry.gym_service import _document_digest
 
@@ -90,9 +90,41 @@ def test_retained_smollm2_base_measurements_have_fifteen_decisive_probes():
         assert report["evidence_digest"] == _document_digest({key: value for key, value in report.items() if key != "evidence_digest"})
     assert analysis["source_evidence_digest"] == trial["evidence_digest"]
     recomputed = calibrate_portability(trial["transformers_base_record"], trial["vllm_base_record"])
-    assert analysis["calibration_passed"] is True and analysis["calibration"] == recomputed
+    assert analysis["calibration_passed"] is True
+    assert analysis["calibration"]["near_tie_policy"]["kind"] == "nf_bf16_base_near_ties_v1"
+    assert recomputed["near_tie_policy"]["kind"] == "nf_bf16_base_near_ties_v2"
+    assert recomputed["near_tie_policy"]["probes"] == analysis["calibration"]["near_tie_policy"]["probes"]
     policy = recomputed["near_tie_policy"]
     assert policy["decisive_probes"] == 15
     assert [probe["index"] for probe in policy["probes"] if probe["near_tie"]] == [6]
     assert verify_portability(trial["transformers_base_record"], trial["vllm_base_record"], recomputed)["verified"] is True
     assert verify_identity(trial["vllm_base_record"], trial["vllm_base_record"])["verified"] is True
+
+
+def test_v2_matches_the_frozen_published_rule():
+    path = Path(__file__).resolve().parents[1] / "protocols" / "near-tie-policy-v2.json"
+    published = json.loads(path.read_bytes())
+    assert published["status"] == "frozen" and published["version"] == 2
+    assert POLICY_V2_DEFINITION == {key: published[key] for key in POLICY_V2_DEFINITION}
+    assert published["prompting_evidence"]["reference_gap"] == 0
+    assert published["gap_difference_multiplier"] == 2 and published["minimum_decisive_probes"] == 12
+
+
+def test_nemotron_failure_classification_does_not_invent_v2_replay():
+    root = Path(__file__).resolve().parents[1] / "docs" / "evidence"
+    source = json.loads((root / "weight-edit-nemotron-bf16.json").read_bytes())
+    analysis = json.loads((root / "weight-edit-nemotron-failure-analysis.json").read_bytes())
+    assert analysis["source_probe_digest"] == source["probe_digest"]
+    assert source["reasons"] == ["candidate exceeds the frozen unedited-base portability limit"]
+    assert analysis["failure_type"] == "same_token_log_probability_gap"
+    assert analysis["v2_replay_status"] == "unavailable_missing_raw_records"
+    assert analysis["v2_passed"] is None and analysis["new_gpu_run"] is False
+
+
+def test_v2_reference_gap_boundary_remains_strict():
+    first, second = _bases(0)
+    first["records"][0]["top_two"][1]["logprob"] = -1.02
+    second["records"][0]["top_two"][1]["logprob"] = -1.0
+    policy = calibrate_near_ties(first, second)
+    assert policy["probes"][0]["transformers_gap"] == policy["measured_base_noise"]
+    assert policy["probes"][0]["near_tie"] is False

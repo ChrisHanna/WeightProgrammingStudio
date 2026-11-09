@@ -1,0 +1,16 @@
+{
+  "kind": "nf_recorded_qualification_failure_analysis_v1",
+  "model_id": "nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1",
+  "precision": "bfloat16",
+  "source_report": "docs/evidence/weight-edit-nemotron-bf16.json",
+  "source_probe_digest": "sha256:07a80a3a44f4ea62a2b0e3c8b8ffacaf351bd8568b0931a6f7243f84b7aec626",
+  "implementation_commit": "40a3740",
+  "failure_type": "same_token_log_probability_gap",
+  "classification_basis": "the recorded limit error occurs only after compare_records accepts all exact prompt and greedy token IDs",
+  "evidence_class": "inferred_from_recorded_failure_path",
+  "v2_replay_status": "unavailable_missing_raw_records",
+  "missing_evidence": ["transformers_base_records", "vllm_base_records", "base_top_two_log_probabilities"],
+  "v2_passed": null,
+  "new_gpu_run": false,
+  "supported": false
+}
