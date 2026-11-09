@@ -126,6 +126,13 @@ def _validation_template_scores(rows: list[dict[str, Any]], score: dict[str, Any
             for family, responses in grouped.items()}
 
 
+def _interactions_by_template(task, rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row["family_id"], []).append(task.project(row["input"], row["reference"]))
+    return grouped
+
+
 def _aggregate_logprobs(reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
     case_logprobs = [value for report in reports.values() for value in report["case_logprobs"]]
     cases = sum(report["cases"] for report in reports.values())
@@ -407,9 +414,7 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
-    validation_by_template = {}
-    for row in validation_rows:
-        validation_by_template.setdefault(row["family_id"], []).append(task.project(row["input"], row["reference"]))
+    validation_by_template = _interactions_by_template(task, validation_rows)
     screening_rows = select_validation_screen(validation_rows)
     screening_interactions = [task.project(row["input"], row["reference"]) for row in screening_rows]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -585,6 +590,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
+    validation_by_template = _interactions_by_template(task, validation_rows)
     screening_rows = select_validation_screen(validation_rows)
     screening_interactions = [task.project(row["input"], row["reference"]) for row in screening_rows]
     loaded = load_model(request["base_reference"]["artifact_path"], dtype=torch.bfloat16, device=device)

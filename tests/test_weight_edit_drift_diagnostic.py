@@ -7,7 +7,8 @@ from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
     _aggregate_logprobs, _load_training_rosters, _validation_template_scores, expected_answer_logprob,
-    measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen, strength_one_stop_gate)
+    _interactions_by_template, measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen,
+    strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -134,6 +135,17 @@ def test_validation_screen_selects_eight_rows_per_family():
         *(f"invoice_a:{index}" for index in range(8)),
         *(f"invoice_b:{index}" for index in range(8)),
     ]
+
+
+def test_validation_interactions_are_grouped_for_each_template():
+    from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
+
+    task = reference_task(rows_per_template=1)
+    rows = generate_scenarios(split="validation", seed=17, parameters={"rows_per_template": 1})
+    grouped = _interactions_by_template(task, rows)
+    assert set(grouped) == {row["family_id"] for row in rows}
+    assert sum(map(len, grouped.values())) == len(rows)
+    assert all(grouped[row["family_id"]] for row in rows)
 
 
 def test_validation_results_and_logprobs_are_reported_by_template():
