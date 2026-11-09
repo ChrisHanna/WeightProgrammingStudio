@@ -2,7 +2,7 @@
   "version": 2,
   "status": "approved_frozen",
   "approved_by": "user_delegated_approval_2026-11-09",
-  "implementation_status": "not_yet_integrated",
+  "implementation_status": "base_failure_selection_and_specialist_gate_integrated; multi_layer_application_pending",
   "retention_mode": "specialist",
   "purpose": "Allow a task-specialized weight edit to trade preservation for a measurable public task improvement while retaining the required-set gate.",
   "edit_calculation": {
@@ -11,7 +11,8 @@
     "eligible_sites": "discovered middle MLP write sites selected using public validation",
     "task_training_targets": "failing approved training examples only",
     "protected_examples": "passing approved training examples",
-    "implementation_active": false
+    "single_site_zero_retention_wired": true,
+    "multi_layer_application_implemented": false
   },
   "task_gate": {
     "comparison": "paired exact-match outcomes on the same public validation cases against the unchanged base",

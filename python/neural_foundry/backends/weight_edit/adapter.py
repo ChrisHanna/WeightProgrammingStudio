@@ -9,7 +9,7 @@ from typing import Any
 
 from ...execution_runner import run_local_worker
 from ...gym_artifacts import CandidateRef, artifact_files, read_candidate_manifest
-from ...gym_job import GymJobError, GymJobSpec, is_finite_number
+from ...gym_job import GymJobError, GymJobSpec, _is_digest, is_finite_number
 from ...gym_lifecycle import AdapterIdentity, TrainerAdapter
 from ...gym_service import _document_digest, _wire_document
 from ...provenance import parse_strict_json, sha256_file
@@ -50,6 +50,10 @@ def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         fields.add("preservation_policy_version")
         if type(recipe["preservation_policy_version"]) is not int or recipe["preservation_policy_version"] not in {1, 2}:
             raise GymJobError("preservation policy version must be explicitly 1 or 2")
+    if "protected_training_interactions" in recipe:
+        fields.add("protected_training_interactions")
+    if "failure_selection" in recipe:
+        fields.add("failure_selection")
     if not isinstance(recipe, Mapping) or set(recipe) != fields or recipe.get("method") != "weight_edit" or recipe.get("edit_method") != "legacy_key_value_v1":
         raise GymJobError("weight-edit recipe has unsupported methods or fields")
     if type(recipe["seed"]) is not int or recipe["seed"] < 0:
@@ -61,6 +65,8 @@ def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise GymJobError("weight-edit target step is invalid")
     if not is_finite_number(recipe["retention_nullspace_weight"]) or recipe["retention_nullspace_weight"] < 0:
         raise GymJobError("weight-edit retention weight is invalid")
+    if recipe.get("retention_mode", "generalist") == "specialist" and recipe["retention_nullspace_weight"] != 0:
+        raise GymJobError("approved specialist retention v2 freezes retention_nullspace_weight at zero")
     if not is_finite_number(recipe["max_preservation_logit_drift"]) or recipe["max_preservation_logit_drift"] < 0:
         raise GymJobError("weight-edit preservation drift bound is invalid")
     if recipe.get("preservation_policy_version", 1) == 2 and recipe["max_preservation_logit_drift"] != 0.25:
@@ -70,6 +76,28 @@ def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     panel = recipe["preservation_interactions"]
     if not isinstance(panel, (list, tuple)) or not 1 <= len(panel) <= 128:
         raise GymJobError("weight-edit preservation panel must be bounded and nonempty")
+    protected = recipe.get("protected_training_interactions", ())
+    if not isinstance(protected, (list, tuple)) or len(protected) > 1024:
+        raise GymJobError("protected training interactions exceed their bounded budget")
+    selection = recipe.get("failure_selection")
+    if selection is not None:
+        expected = {"kind", "baseline_report_digest", "base_state_digest", "parent_dataset_digest",
+                    "filtered_dataset_digest", "selected_scenario_ids", "selected_example_digests",
+                    "failure_count", "minimum_failures"}
+        if (not isinstance(selection, Mapping) or set(selection) != expected
+            or selection.get("kind") != "nf_base_failure_selection_v1"
+            or any(not _is_digest(selection.get(name)) for name in
+                   ("baseline_report_digest", "base_state_digest", "parent_dataset_digest", "filtered_dataset_digest"))
+            or type(selection.get("failure_count")) is not int or selection["failure_count"] < 10
+            or selection.get("minimum_failures") != 10
+            or not isinstance(selection.get("selected_scenario_ids"), (list, tuple))
+            or not isinstance(selection.get("selected_example_digests"), (list, tuple))
+            or len(selection["selected_scenario_ids"]) != selection["failure_count"]
+            or len(selection["selected_example_digests"]) != selection["failure_count"]
+            or len(set(selection["selected_scenario_ids"])) != selection["failure_count"]
+            or len(set(selection["selected_example_digests"])) != selection["failure_count"]
+            or any(not _is_digest(digest) for digest in selection["selected_example_digests"])):
+            raise GymJobError("weight-edit failure-only selection is invalid or below the frozen 10-case minimum")
     return parse_strict_json(_wire_document(recipe))
 
 

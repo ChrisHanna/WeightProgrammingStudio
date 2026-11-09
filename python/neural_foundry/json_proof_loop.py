@@ -10,6 +10,7 @@ from .gym_job import GymJobError, validate_task_instance
 from .gym_lifecycle import TaskAdapter
 from .gym_service import ExecutionResponse, _document_digest
 from .reference_json_extraction import generate_scenarios, reference_task, score_response
+from .specialist_policy import SPECIALIST_V2_GATE, assess_specialist_v2
 
 
 SPECIALIST_POLICY = {"version": 1, "retention_mode": "specialist", "minimum_task_exact_match": 1.0,
@@ -71,8 +72,8 @@ def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[s
         raise GymJobError("specialist comparison requires the complete declared roster")
     rows = generate_scenarios(split="validation", seed=seed, parameters=task.job.scenario_sources[0].parameters)
     required = public_required_rows(seed=seed)
-    report = {"kind": "nf_specialist_public_comparison_v1", "split": "validation", "complete": False,
-              "policy_digest": _document_digest(SPECIALIST_POLICY), "scorecards": None,
+    report = {"kind": "nf_specialist_public_comparison_v2", "split": "validation", "complete": False,
+              "policy_version": 2, "policy_digest": _document_digest(SPECIALIST_V2_GATE), "scorecards": None,
               "holdout_accessed": False, "independent_custody_verified": False, "release_authorized": False}
     cards = {}
     for role, factory in models.items():
@@ -80,12 +81,14 @@ def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[s
             with factory() as model:
                 task_score = score_public_rows(task, model, rows)
                 required_score = score_public_rows(task, model, required)
-                cards[role] = {"task": task_score, "required_set": required_score,
-                               "acceptance": specialist_acceptance(task_score, required_score)}
+                cards[role] = {"task": task_score, "required_set": required_score}
         except Exception as exc:
             return {**report, "failure": {"stage": role, "reason": str(exc)}}
     for role, card in cards.items():
         card["task_gain_vs_base"] = card["task"]["exact_match"] - cards["base"]["task"]["exact_match"]
+        card["acceptance"] = assess_specialist_v2({"split": "validation",
+            "base_case_outcomes": [row["exact_match"] for row in cards["base"]["task"]["responses"]],
+            "candidate_case_outcomes": [row["exact_match"] for row in card["task"]["responses"]]}, card["required_set"])
     return {**report, "complete": True, "scorecards": cards}
 
 

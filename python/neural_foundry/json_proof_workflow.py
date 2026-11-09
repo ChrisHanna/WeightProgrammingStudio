@@ -15,6 +15,7 @@ from .gym_job import is_finite_number
 from .gym_service import GymStudioService, _document_digest
 from .json_frontier_model import JsonFrontierModel
 from .json_proof_loop import compare_synthetic_holdout, compare_public_validation
+from .base_failure_selection import load_base_failure_report
 from .json_scorer_audit import audit_reference_scorer
 from .nemo_json_compiler import compile_json_gym
 from .reference_json_extraction import generate_scenarios, reference_task
@@ -29,6 +30,7 @@ def run_json_proof(
     weight_edit_target_step: float = 0.01,
     preservation_policy_version: int = 2,
     retention_mode: str = "generalist", training_state_dir: str | Path | None = None,
+    base_failure_report_path: str | Path | None = None,
 ) -> dict[str, Any]:
     if (type(seed) is not int or seed < 0 or type(rows_per_template) is not int
         or not 1 <= rows_per_template <= 64 or type(sft_steps) is not int or not 1 <= sft_steps <= 256):
@@ -50,6 +52,12 @@ def run_json_proof(
         raise GymJobError("weight-edit compatibility probe is missing")
     task = reference_task(rows_per_template=rows_per_template)
     audit = audit_reference_scorer(task)
+    failure_report_path = (Path(base_failure_report_path).absolute() if base_failure_report_path is not None
+                           else Path(__file__).resolve().parents[2] / "docs" / "evidence" / "weight-edit-expanded-baseline-qwen3-train-validation-v1.json")
+    if not failure_report_path.is_file():
+        raise GymJobError("a measured public base-failure report is required before SFT/edit dispatch")
+    failure_report, failure_ids, passing_ids = load_base_failure_report(failure_report_path, task=task,
+        seed=seed, rows_per_template=rows_per_template)
     output = Path(output_dir).absolute()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     service = GymStudioService(state_dir=output / "compiler_state")
@@ -63,7 +71,7 @@ def run_json_proof(
                         "CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
     state = Path(training_state_dir).absolute() if training_state_dir is not None else output / "training_state"
     trained = run_local_worker([gpu_python, "-m", "neural_foundry.json_proof_train_worker", str(state),
-                                automodel_python, str(seed), str(rows_per_template), str(probe_path), str(sft_steps), str(weight_edit_target_step), str(preservation_policy_version), retention_mode], cwd=output, timeout_seconds=2400,
+                                automodel_python, str(seed), str(rows_per_template), str(probe_path), str(sft_steps), str(weight_edit_target_step), str(preservation_policy_version), retention_mode, str(failure_report_path)], cwd=output, timeout_seconds=2400,
                                cleanup_descendants=True, env=environment)
     if trained.returncode != 0 or trained.timed_out:
         raise GymJobError(f"synthetic proof training failed; stderr digest {trained.receipt['stderr_digest']}")
@@ -112,7 +120,11 @@ def run_json_proof(
               "candidate_record_digest": result["candidate_record_digest"], "vllm_image": VLLM_IMAGE,
               "weight_edit_training_request_digest": result["weight_edit_training_request_digest"],
               "weight_edit_candidate_record_digest": result["weight_edit_candidate_record_digest"],
-              "shared_dataset_digest": result["dataset_digest"], "frontier_configured": frontier is not None,
+              "shared_dataset_digest": result["dataset_digest"],
+              "weight_edit_dataset_digest": result.get("weight_edit_dataset_digest"),
+              "base_failure_report_digest": failure_report["evidence_digest"],
+              "base_failure_count": len(failure_ids), "protected_training_count": len(passing_ids),
+              "frontier_configured": frontier is not None,
               "retention_mode": retention_mode, "public_validation_comparison": public_comparison,
               "preservation": preservation, "preservation_gating": retention_mode == "generalist",
               "holdout_accessed": holdout_allowed, "holdout_complete": bool(comparison and comparison["complete"]),
@@ -141,6 +153,7 @@ def main() -> int:
     parser.add_argument("--preservation-policy", type=int, choices=(1, 2), default=2)
     parser.add_argument("--retention-mode", choices=("generalist", "specialist"), default="generalist")
     parser.add_argument("--training-state")
+    parser.add_argument("--base-failure-report")
     parser.add_argument("--compatibility-probe")
     parser.add_argument("--frontier", action="store_true")
     args = parser.parse_args()
@@ -150,6 +163,7 @@ def main() -> int:
                             weight_edit_target_step=args.weight_edit_target_step,
                             preservation_policy_version=args.preservation_policy,
                             retention_mode=args.retention_mode, training_state_dir=args.training_state,
+                            base_failure_report_path=args.base_failure_report,
                             frontier_factory=JsonFrontierModel.from_env if args.frontier else None)
     print(json.dumps({"complete": report["complete"], "report_digest": report["report_digest"]}))
     return 0 if report["complete"] else 1

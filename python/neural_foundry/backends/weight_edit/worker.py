@@ -46,6 +46,12 @@ def preservation_logits(loaded, interactions):
 
 def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = None, discovered_sites: SiteMap | None = None):
     recipe = validate_recipe(recipe)
+    failure_selection = recipe.get("failure_selection")
+    if failure_selection is not None:
+        example_digests = [example.get("example_digest") for example in examples]
+        if (len(examples) < 10 or len(examples) != failure_selection["failure_count"]
+            or example_digests != failure_selection["selected_example_digests"]):
+            raise GymJobError("weight-edit keys must be exactly the selected base-failing train examples, with at least ten cases")
     sites = discovered_sites or find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
                                           checkpoint_tensor_names=loaded.checkpoint_tensor_names)
     if not sites.checkpoint_names_verified:
@@ -62,7 +68,7 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
         site = matches[0]
     selected = SiteMap((site,), checkpoint_names_verified=True)
     renderer = PromptRenderer(loaded.tokenizer)
-    panel = recipe["preservation_interactions"]
+    panel = [*recipe["preservation_interactions"], *recipe.get("protected_training_interactions", ())]
     for interaction in panel:
         if len(renderer.render(interaction).token_ids) > recipe["max_sequence_tokens"]:
             raise GymJobError("preservation prompt exceeds the frozen sequence budget")
@@ -101,6 +107,8 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
                 "training_tokens": total_tokens, "key_count": key_count, "zero_gradient_keys": int((~active).sum()),
                 "preservation_digest": _document_digest({"source": "public_train", "interactions": panel}),
                 "preservation_count": len(panel), "preservation_input_authority": "caller_supplied_public_panel",
+                "failure_selection_digest": _document_digest(failure_selection) if failure_selection else None,
+                "protected_training_interactions": len(recipe.get("protected_training_interactions", ())),
                 "renderer_digest": renderer.digest}
     return sites, site, delta, evidence
 
@@ -192,6 +200,19 @@ def train_payload(payload: dict[str, Any], serving_factory=None) -> CandidateRef
         raise GymJobError("job has not authorized weight editing")
     checkpoint = _resolve_training_checkpoint(request, base)
     settings, recipe = request["inference_config"], validate_recipe(request["recipe"])
+    failure_selection = recipe.get("failure_selection")
+    if failure_selection is not None:
+        example_digests = [example.get("example_digest") for example in payload["examples"]]
+        if (failure_selection["filtered_dataset_digest"] != request["dataset_digest"]
+            or failure_selection["base_state_digest"] != request["loaded_base"]["state_digest"]
+            or failure_selection["failure_count"] != len(payload["examples"])
+            or example_digests != failure_selection["selected_example_digests"]):
+            raise GymJobError("worker examples differ from the frozen base-failure dataset selection")
+    failure_selection = recipe.get("failure_selection")
+    if failure_selection is not None and (failure_selection["filtered_dataset_digest"] != request["dataset_digest"]
+        or failure_selection["base_state_digest"] != request["loaded_base"]["state_digest"]
+        or [example.get("example_digest") for example in payload["examples"]] != failure_selection["selected_example_digests"]):
+        raise GymJobError("worker examples differ from the frozen base-failure dataset selection")
     if recipe["max_sequence_tokens"] > settings["context_tokens"]:
         raise GymJobError("edit sequence budget exceeds model context")
     torch.manual_seed(recipe["seed"])

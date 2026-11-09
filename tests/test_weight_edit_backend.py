@@ -46,8 +46,11 @@ def test_recipe_requires_public_preservation_and_explicit_budgets():
         validate_recipe({**recipe, "preservation_policy_version": 2, "max_preservation_logit_drift": 1.0})
     with pytest.raises(GymJobError, match="version"):
         validate_recipe({**recipe, "preservation_policy_version": 3})
-    specialist = {**recipe, "preservation_policy_version": 2, "retention_mode": "specialist"}
+    specialist = {**recipe, "preservation_policy_version": 2, "retention_mode": "specialist",
+                  "retention_nullspace_weight": 0.0}
     assert validate_recipe(specialist) == specialist
+    with pytest.raises(GymJobError, match="freezes retention_nullspace_weight at zero"):
+        validate_recipe({**specialist, "retention_nullspace_weight": 0.1})
     with pytest.raises(GymJobError, match="explicit"):
         validate_recipe({**recipe, "retention_mode": "specialist"})
     with pytest.raises(GymJobError, match="retention_mode"):
@@ -151,6 +154,25 @@ def test_multi_site_capture_computes_all_layer_deltas_once(numerical_fixture):
                for delta, evidence in results.values())
     assert model_state_digest(loaded.model) == digest
     assert all(parameter.grad is None for parameter in loaded.model.parameters())
+
+
+def test_failure_selection_recipe_freezes_ten_case_minimum_and_exact_roster(numerical_fixture):
+    from neural_foundry.backends.weight_edit.worker import calculate_edit
+
+    loaded, task, examples, recipe = numerical_fixture
+    digests = ["sha256:" + str(index).zfill(64) for index in range(10)]
+    selection = {"kind": "nf_base_failure_selection_v1", "baseline_report_digest": "sha256:" + "a" * 64,
+        "base_state_digest": "sha256:" + "b" * 64, "parent_dataset_digest": "sha256:" + "c" * 64,
+        "filtered_dataset_digest": "sha256:" + "d" * 64, "selected_scenario_ids": [f"train-{index}" for index in range(10)],
+        "selected_example_digests": digests, "failure_count": 10, "minimum_failures": 10}
+    selected_recipe = {**recipe, "failure_selection": selection, "protected_training_interactions": []}
+    assert validate_recipe(selected_recipe) == selected_recipe
+    with pytest.raises(GymJobError, match="minimum"):
+        validate_recipe({**selected_recipe, "failure_selection": {**selection, "failure_count": 9,
+            "selected_scenario_ids": selection["selected_scenario_ids"][:9],
+            "selected_example_digests": digests[:9]}})
+    with pytest.raises(GymJobError, match="exactly the selected"):
+        calculate_edit(loaded, task.job, examples, selected_recipe)
 
 
 def test_trainer_calculates_exports_and_seals_execution_receipt(tmp_path, numerical_fixture, monkeypatch):

@@ -138,7 +138,8 @@ def test_public_scoring_rejects_holdout_and_counts_wrong_valid_json_separately()
     with pytest.raises(ValueError, match="public-validation"):
         score_public_rows(task, model, train)
     score = score_public_rows(task, model, train, split="train")
-    assert score["split"] == "train" and score["cases"] == 2
+    assert score["split"] == "train" and score["cases"] == len(generate_scenarios(
+        split="train", seed=17, parameters={"rows_per_template": 1}))
 
 
 def test_validation_generation_uses_shared_fenced_json_parser(numerical_fixture, monkeypatch):
@@ -180,6 +181,6 @@ def test_specialist_v2_proposal_uses_paired_case_bootstrap_without_activation():
     evidence = {"split": "validation", "base_case_outcomes": base, "candidate_case_outcomes": candidate}
     required = {"split": "validation", "format_valid": 1.0, "exact_match": 1.0}
     result = assess_specialist_v2(evidence, required, minimum_net_cases=4)
-    assert result["policy_status"] == "approved_not_yet_integrated"
+    assert result["policy_status"] == "approved_frozen" and result["policy_version"] == 2
     assert result["passed"] is (result["checks"]["confidence_interval_lower_bound"] is True)
     assert not result["holdout_accessed"] and not result["generalist_authorized"] and not result["release_authorized"]

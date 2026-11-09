@@ -11,9 +11,9 @@ import pytest
 from neural_foundry import json_proof_workflow
 from neural_foundry.gym_artifacts import CandidateRef, artifact_files, write_candidate_manifest
 from neural_foundry.gym_job import GymJobError
-from neural_foundry.gym_service import _document_digest
+from neural_foundry.gym_service import _document_digest, _wire_document
 from neural_foundry.provenance import resolve_checkpoint
-from neural_foundry.reference_json_extraction import TEMPLATES, reference_task
+from neural_foundry.reference_json_extraction import TEMPLATES, generate_scenarios, reference_task
 
 
 def _references(tmp_path: Path):
@@ -46,6 +46,21 @@ def _references(tmp_path: Path):
     return base, sft, edited, revision
 
 
+def _failure_report(tmp_path: Path, *, rows_per_template: int = 1, seed: int = 17) -> Path:
+    task = reference_task(rows_per_template=rows_per_template)
+    rows = generate_scenarios(split="train", seed=seed, parameters={"rows_per_template": rows_per_template})
+    report = {"kind": "nf_json_public_split_baseline_v1", "scenario_origin": "synthetic",
+              "current_job_digest": task.job.digest, "seed": seed, "rows_per_template": rows_per_template,
+              "base_state_digest": "sha256:" + "a" * 64, "base_candidate_digest": "sha256:" + "b" * 64,
+              "holdout_accessed": False,
+              "train": {"score": {"responses": [{"scenario_id": row["scenario_id"], "exact_match": 0.0} for row in rows]},
+                        "failures": [row["scenario_id"] for row in rows], "failure_count": len(rows)}}
+    report["evidence_digest"] = _document_digest(report)
+    path = tmp_path / "base-failures.json"
+    path.write_bytes(_wire_document(report))
+    return path
+
+
 class _FakeModel:
     def __init__(self, *, fail=False):
         self.fail = fail
@@ -68,6 +83,7 @@ class _FakeModel:
 def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_path, monkeypatch) -> None:
     base, sft, edited, revision = _references(tmp_path)
     task = reference_task(rows_per_template=1)
+    failure_report = _failure_report(tmp_path, rows_per_template=1)
     result = {"job_digest": task.job.digest, "revision": revision, "base": vars(base), "sft": vars(sft),
               "training_request_digest": "sha256:" + "c" * 64, "candidate_record_digest": "sha256:" + "d" * 64,
               "weight_edit": vars(edited), "weight_edit_training_request_digest": "sha256:" + "e" * 64,
@@ -76,7 +92,8 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
 
     def train(command, *, env, **kwargs):
         assert "NF_FRONTIER_API_KEY" not in env
-        assert command[-3:] == ["0.01", "2", "generalist"]
+        assert command[-4:-1] == ["0.01", "2", "generalist"]
+        assert command[-1] == str(failure_report)
         return SimpleNamespace(returncode=0, timed_out=False, receipt={},
                                stdout=b"NF_JSON_PROOF_TRAINING=" + json.dumps(result).encode() + b"\n")
 
@@ -84,7 +101,8 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
     monkeypatch.setattr(json_proof_workflow, "VllmCandidateServer", lambda *args, **kwargs: _FakeModel())
     output = tmp_path / "proof"
     report = json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
-                                                 rows_per_template=1, frontier_factory=lambda: _FakeModel())
+                                                 rows_per_template=1, frontier_factory=lambda: _FakeModel(),
+                                                 base_failure_report_path=failure_report)
     assert report["complete"] is True and report["comparison"]["scenario_count"] == 2
     assert report["scorer_audit"]["passed"] is True
     assert report["scorer_audit"]["cases"] == 3 * (len(TEMPLATES["train"]) + len(TEMPLATES["validation"]))
@@ -96,7 +114,8 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
     assert set(report["comparison"]["scorecards"]) == {"base", "sft", "weight_edit", "frontier"}
     assert all(card["newly_broken_cases"] == 0 for card in report["comparison"]["scorecards"].values())
     second = json_proof_workflow.run_json_proof(tmp_path / "local-proof", gpu_python=sys.executable,
-                                                automodel_python=sys.executable, rows_per_template=1)
+                                                automodel_python=sys.executable, rows_per_template=1,
+                                                base_failure_report_path=failure_report)
     assert second["frontier_configured"] is False
     assert set(second["comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
 
@@ -115,6 +134,7 @@ def test_missing_frontier_fails_before_creating_output(tmp_path, monkeypatch) ->
 def test_specialist_reports_three_arms_but_blocks_holdout_on_required_set_failure(tmp_path, monkeypatch):
     base, sft, edited, revision = _references(tmp_path)
     task = reference_task(rows_per_template=1)
+    failure_report = _failure_report(tmp_path, rows_per_template=1)
     result = {"job_digest": task.job.digest, "revision": revision, "base": vars(base), "sft": vars(sft),
               "training_request_digest": "sha256:" + "c" * 64, "candidate_record_digest": "sha256:" + "d" * 64,
               "weight_edit": vars(edited), "weight_edit_training_request_digest": "sha256:" + "e" * 64,
@@ -126,7 +146,7 @@ def test_specialist_reports_three_arms_but_blocks_holdout_on_required_set_failur
     receipt_path.write_text(json.dumps(receipt))
     monkeypatch.setattr(json_proof_workflow, "verify_vllm_candidate_files", lambda *args, **kwargs: None)
     def train(command, **kwargs):
-        assert command[-1] == "specialist"
+        assert command[-2] == "specialist" and command[-1].endswith("base-failures.json")
         return SimpleNamespace(returncode=0, timed_out=False, receipt={},
                                stdout=b"NF_JSON_PROOF_TRAINING=" + json.dumps(result).encode() + b"\n")
     monkeypatch.setattr(json_proof_workflow, "run_local_worker", train)
@@ -135,11 +155,15 @@ def test_specialist_reports_three_arms_but_blocks_holdout_on_required_set_failur
         raise AssertionError("holdout must remain untouched")
     monkeypatch.setattr(json_proof_workflow, "compare_synthetic_holdout", forbidden)
     report = json_proof_workflow.run_json_proof(tmp_path / "specialist", gpu_python=sys.executable,
-                    automodel_python=sys.executable, rows_per_template=1, retention_mode="specialist")
+                    automodel_python=sys.executable, rows_per_template=1, retention_mode="specialist",
+                    base_failure_report_path=failure_report)
     assert report["complete"] and report["public_validation_comparison"]["complete"]
     assert set(report["public_validation_comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
     assert report["comparison"] is None and not report["holdout_accessed"] and not report["specialist_gate_passed"]
     assert report["preservation"] == {"passed": False} and not report["preservation_gating"]
+    acceptance = report["public_validation_comparison"]["scorecards"]["weight_edit"]["acceptance"]
+    assert acceptance["policy_version"] == 2 and acceptance["policy_status"] == "approved_frozen"
+    assert "confidence_interval_lower_bound" in acceptance["checks"]
 
 
 def test_retained_failed_public_recipes_do_not_claim_holdout_scores():
