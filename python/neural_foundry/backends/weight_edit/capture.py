@@ -121,8 +121,8 @@ def capture(
                 if set(active) != set(collected):
                     raise UnsupportedModel("not every selected site ran during capture")
                 if token_outcome_sink is not None:
-                    if not gradient_mode:
-                        raise WeightEditInputError("token correctness diagnostics require teacher-forced labels")
+                    if not gradient_mode or any(position + 1 >= length for position in selected):
+                        raise WeightEditInputError("token diagnostics require valid next-token teacher-forced labels")
                     expected = labels[0, [position + 1 for position in selected]]
                     predicted = result.logits[0, selected].detach().argmax(dim=-1)
                     token_outcome_sink((predicted == expected).detach().cpu())

@@ -413,6 +413,15 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     for candidate in single_report["candidates"]:
         assert candidate["composition_size"] == 1 and len(candidate["stored_weight_changes"]) == 1
         assert candidate["validation_fixed_cases"] == candidate["validation_broken_cases"] == 0
+        assert candidate["training_fixed_cases"] == candidate["training_broken_cases"] == 0
+        diagnostic = candidate["edit_key_diagnostics"][str(candidate["layer"])]
+        assert diagnostic["target_shift_l2"] == candidate["target_step"]
+        assert diagnostic["target_shift_fraction_of_mean_write_output_norm"] == pytest.approx(
+            candidate["target_step"] / diagnostic["mean_write_output_l2_norm"])
+        assert diagnostic["already_correct_token_keys"] + diagnostic["incorrect_token_keys"] == diagnostic["key_count"]
+        assert diagnostic["retention_nullspace_weight"] == 0
+        assert diagnostic["retention_penalty_enabled"] is False
+        assert diagnostic["gradient_recomputed_after_scaling"] is False
         assert "zero_short_truncation" not in candidate["specialist_v2_gate"]["checks"]
         metrics = next(iter(candidate["stored_weight_changes"].values()))
         assert "relative_frobenius_norm" in metrics and "changed_entry_fraction" in metrics
