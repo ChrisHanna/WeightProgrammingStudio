@@ -30,9 +30,13 @@ def capture(
     positions: Sequence[Sequence[int]] | None = None, *,
     response_starts: Sequence[int] | None = None,
     loss_labels: Sequence[Sequence[int]] | None = None,
+    output_dtype: torch.dtype = torch.float32,
     max_capture_bytes: int = 256 * 1024 * 1024,
     sink: Callable[[str, torch.Tensor, torch.Tensor, torch.Tensor | None, str], None] | None = None,
 ) -> dict[str, Activations]:
+    if output_dtype not in {torch.float32, torch.float64}:
+        raise WeightEditInputError("capture output dtype must be float32 or float64")
+    element_size = torch.empty((), dtype=output_dtype).element_size()
     if type(max_capture_bytes) is not int or max_capture_bytes < 1 or (sink is not None and not callable(sink)):
         raise WeightEditInputError("capture requires a positive byte budget and a callable sink")
     if not prompts or isinstance(prompts, (str, bytes)) or any(not isinstance(prompt, (str, Mapping)) for prompt in prompts):
@@ -95,7 +99,7 @@ def capture(
                 selected = list(positions[index]) if positions is not None else [length - 1]
             if not selected or any(type(position) is not int or not 0 <= position < length for position in selected):
                 raise WeightEditInputError("capture token positions are outside the rendered prompt")
-            chunk_bytes = sum(len(selected) * (site.input_size + site.output_size * (2 if gradient_mode else 1)) * 4 for site in sites.sites)
+            chunk_bytes = sum(len(selected) * (site.input_size + site.output_size * (2 if gradient_mode else 1)) * element_size for site in sites.sites)
             if chunk_bytes + (captured_bytes if sink is None else 0) > max_capture_bytes:
                 raise WeightEditInputError("activation capture exceeds its byte budget; use streaming statistics or fewer positions")
             captured_bytes += chunk_bytes
@@ -117,9 +121,9 @@ def capture(
                     gradients = [None] * len(collected)
                 for name, gradient in zip(collected, gradients, strict=True):
                     inputs, outputs = active[name]
-                    captured_inputs = inputs[0, selected].detach().to(device="cpu", dtype=torch.float32)
-                    captured_outputs = outputs[0, selected].detach().to(device="cpu", dtype=torch.float32)
-                    captured_gradient = gradient[0, selected].detach().to(device="cpu", dtype=torch.float32) if gradient is not None else None
+                    captured_inputs = inputs[0, selected].detach().to(device="cpu", dtype=output_dtype)
+                    captured_outputs = outputs[0, selected].detach().to(device="cpu", dtype=output_dtype)
+                    captured_gradient = gradient[0, selected].detach().to(device="cpu", dtype=output_dtype) if gradient is not None else None
                     if sink is not None:
                         sink(name, captured_inputs, captured_outputs, captured_gradient, rendered.prompt_digest)
                     else:
@@ -178,7 +182,7 @@ def capture_statistics(
         values.input_output_cross += inputs.T @ outputs
         hashes[name].update(prompt_digest.encode())
 
-    capture(loaded, sites, prompts, positions, response_starts=response_starts, sink=consume)
+    capture(loaded, sites, prompts, positions, response_starts=response_starts, output_dtype=compute_dtype, sink=consume)
     for name, values in statistics.items():
         values.prompt_digest = "sha256:" + hashes[name].hexdigest()
         values.renderer_digest = renderer_digest
