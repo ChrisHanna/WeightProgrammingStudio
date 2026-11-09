@@ -140,9 +140,12 @@ def test_validation_screen_selects_eight_rows_per_family():
 
 def test_generation_truncation_requires_budget_exhaustion_and_incomplete_json():
     complete_at_budget = '{"customer":"Aster"}'
+    complete_with_preamble = 'Here is the result: ```json\n{"customer":"Aster"}'
     truncated_at_budget = '{"customer":"Aster"'
     assert _completion_was_truncated([1, 2, 3, 4], complete_at_budget, 4) is False
+    assert _completion_was_truncated([1, 2, 3, 4], complete_with_preamble, 4) is False
     assert _completion_was_truncated([1, 2, 3, 4], truncated_at_budget, 4) is True
+    assert _completion_was_truncated([1, 2, 3, 4], '[{"customer":"Aster"}', 4) is True
     assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is False
 
 

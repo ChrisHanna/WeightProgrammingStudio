@@ -113,7 +113,22 @@ def _compact_score(score: dict[str, Any]) -> dict[str, Any]:
 
 
 def _completion_was_truncated(generated_token_ids: list[int], text: str, max_new_tokens: int) -> bool:
-    return len(generated_token_ids) >= max_new_tokens and isinstance(_parse_generated_json(text), str)
+    if len(generated_token_ids) < max_new_tokens:
+        return False
+    start = text.rfind("```json")
+    if start >= 0:
+        start += len("```json")
+    else:
+        start = next((index for index, character in enumerate(text) if character in "[{"), -1)
+    if start < 0:
+        return True
+    while start < len(text) and text[start].isspace():
+        start += 1
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError:
+        return True
+    return not isinstance(value, (dict, list))
 
 
 def _validation_template_scores(rows: list[dict[str, Any]], score: dict[str, Any]) -> dict[str, dict[str, Any]]:
