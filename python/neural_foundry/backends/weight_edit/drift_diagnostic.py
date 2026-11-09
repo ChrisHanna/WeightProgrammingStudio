@@ -1091,7 +1091,8 @@ def run_edit_key_audit(state_dir: Path, request_path: Path, output_path: Path, *
 
 
 def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path: Path, output_path: Path,
-                         *, device="cuda:0", composition_sizes=(2, 3), single_layer_candidates=None):
+                         *, device="cuda:0", composition_sizes=(2, 3), single_layer_candidates=None,
+                         expected_baseline_counts=None):
     request = parse_strict_json(request_path.read_bytes())
     if request.get("training_request_digest") != _document_digest(
         {key: value for key, value in request.items() if key != "training_request_digest"}):
@@ -1155,8 +1156,6 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
     finalist_site_map = SiteMap(finalist_sites, checkpoint_names_verified=True)
     protected = [*request["recipe"]["preservation_interactions"],
                  *request["recipe"].get("protected_training_interactions", ())]
-    calculated = calculate_edits_for_sites(loaded, job, examples, request["recipe"], sites=finalist_site_map,
-                                           retention_interactions=protected)
     selected_config = [{"layer": row["layer"], "tensor_name": row["tensor_name"],
                         "target_step": row["best_strength"],
                         "validation_logprob_gain": row["best_validation_logprob_gain"]} for row in finalists]
@@ -1173,6 +1172,25 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
         for left, right in zip(baseline_validation_batch["responses"], serial_validation["responses"], strict=True))
     exact_batch_size = 1 if single_layer_mode else (16 if batch_equivalent else 1)
     base_validation = baseline_validation_batch if batch_equivalent else serial_validation
+    baseline_preflight = None
+    if expected_baseline_counts is not None:
+        measured_counts = (sum(row["exact_match"] for row in base_train["responses"]),
+                           sum(row["exact_match"] for row in base_validation["responses"]))
+        baseline_preflight = {"kind": "nf_single_layer_baseline_preflight_v1",
+            "training_request_digest": request["training_request_digest"], "base_state_digest": base_digest,
+            "expected_correct": {"train": expected_baseline_counts[0], "validation": expected_baseline_counts[1]},
+            "measured_correct": {"train": measured_counts[0], "validation": measured_counts[1]},
+            "training": _compact_score(base_train), "validation": _compact_score(base_validation),
+            "generation_max_new_tokens": LAYER_SWEEP_MAX_NEW_TOKENS, "batch_size": exact_batch_size,
+            "passed": measured_counts == tuple(expected_baseline_counts), "holdout_accessed": False}
+        baseline_preflight["evidence_digest"] = _document_digest(baseline_preflight)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.with_suffix(".baseline.json").open("xb") as stream:
+            stream.write(_wire_document(baseline_preflight))
+        if not baseline_preflight["passed"]:
+            raise WeightEditInputError("baseline counts differ from the frozen reference; candidates were not calculated or applied")
+    calculated = calculate_edits_for_sites(loaded, job, examples, request["recipe"], sites=finalist_site_map,
+                                           retention_interactions=protected)
     base_required = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), required_rows)
     base_train_logprob = expected_answer_logprob(loaded, train_interactions, batch_size=16)
@@ -1328,6 +1346,7 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
         "base_train": _compact_score(base_train), "base_validation": _compact_score(base_validation),
         "base_required_set": _compact_score(base_required), "base_validation_logprob": base_validation_logprob,
         "candidates": candidates, "base_restored": model_state_digest(loaded.model) == base_digest,
+        "baseline_preflight": baseline_preflight,
         "holdout_accessed": False, "candidate_published": False, "release_authorized": False}
     if single_layer_mode:
         if len(candidates) != len(single_layer_candidates) or any(row["composition_size"] != 1 for row in candidates):
@@ -1558,7 +1577,8 @@ def main():
             raise WeightEditInputError("finalist rescore requires a digest-bound screen report")
         candidate_grid = tuple((layer, strength) for layer in (10, 9) for strength in (0.1, 0.5, 1.0))
         report = run_finalist_rescore(args.state_dir, args.request, args.screen_report, args.output,
-            device=args.device, single_layer_candidates=candidate_grid if args.single_layer_stop_gate else None)
+            device=args.device, single_layer_candidates=candidate_grid if args.single_layer_stop_gate else None,
+            expected_baseline_counts=(165, 45) if args.single_layer_stop_gate else None)
         print(json.dumps({"compositions": [row["composition_size"] for row in report["candidates"]],
                           "generation_max_new_tokens": report["generation_max_new_tokens"],
                           "zero_truncated_answers": report["generation_truncation"]["zero_truncated_answers"],

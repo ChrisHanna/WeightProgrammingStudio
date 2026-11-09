@@ -405,7 +405,8 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     scoring_batch_sizes.clear()
     grid = tuple((layer, strength) for layer in (1, 0) for strength in (0.1, 0.5, 1.0))
     single_report = diagnostic.run_finalist_rescore(state_dir, request_path, checkpoint_path,
-        tmp_path / "single-layer" / "report.json", device="cpu", single_layer_candidates=grid)
+        tmp_path / "single-layer" / "report.json", device="cpu", single_layer_candidates=grid,
+        expected_baseline_counts=(10, 2))
     assert single_report["kind"] == "nf_weight_edit_single_layer_stop_gate_v1"
     assert len(single_report["candidates"]) == 6
     assert [(row["layer"], row["target_step"]) for row in single_report["candidates"]] == list(grid)
@@ -429,6 +430,7 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
         assert checks["float32_max_drift"]["threshold"] == 0.25
         assert checks["bf16_top5"]["threshold"] == 0.95
     assert single_report["strength_1_stop_gate"]["automatic_followup_authorized"] is False
+    assert single_report["baseline_preflight"]["passed"] is True
     assert single_report["base_restored"] and model_state_digest(loaded.model) == loaded.base_digest
     from neural_foundry.backends.weight_edit.methods import LegacyKeyValueEdit
 
@@ -444,6 +446,15 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     for observations in audit["per_layer"].values():
         assert observations["retention_key_count"] == audit["retention_interactions"]
         assert sum(group["key_count"] for group in observations["answer_token_groups"].values()) == observations["key_count"]
+    with monkeypatch.context() as baseline_patch:
+        baseline_patch.setattr(diagnostic, "calculate_edits_for_sites", forbid_solver)
+        baseline_path = tmp_path / "mismatched-baseline" / "report.json"
+        with pytest.raises(WeightEditInputError, match="baseline counts differ"):
+            diagnostic.run_finalist_rescore(state_dir, request_path, checkpoint_path, baseline_path,
+                device="cpu", single_layer_candidates=grid, expected_baseline_counts=(0, 0))
+        preflight = json.loads(baseline_path.with_suffix(".baseline.json").read_bytes())
+        assert preflight["passed"] is False and preflight["measured_correct"] == {"train": 10.0, "validation": 2.0}
+        assert not baseline_path.exists()
 
 
 def test_fixed_cases_separate_format_repairs_from_value_corrections():

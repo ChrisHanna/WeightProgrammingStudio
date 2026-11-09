@@ -203,6 +203,45 @@ def test_key_scale_diagnostics_match_gram_and_norms():
     assert measured["gradient_norm_distribution"]["zero_count"] == 1
 
 
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_logged_gpu_runner_retains_full_streams_and_exit_receipt(tmp_path, exit_code):
+    import hashlib
+    import json
+    import sys
+    from neural_foundry.execution_runner import run_logged_worker
+
+    error_output = "diagnostic error\n" + "detail " * 10000
+    code = f"import sys; print('started', flush=True); sys.stderr.write({error_output!r}); sys.exit({exit_code})"
+    logs = tmp_path / "execution"
+    result = run_logged_worker([sys.executable, "-c", code], cwd=tmp_path, log_dir=logs, timeout_seconds=10)
+    receipt = json.loads((logs / "receipt.json").read_bytes())
+    assert receipt["returncode"] == result.returncode == exit_code
+    assert result.stderr == (logs / "stderr.log").read_bytes() == error_output.encode()
+    assert result.stdout == (logs / "stdout.log").read_bytes() == b"started\n"
+    assert receipt["stderr_digest"] == "sha256:" + hashlib.sha256(result.stderr).hexdigest()
+    assert receipt["status"] == ("completed" if exit_code == 0 else "failed")
+    assert json.loads((logs / "started.json").read_bytes())["returncode"] is None
+    with pytest.raises(FileExistsError):
+        run_logged_worker([sys.executable, "-c", "pass"], cwd=tmp_path, log_dir=logs, timeout_seconds=10)
+
+
+def test_logged_gpu_runner_records_timeout_and_launch_error(tmp_path):
+    import json
+    import sys
+    from neural_foundry.execution_runner import run_logged_worker
+
+    timed = run_logged_worker([sys.executable, "-c", "while True: pass"], cwd=tmp_path,
+                               log_dir=tmp_path / "timeout", timeout_seconds=0.2)
+    assert timed.timed_out and timed.receipt["status"] == "timed_out"
+    assert timed.returncode != 0
+    with pytest.raises(OSError):
+        run_logged_worker([str(tmp_path / "missing-executable")], cwd=tmp_path,
+                           log_dir=tmp_path / "launch", timeout_seconds=10)
+    receipt = json.loads((tmp_path / "launch" / "receipt.json").read_bytes())
+    assert receipt["status"] == "launch_failed" and receipt["returncode"] is None
+    assert b"FileNotFoundError" in (tmp_path / "launch" / "stderr.log").read_bytes()
+
+
 def test_token_diagnostic_observer_does_not_change_capture(numerical_fixture):
     from neural_foundry.backends.weight_edit.capture import capture
     from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration

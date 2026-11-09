@@ -6,6 +6,24 @@
 
 **Estimate: about four weeks.** Public validation is the selection split; compare against the unchanged base, never holdout. The final user-facing report has one results table, with task gain and preservation evidence in every candidate row.
 
+### Immediate Execution Safeguards
+
+- Before another GPU launch, use the durable execution wrapper `python -m neural_foundry.execution_runner --log-dir <fresh-directory> --timeout-seconds 7200 -- <command>`. It writes full stdout/stderr directly to files, an initial `started.json`, and a final `receipt.json` with exit code, timeout/exception status and stream digests. A started receipt without a final receipt means incomplete/unknown termination, not an invented crash reason. Existing active jobs are not retroactively wrapped or duplicated.
+- The single-layer CLI now remeasures the unchanged base at the same 128-token cap and batch size 1 before calculating candidates. It persists `report.baseline.json` and refuses candidate computation unless train and validation reproduce 165/320 and 45/64. This is a baseline identity/preflight requirement, not a relaxed gate threshold.
+- Finish the read-only format/value audit, combine it with the six requested single-layer rows, report the findings and stop. If the existing six-candidate job completes with valid evidence, use it rather than rerunning it. No multilayer or method experimentation follows automatically.
+
+### Deferred Method Decisions
+
+Each item below requires explicit user approval and a new recipe version before implementation. None is approved by diagnostic instrumentation:
+
+1. Restrict loss to value tokens, or render demonstrations in the model's native answer style.
+2. Remove per-key unit-gradient normalization, or restrict edit keys to incorrect next-token predictions.
+3. Scale the ridge to the observed key Gram matrix rather than using an absolute `1e-3`.
+4. Build retention covariance over all prompt tokens using the existing `CovarianceStatistics`, instead of one last-token key per prompt.
+5. Scale target displacement to the layer's activation size rather than absolute write-output units.
+
+These decisions are tracked separately from GymEdit's KL-bounded target optimization, core solve and proper multilayer residual splitting. Nonzero specialist retention separately requires an explicitly approved policy version; specialist v2 remains frozen at zero.
+
 1. Approved specialist gate v2 is wired into the public comparison: paired public-validation task improvement of at least four net cases, paired-bootstrap 95% mean-gain interval lower bound strictly above zero, and 100% format validity plus 100% task-scoped required-set success. Because validation selects candidates, intervals are exploratory and are not independent confirmation. The policy is frozen in `protocols/specialist-retention-v2.json`.
 2. Specialist recipes now use retention weight zero; the current proof worker still edits one layer. Multi-layer specialist application and stronger finalist selection remain to be implemented. Generalist retains the frozen preservation-v2 gates.
 3. The public training generator has ten train-only templates, with family and rendered-text disjointness tests. The unchanged base has 155 failures on 320 train cases and 18 failures on the unchanged 64-case validation set. Before SFT/edit dispatch, the worker verifies the baseline report against the loaded model/job/seed, requires at least ten failures, builds target keys only from those failures, and passes train-passing examples as protected inputs. Refusal below the minimum is covered by tests. Raw corrected baseline records are in `docs/evidence/weight-edit-expanded-baseline-qwen3-train-validation-v1.json`; the parser-invalidated predecessor is retained separately.
@@ -76,6 +94,8 @@ The frontier provider is not selected. No credential or live frontier call is as
 1. Resolve the existing backlog and review findings; obtain green Python and Cargo acceptance runs.
 2. Add contract tests and CI GPU smoke tests with explicit skip/failure semantics.
 3. Consolidate common validation and evidence checks in a shared module without loosening any gate.
+
+Housekeeping execution plan: inventory the approximately 50 tracked dirty files and untracked backlog without reverting or staging unrelated user work; classify by ownership and behavior; reproduce the 13 earlier review findings in a checklist linked to their original evidence; then address approved groups in independent tested commits. Run the required full Python suite in the documented CPU/native environment and Cargo workspace acceptance with `--locked`, retain all failures and environment/skip details, and rerun after local fixes. No green full-suite result or resolution of the 13 findings is currently claimed. This work remains separate from the bounded diagnostic audit and six-candidate report.
 
 ## Phase 5: GRPO
 
