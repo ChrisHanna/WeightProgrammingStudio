@@ -21,6 +21,7 @@ from ...model_digest import model_state_digest
 from ...provenance import parse_strict_json
 from ...reference_json_extraction import TEMPLATES, generate_scenarios, reference_task
 from ...json_proof_loop import SPECIALIST_POLICY, public_required_rows, score_public_rows, specialist_acceptance
+from ...specialist_policy import assess_specialist_v2
 from ...prompt_rendering import PromptRenderer
 from .apply import apply, save, tensor_digests
 from .loader import WeightEditInputError, load_model
@@ -979,6 +980,229 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     return report
 
 
+def load_sweep_likelihood_selection(source_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+    raw = source_path.read_bytes()
+    if source_path.suffix == ".jsonl":
+        lines = [line for line in raw.splitlines() if line]
+        if not lines:
+            raise WeightEditInputError("sweep checkpoint is empty")
+        binding = parse_strict_json(lines[0])
+        records = [parse_strict_json(line) for line in lines[1:]]
+        if (binding.get("kind") != "nf_layer_sweep_binding_v2"
+            or binding.get("request_digest") != request.get("training_request_digest")
+            or binding.get("dataset_digest") != request.get("dataset_digest")
+            or any(row.get("run_digest") != binding.get("run_digest") for row in records)):
+            raise WeightEditInputError("sweep checkpoint binding differs from the finalist request")
+        by_key = {row.get("checkpoint_key"): row for row in records if row.get("checkpoint_key")}
+        baseline, selection = by_key.get("baseline"), by_key.get("selection")
+        expected_screen = {f"screen:{layer}:{strength:.8g}" for layer in binding["layers"]
+                           for strength in binding["strengths"]}
+        if (baseline is None or baseline.get("kind") != "nf_layer_sweep_baseline_v2"
+            or selection is None or selection.get("kind") != "nf_layer_sweep_selection_v2"
+            or not selection.get("selected_layers")
+            or not expected_screen <= set(by_key)):
+            raise WeightEditInputError("sweep checkpoint lacks a complete likelihood screen and selection")
+        source = {"kind": "nf_layer_strength_screen_selection_v1",
+            "training_request_digest": binding["request_digest"], "job_digest": request["job_digest"],
+            "dataset_digest": binding["dataset_digest"], "base_model_digest": binding["base_digest"],
+            "run_digest": binding["run_digest"], "layer_ranking_by_validation_logprob": selection["layer_ranking"],
+            "exact_scored_layer_indices": selection["selected_layers"], "strengths": binding["strengths"],
+            "holdout_accessed": False,
+            "source_checkpoint_digest": _document_digest({"binding": binding, "records": records})}
+        source["evidence_digest"] = _document_digest(source)
+        return source
+    source = parse_strict_json(raw)
+    if (source.get("kind") != "nf_weight_edit_layer_strength_diagnostic_v2"
+        or source.get("evidence_digest") != _document_digest({key: value for key, value in source.items()
+                                                              if key != "evidence_digest"})):
+        raise WeightEditInputError("finalist source sweep report digest is invalid")
+    return source
+
+
+def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path: Path, output_path: Path,
+                         *, device="cuda:0", composition_sizes=(2, 3)):
+    request = parse_strict_json(request_path.read_bytes())
+    if request.get("training_request_digest") != _document_digest(
+        {key: value for key, value in request.items() if key != "training_request_digest"}):
+        raise WeightEditInputError("finalist request digest is invalid")
+    source = load_sweep_likelihood_selection(screen_report_path, request)
+    if (source.get("training_request_digest") != request["training_request_digest"]
+        or source.get("dataset_digest") != request["dataset_digest"]
+        or source.get("holdout_accessed") is not False):
+        raise WeightEditInputError("finalist source sweep is invalid or bound to another request")
+    if (not isinstance(composition_sizes, (list, tuple)) or not composition_sizes
+        or any(type(size) is not int or size < 2 for size in composition_sizes)):
+        raise WeightEditInputError("finalist compositions require bounded layer counts of at least two")
+    job = gym_job_from_document(parse_strict_json(
+        (state_dir / "jobs" / (request["job_digest"][7:] + ".json")).read_bytes()))
+    task = reference_task(rows_per_template=job.scenario_sources[0].parameters["rows_per_template"])
+    if job.digest != task.job.digest:
+        raise WeightEditInputError("finalist rescore differs from frozen task")
+    service = GymStudioService(state_dir=state_dir)
+    approved, train_examples = _load_training_rosters(service, request)
+    examples = [{"example_digest": _document_digest(row),
+                 "interaction": task.project(row["input"], row["response"])} for row in approved]
+    if _document_digest({"examples": examples}) != request["projected_examples_digest"]:
+        raise WeightEditInputError("finalist edit examples differ from frozen selected dataset")
+    train_rows = [{"scenario_id": row["scenario_id"], "input": row["input"], "reference": row["response"]}
+                  for row in train_examples]
+    train_interactions = [task.project(row["input"], row["response"]) for row in train_examples]
+    validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
+        parameters=task.job.scenario_sources[0].parameters)
+    validation_by_template = _interactions_by_template(task, validation_rows)
+    validation_interactions = [interaction for rows in validation_by_template.values() for interaction in rows]
+    required_rows = public_required_rows(seed=request["recipe"]["seed"])
+    if output_path.exists():
+        raise WeightEditInputError("finalist report already exists; choose a fresh path")
+    loaded = load_model(request["base_reference"]["artifact_path"], dtype=torch.bfloat16, device=device)
+    if loaded.base_digest != request["loaded_base"]["state_digest"] or source.get("base_model_digest") != loaded.base_digest:
+        raise WeightEditInputError("finalist sweep and request identify different base states")
+    all_sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                           checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    writers = _mlp_writer_site_map(all_sites)
+    site_by_layer = {site.layer: site for site in writers.sites}
+    ranking = source.get("layer_ranking_by_validation_logprob")
+    selected_layers = source.get("exact_scored_layer_indices")
+    if not isinstance(ranking, list) or not isinstance(selected_layers, list) or not selected_layers:
+        raise WeightEditInputError("source sweep has no likelihood-selected layer ranking")
+    selected_set = set(selected_layers)
+    finalists = [row for row in ranking if row.get("layer") in selected_set]
+    finalists.sort(key=lambda row: ranking.index(row))
+    if (len(finalists) != len(selected_set) or any(row["layer"] not in site_by_layer for row in finalists)
+        or any(row.get("best_strength") not in source.get("strengths", ()) for row in finalists)):
+        raise WeightEditInputError("source sweep finalists lack verified layers or measured strengths")
+    finalist_sites = tuple(site_by_layer[row["layer"]] for row in finalists)
+    finalist_site_map = SiteMap(finalist_sites, checkpoint_names_verified=True)
+    protected = [*request["recipe"]["preservation_interactions"],
+                 *request["recipe"].get("protected_training_interactions", ())]
+    calculated = calculate_edits_for_sites(loaded, job, examples, request["recipe"], sites=finalist_site_map,
+                                           retention_interactions=protected)
+    selected_config = [{"layer": row["layer"], "tensor_name": row["tensor_name"],
+                        "target_step": row["best_strength"],
+                        "validation_logprob_gain": row["best_validation_logprob_gain"]} for row in finalists]
+    base_digest = model_state_digest(loaded.model)
+    base_train = score_public_rows(task, validation_model(loaded, batch_size=16,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
+    baseline_validation_batch = score_public_rows(task, validation_model(loaded, batch_size=16,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
+    serial_validation = score_public_rows(task, validation_model(loaded, batch_size=1,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
+    batch_equivalent = all(left["response"] == right["response"]
+        and left.get("execution_evidence", {}).get("generated_token_ids") == right.get("execution_evidence", {}).get("generated_token_ids")
+        for left, right in zip(baseline_validation_batch["responses"], serial_validation["responses"], strict=True))
+    exact_batch_size = 16 if batch_equivalent else 1
+    base_validation = baseline_validation_batch if batch_equivalent else serial_validation
+    base_required = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), required_rows)
+    base_train_logprob = expected_answer_logprob(loaded, train_interactions, batch_size=16)
+    base_validation_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
+                                   for family, interactions in validation_by_template.items()}
+    base_validation_logprob = _aggregate_logprobs(base_validation_by_template)
+    preservation_panel = protected
+    preservation_before = preservation_logits(loaded, preservation_panel)
+    float32_before = float32_logits_of_exact_weights(loaded, preservation_panel)
+    calibrations = {row["layer"]: calibrate_one_ulp(loaded, site_by_layer[row["layer"]], preservation_panel)
+                    for row in finalists}
+    candidates = []
+    for composition_size in composition_sizes:
+        if composition_size > len(finalists):
+            continue
+        composition = finalists[:composition_size]
+        sites = tuple(site_by_layer[row["layer"]] for row in composition)
+        deltas = {}
+        for row in composition:
+            site = site_by_layer[row["layer"]]
+            delta, evidence = calculated[site.tensor_name]
+            scale = row["best_strength"] / request["recipe"]["target_step"]
+            deltas[site.tensor_name] = Delta("low_rank", U=delta.U * scale, V=delta.V)
+        originals = {site.tensor_name: loaded.model.get_parameter(site.tensor_name).detach().clone()
+                     for site in sites}
+        try:
+            edited = apply(loaded, deltas, sites=SiteMap(sites, checkpoint_names_verified=True),
+                method="multi_layer_finalist_rescore", settings={
+                    "layers": [row["layer"] for row in composition],
+                    "target_steps": {str(row["layer"]): row["best_strength"] for row in composition},
+                    "retention_mode": "specialist", "diagnostic_only": True})
+            train_score = score_public_rows(task, validation_model(loaded, batch_size=16,
+                max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
+            validation_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
+                max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
+            required_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
+                max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), required_rows)
+            train_logprob = expected_answer_logprob(loaded, train_interactions, batch_size=16)
+            validation_logprob_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
+                for family, interactions in validation_by_template.items()}
+            validation_logprob = _aggregate_logprobs(validation_logprob_by_template)
+            preservation_after = preservation_logits(loaded, preservation_panel)
+            float32_after = float32_logits_of_exact_weights(loaded, preservation_panel)
+            preservation_reports = {str(row["layer"]): verify_v2(
+                metrics(float32_before, float32_after), metrics(preservation_before, preservation_after),
+                calibrations[row["layer"]]) for row in composition}
+            preservation_passed = all(row["passed"] for row in preservation_reports.values())
+            required_gate = {**required_score,
+                "format_valid": min(required_score["format_valid"], validation_score["format_valid"])}
+            specialist_gate = assess_specialist_v2({"split": "validation",
+                "base_case_outcomes": [row["exact_match"] for row in base_validation["responses"]],
+                "candidate_case_outcomes": [row["exact_match"] for row in validation_score["responses"]]},
+                required_gate)
+            candidate = {"kind": "nf_multilayer_finalist_v1", "composition_size": composition_size,
+                "layers": [row["layer"] for row in composition],
+                "target_steps": {str(row["layer"]): row["best_strength"] for row in composition},
+                "training": _compact_score(train_score), "validation": _compact_score(validation_score),
+                "validation_by_template": _validation_template_scores(validation_rows, validation_score),
+                "required_set": _compact_score(required_score),
+                "training_exact_match_gain": train_score["exact_match"] - base_train["exact_match"],
+                "validation_exact_match_gain": validation_score["exact_match"] - base_validation["exact_match"],
+                "training_logprob_gain": train_logprob["mean_token_logprob"] - base_train_logprob["mean_token_logprob"],
+                "validation_logprob_gain": validation_logprob["mean_token_logprob"] - base_validation_logprob["mean_token_logprob"],
+                "validation_logprob_by_template": {family: {
+                    "cases": value["cases"],
+                    "baseline_mean_token_logprob": base_validation_by_template[family]["mean_token_logprob"],
+                    "mean_token_logprob": value["mean_token_logprob"],
+                    "mean_token_logprob_gain": value["mean_token_logprob"]
+                        - base_validation_by_template[family]["mean_token_logprob"]}
+                    for family, value in validation_logprob_by_template.items()},
+                "preservation_v2_report_only": {"passed": preservation_passed, "per_site": preservation_reports},
+                "specialist_v2_gate": specialist_gate,
+                "effective_change_norms": edited.receipt["change_norms"],
+                "candidate_model_digest": model_state_digest(loaded.model),
+                "candidate_published": False}
+            candidates.append(candidate)
+        finally:
+            with torch.no_grad():
+                for name, original in originals.items():
+                    loaded.model.get_parameter(name).copy_(original)
+            if model_state_digest(loaded.model) != base_digest:
+                raise WeightEditInputError("multi-layer finalist rescore failed exact base restoration")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {"kind": "nf_weight_edit_multilayer_finalist_rescore_v1", "evidence_status": "measured",
+        "source_sweep_report_digest": source["evidence_digest"], "source_sweep_run_digest": source["run_digest"],
+        "training_request_digest": request["training_request_digest"], "job_digest": job.digest,
+        "dataset_digest": request["dataset_digest"], "base_model_digest": base_digest,
+        "selection_source": "teacher_forced public-validation likelihood only; prior exact-match results excluded",
+        "selected_layer_strengths": selected_config, "generation_max_new_tokens": LAYER_SWEEP_MAX_NEW_TOKENS,
+        "batch_generation_equivalent_to_serial": batch_equivalent, "exact_batch_size": exact_batch_size,
+        "base_train": _compact_score(base_train), "base_validation": _compact_score(base_validation),
+        "base_required_set": _compact_score(base_required), "base_validation_logprob": base_validation_logprob,
+        "candidates": candidates, "base_restored": model_state_digest(loaded.model) == base_digest,
+        "holdout_accessed": False, "candidate_published": False, "release_authorized": False}
+    answer_counts = [report["base_train"], report["base_validation"], report["base_required_set"]]
+    for candidate in candidates:
+        answer_counts.extend((candidate["training"], candidate["validation"], candidate["required_set"]))
+    report["generation_truncation"] = {
+        "generation_cap_failures": sum(row["generation_cap_failure_count"] for row in answer_counts),
+        "truncated_answers": sum(row["truncated_answer_count"] for row in answer_counts),
+        "zero_truncated_answers": all(row["truncated_answer_count"] == 0 for row in answer_counts),
+        "cap_hits_are_failures": True}
+    report["evidence_digest"] = _document_digest(report)
+    with output_path.open("xb") as stream:
+        stream.write(_wire_document(report))
+    if device.startswith("cuda"):
+        loaded.model.to("cpu")
+        torch.cuda.empty_cache()
+    return report
+
+
 def audit_generation_truncation(report_path: Path, output_path: Path, *, max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS):
     report = parse_strict_json(report_path.read_bytes())
     if (report.get("kind") != "nf_weight_edit_layer_strength_diagnostic_v2"
@@ -1141,6 +1365,8 @@ def main():
     parser.add_argument("request", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cuda:0")
+    parser.add_argument("--screen-report", type=Path)
+    parser.add_argument("--truncation-budget", type=int, default=LAYER_SWEEP_MAX_NEW_TOKENS)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--task-validation", action="store_true")
     mode.add_argument("--training-fit", action="store_true")
@@ -1148,6 +1374,7 @@ def main():
     mode.add_argument("--profile-one", action="store_true")
     mode.add_argument("--public-split-baseline", action="store_true")
     mode.add_argument("--audit-truncation", action="store_true")
+    mode.add_argument("--rescore-finalists", action="store_true")
     args = parser.parse_args()
     if args.profile_one:
         report = run_single_candidate_profile(args.state_dir, args.request, args.output)
@@ -1155,11 +1382,22 @@ def main():
                           "strength": report["strength"], "validation_exact_match": report["validation_exact_match"]}))
         return
     if args.audit_truncation:
-        report = audit_generation_truncation(args.request, args.output)
+        report = audit_generation_truncation(args.request, args.output, max_new_tokens=args.truncation_budget)
         print(json.dumps({"max_new_tokens": report["max_new_tokens"],
                           "total_scored_answers": report["total_scored_answers"],
                           "total_truncated_answers": report["total_truncated_answers"],
+                          "generation_cap_failures": report["generation_cap_failures"],
                           "zero_truncated_answers": report["zero_truncated_answers"]}))
+        return
+    if args.rescore_finalists:
+        if args.screen_report is None:
+            raise WeightEditInputError("finalist rescore requires a digest-bound screen report")
+        report = run_finalist_rescore(args.state_dir, args.request, args.screen_report, args.output,
+                                      device=args.device)
+        print(json.dumps({"compositions": [row["composition_size"] for row in report["candidates"]],
+                          "generation_max_new_tokens": report["generation_max_new_tokens"],
+                          "zero_truncated_answers": report["generation_truncation"]["zero_truncated_answers"],
+                          "holdout_accessed": report["holdout_accessed"]}))
         return
     if args.public_split_baseline:
         report = run_public_split_baseline(args.state_dir, args.request, args.output)

@@ -9,8 +9,8 @@ from pathlib import Path
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
     _aggregate_logprobs, _load_training_rosters, _validation_template_scores, expected_answer_logprob,
     _StopAfterJsonRoot, _completion_was_truncated, _interactions_by_template, _mlp_writer_site_map,
-    audit_generation_truncation, measure_mode, open_sweep_checkpoint, select_top_third,
-    select_validation_screen, strength_one_stop_gate)
+    audit_generation_truncation, load_sweep_likelihood_selection, measure_mode, open_sweep_checkpoint,
+    select_top_third, select_validation_screen, strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -190,6 +190,36 @@ def test_truncation_audit_reports_count_and_binds_source_digest(tmp_path):
     assert json.loads(audit_path.read_bytes()) == audit
 
 
+def test_finalist_rescore_loads_only_complete_digest_bound_screen_checkpoint(tmp_path):
+    from neural_foundry.gym_service import _wire_document
+
+    request = {"training_request_digest": "sha256:" + "a" * 64,
+               "dataset_digest": "sha256:" + "b" * 64, "job_digest": "sha256:" + "c" * 64}
+    binding = {"kind": "nf_layer_sweep_binding_v2", "run_digest": "sha256:" + "d" * 64,
+        "request_digest": request["training_request_digest"], "dataset_digest": request["dataset_digest"],
+        "base_digest": "sha256:" + "e" * 64, "layers": [8, 9, 10], "strengths": [0.01, 0.1, 0.5, 1.0]}
+    records = [{"kind": "nf_layer_sweep_baseline_v2", "checkpoint_key": "baseline",
+                "run_digest": binding["run_digest"]}]
+    records.extend({"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": f"screen:{layer}:{strength:.8g}",
+                    "run_digest": binding["run_digest"], "status": "measured"}
+                   for layer in binding["layers"] for strength in binding["strengths"])
+    ranking = [{"layer": 10, "tensor_name": "mlp10", "best_strength": 1.0,
+                "best_validation_logprob_gain": 0.5},
+               {"layer": 9, "tensor_name": "mlp9", "best_strength": 0.5,
+                "best_validation_logprob_gain": 0.4},
+               {"layer": 8, "tensor_name": "mlp8", "best_strength": 0.1,
+                "best_validation_logprob_gain": 0.3}]
+    records.append({"kind": "nf_layer_sweep_selection_v2", "checkpoint_key": "selection",
+        "run_digest": binding["run_digest"], "selected_layers": [10, 9, 8], "layer_ranking": ranking})
+    checkpoint = tmp_path / "sweep.checkpoint.jsonl"
+    checkpoint.write_bytes(b"\n".join(_wire_document(row) for row in [binding, *records]) + b"\n")
+    selected = load_sweep_likelihood_selection(checkpoint, request)
+    assert selected["exact_scored_layer_indices"] == [10, 9, 8]
+    assert [row["best_strength"] for row in selected["layer_ranking_by_validation_logprob"]] == [1.0, 0.5, 0.1]
+    assert selected["holdout_accessed"] is False
+    assert selected["source_checkpoint_digest"] == _document_digest({"binding": binding, "records": records})
+
+
 def test_validation_interactions_are_grouped_for_each_template():
     from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
 
@@ -333,6 +363,36 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     assert report["holdout_accessed"] is False
     cli_summary = json.loads(capsys.readouterr().out)
     assert cli_summary["layers"] == 2 and cli_summary["strengths"] == [0.5, 1.0]
+
+    report["exact_scored_layer_indices"] = [0, 1]
+    report["layer_ranking_by_validation_logprob"] = [
+        {"layer": 1, "tensor_name": "model.layers.1.mlp.down_proj.weight", "best_strength": 1.0,
+         "best_validation_logprob_gain": 0.2},
+        {"layer": 0, "tensor_name": "model.layers.0.mlp.down_proj.weight", "best_strength": 0.5,
+         "best_validation_logprob_gain": 0.1},
+    ]
+    report["evidence_digest"] = _document_digest({key: value for key, value in report.items()
+                                                    if key != "evidence_digest"})
+    output_path.write_bytes(_wire_document(report))
+    finalist_path = tmp_path / "finalists" / "report.json"
+    finalist_report = diagnostic.run_finalist_rescore(state_dir, request_path, output_path, finalist_path,
+                                                       device="cpu", composition_sizes=(2,))
+    assert finalist_report["generation_max_new_tokens"] == 128
+    assert finalist_report["selected_layer_strengths"] == [
+        {"layer": 1, "tensor_name": "model.layers.1.mlp.down_proj.weight", "target_step": 1.0,
+         "validation_logprob_gain": 0.2},
+        {"layer": 0, "tensor_name": "model.layers.0.mlp.down_proj.weight", "target_step": 0.5,
+         "validation_logprob_gain": 0.1},
+    ]
+    assert len(finalist_report["candidates"]) == 1
+    candidate = finalist_report["candidates"][0]
+    assert candidate["composition_size"] == 2 and candidate["layers"] == [1, 0]
+    assert candidate["validation"]["cases"] == 4 and candidate["required_set"]["cases"] > 0
+    assert candidate["specialist_v2_gate"]["policy_version"] == 2
+    assert candidate["preservation_v2_report_only"]["passed"] is True
+    assert finalist_report["generation_truncation"]["zero_truncated_answers"] is True
+    assert finalist_report["base_restored"] and model_state_digest(loaded.model) == loaded.base_digest
+    assert finalist_report["holdout_accessed"] is False and finalist_report["candidate_published"] is False
 
 
 def test_validation_results_and_logprobs_are_reported_by_template():
