@@ -193,7 +193,9 @@ class GymLifecycle:
                 raise GymJobError(f"selected {role} adapter differs from the frozen job backend")
         if task.interaction_format not in model.interaction_formats:
             raise GymJobError("model adapter does not support the task interaction format")
-        if train and (trainer is None or task.interaction_format not in trainer.interaction_formats or model.family not in trainer.model_families or request.get("recipe", {}).get("method") not in trainer.methods):
+        if train and (trainer is None or task.interaction_format not in trainer.interaction_formats
+                  or (model.family not in trainer.model_families and "*" not in trainer.model_families)
+                  or request.get("recipe", {}).get("method") not in trainer.methods):
             raise GymJobError("unsupported task/model/trainer combination rejected before dispatch")
         artifact_kind = None
         if train:

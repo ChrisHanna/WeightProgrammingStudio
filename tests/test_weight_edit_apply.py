@@ -31,6 +31,17 @@ def loaded(tmp_path, request):
 
 
 def test_apply_exports_only_listed_tensors_and_reloads(loaded, tmp_path) -> None:
+    from neural_foundry.gym_adapters import _model_adapter
+    from neural_foundry.gym_service import CandidateIdentity, _document_digest
+
+    revision = "a" * 40
+    file_digest = _document_digest({"model_id": "test/model", "revision": revision, "files": loaded.file_digests})
+    checkpoint = SimpleNamespace(model_id="test/model", revision=revision, path=loaded.checkpoint_path,
+                                 file_digests=loaded.file_digests)
+    identity = CandidateIdentity("base", "unchanged_base", file_digest, file_digest, file_digest)
+    base_adapter = _model_adapter(loaded.model, loaded.tokenizer, checkpoint, identity,
+                                  {"device": "cpu", "precision": "float32", "context_tokens": 64,
+                                   "max_new_tokens": 8, "seed": 17})
     loaded.config.dtype = torch.bfloat16
     sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
                        checkpoint_tensor_names=loaded.checkpoint_tensor_names)
@@ -40,7 +51,14 @@ def test_apply_exports_only_listed_tensors_and_reloads(loaded, tmp_path) -> None
                   V=torch.ones((1, site.input_size), dtype=torch.float64))
     edited = apply(loaded, {site.tensor_name: delta}, sites=sites, method="test_low_rank", settings={})
     assert {name for name in before if before[name] != edited.after_tensors[name]} == {site.tensor_name}
-    reference = save(edited, tmp_path / "export", model_id="test/model", request_digest="sha256:" + "a" * 64)
+    from dataclasses import replace
+    from neural_foundry.backends.weight_edit.loader import UnsupportedModel
+    with pytest.raises(UnsupportedModel, match="checkpoint identity"):
+        save(edited, tmp_path / "bad-export", model_id="test/model", request_digest="sha256:" + "a" * 64,
+             base_reference=replace(base_adapter.reference, artifact_digest="sha256:" + "b" * 64), base_revision=revision)
+    assert not (tmp_path / "bad-export").exists()
+    reference = save(edited, tmp_path / "export", model_id="test/model", request_digest="sha256:" + "a" * 64,
+                     base_reference=base_adapter.reference, base_revision=revision)
     assert reference.kind == "weight_edit"
     reloaded = load_model(reference.artifact_path, dtype=torch.float32, device="cpu")
     assert model_state_digest(reloaded.model) == reference.model_digest
@@ -49,9 +67,13 @@ def test_apply_exports_only_listed_tensors_and_reloads(loaded, tmp_path) -> None
     plain = AutoModelForCausalLM.from_pretrained(reference.artifact_path, local_files_only=True, trust_remote_code=False,
                                                dtype=torch.float32).eval()
     assert model_state_digest(plain) == reference.model_digest
+    lifecycle_loaded = base_adapter.load_candidate(reference)
+    assert lifecycle_loaded.reference == reference and lifecycle_loaded.artifact_kind == "weight_edit"
+    assert lifecycle_loaded.loaded_identity()["state_digest"] == reference.model_digest
     receipt = json.loads((tmp_path / "export" / "training_receipt.json").read_bytes())
     assert receipt["fresh_reload_verified"] is True and receipt["edited_tensors"] == [site.tensor_name]
     assert receipt["explicit_dtype_metadata"] == {"dtype": {"source": "bfloat16", "export": "float32"}}
+    assert receipt["base_digest"] == file_digest and receipt["base_tensor_digest"] == edited.receipt["base_digest"]
 
 
 def test_zero_edit_is_exact_and_invalid_delta_never_mutates(loaded) -> None:

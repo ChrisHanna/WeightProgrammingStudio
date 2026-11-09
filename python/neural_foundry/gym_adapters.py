@@ -137,7 +137,7 @@ def _model_adapter(
         return ExecutionResponse({"calls": evidence["tool_trace"]}, evidence)
 
     formats = ("chat_messages_v1", "json_extraction_v1", "tool_messages_v1") if tool_handlers else ("chat_messages_v1", "json_extraction_v1")
-    kind = candidate.method_id if candidate.method_id in {"lora", "qlora"} else "full"
+    kind = candidate.method_id if candidate.method_id in {"lora", "qlora", "weight_edit"} else "full"
     reference = CandidateRef(checkpoint.model_id, kind, candidate.base_model_digest,
                              candidate.candidate_model_digest, candidate.artifact_digest,
                              str(artifact_path or checkpoint.path), candidate.candidate_id,
@@ -146,7 +146,7 @@ def _model_adapter(
     def load_candidate(ref: CandidateRef) -> ModelAdapter:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        if ref.kind not in {"lora", "qlora", "full"} or ref.model_id != checkpoint.model_id or ref.base_digest != candidate.base_model_digest:
+        if ref.kind not in {"lora", "qlora", "full", "weight_edit"} or ref.model_id != checkpoint.model_id or ref.base_digest != candidate.base_model_digest:
             raise GymJobError("Transformers model cannot load the candidate reference")
         if resolve_checkpoint(checkpoint.path).file_digests != checkpoint.file_digests:
             raise GymJobError("model assets changed before candidate loading")
@@ -161,7 +161,7 @@ def _model_adapter(
             raise GymJobError("candidate files differ from their artifact identity")
         candidate_assets = dict(checkpoint.file_digests)
         model_path = checkpoint.path
-        if ref.kind == "full":
+        if ref.kind in {"full", "weight_edit"}:
             model_path = artifact_directory
             candidate_assets = resolve_checkpoint(model_path).file_digests
         else:
@@ -199,7 +199,7 @@ def _model_adapter(
                               tool_handlers=tool_handlers, artifact_path=ref.artifact_path,
                               loaded_asset_digests=candidate_assets)
 
-    supported_kinds = ("full", "lora")
+    supported_kinds = ("full", "lora", "weight_edit")
     try:
         if metadata.version("bitsandbytes") == "0.49.1" and settings["device"].startswith("cuda"):
             supported_kinds += ("qlora",)

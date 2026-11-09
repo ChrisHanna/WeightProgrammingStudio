@@ -21,6 +21,7 @@ from ...model_digest import model_state_digest
 from ...prompt_rendering import PromptRenderer
 from .discover import SiteMap
 from .loader import LoadedModel, UnsupportedModel, WeightEditInputError, load_model, require_editable, storage_groups
+from ...provenance import resolve_checkpoint
 from .methods.base import Delta
 
 
@@ -120,10 +121,24 @@ def apply(loaded: LoadedModel, deltas: Mapping[str, Delta], *, sites: SiteMap,
 
 
 def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_digest: str,
-         identity_probes: Mapping[str, Any] | None = None) -> CandidateRef:
+         identity_probes: Mapping[str, Any] | None = None, base_reference: CandidateRef | None = None,
+         base_revision: str | None = None) -> CandidateRef:
     output = Path(out_dir).absolute()
     if tensor_digests(edited.loaded.model) != edited.after_tensors:
         raise UnsupportedModel("edited model changed before export")
+    base_digest = edited.receipt["base_digest"]
+    if base_reference is not None:
+        if (not isinstance(base_revision, str) or len(base_revision) != 40
+            or any(char not in "0123456789abcdef" for char in base_revision)
+            or base_reference.model_id != model_id or base_reference.kind != "full"
+            or base_reference.method_id != "unchanged_base"
+            or Path(base_reference.artifact_path).resolve() != edited.loaded.checkpoint_path.resolve()
+            or resolve_checkpoint(base_reference.artifact_path).file_digests != edited.loaded.file_digests):
+            raise UnsupportedModel("weight edit base reference differs from the loaded checkpoint")
+        expected = _document_digest({"model_id": model_id, "revision": base_revision, "files": edited.loaded.file_digests})
+        if any(digest != expected for digest in (base_reference.base_digest, base_reference.model_digest, base_reference.artifact_digest)):
+            raise UnsupportedModel("weight edit base checkpoint identity is not the frozen file lineage")
+        base_digest = expected
     output.mkdir(parents=True, exist_ok=False)
     try:
         config_before = edited.loaded.config.to_dict()
@@ -148,7 +163,8 @@ def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_dig
         if (reloaded.base_digest != edited.receipt["model_digest"] or tensor_digests(reloaded.model) != edited.after_tensors
             or PromptRenderer(reloaded.tokenizer).digest != edited.receipt["renderer_digest"]):
             raise UnsupportedModel("fresh export reload differs in tensor state or prompt rendering")
-        receipt = {**edited.receipt, "training_request_digest": request_digest, "fresh_reload_verified": True,
+        receipt = {**edited.receipt, "base_digest": base_digest, "base_tensor_digest": edited.receipt["base_digest"],
+               "base_revision": base_revision, "training_request_digest": request_digest, "fresh_reload_verified": True,
                "explicit_dtype_metadata": dtype_metadata}
         if identity_probes is not None:
             if (identity_probes.get("model_digest") != receipt["model_digest"]
