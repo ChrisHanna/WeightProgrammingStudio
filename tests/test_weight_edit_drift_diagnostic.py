@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
-    _aggregate_logprobs, _validation_template_scores, expected_answer_logprob, measure_mode, open_sweep_checkpoint,
-    select_top_third, select_validation_screen, strength_one_stop_gate)
+    _aggregate_logprobs, _load_training_rosters, _validation_template_scores, expected_answer_logprob,
+    measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen, strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -163,6 +163,29 @@ def test_strength_one_stop_gate_requires_effective_change_and_task_gain():
     no_change = {**passing, "effective_change_norm": 0.0}
     assert strength_one_stop_gate(14, no_change)["continue_to_multilayer"] is False
     assert strength_one_stop_gate(13, passing)["continue_to_multilayer"] is False
+
+
+def test_training_rosters_keep_full_parent_for_scoring_and_selected_subset_for_edits():
+    parent = [{"scenario_id": f"train:{index}", "input": {"id": index}, "response": {"id": index}}
+              for index in range(4)]
+    selected = [parent[1], parent[3]]
+    filtered_digest, parent_digest = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+
+    class Service:
+        def load_training_examples(self, digest):
+            return {filtered_digest: selected, parent_digest: parent}[digest]
+
+    selection = {"filtered_dataset_digest": filtered_digest, "parent_dataset_digest": parent_digest,
+                 "selected_scenario_ids": [row["scenario_id"] for row in selected],
+                 "selected_example_digests": [_document_digest(row) for row in selected]}
+    request = {"dataset_digest": filtered_digest, "recipe": {"failure_selection": selection}}
+    edit_examples, scoring_examples = _load_training_rosters(Service(), request)
+    assert edit_examples == selected
+    assert scoring_examples == parent
+    bad_request = {**request, "recipe": {"failure_selection": {
+        **selection, "selected_example_digests": ["sha256:" + "c" * 64, selection["selected_example_digests"][1]]}}}
+    with pytest.raises(WeightEditInputError, match="digest-bound parent"):
+        _load_training_rosters(Service(), bad_request)
 
 
 def test_layer_specific_calculation_reuses_verified_site_map(numerical_fixture):

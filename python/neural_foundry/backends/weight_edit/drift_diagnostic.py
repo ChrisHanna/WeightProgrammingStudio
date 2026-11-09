@@ -57,6 +57,27 @@ def select_validation_screen(rows: list[dict[str, Any]], *, per_family: int = 8)
     return [row for family_rows in by_family.values() for row in family_rows[:per_family]]
 
 
+def _load_training_rosters(service: GymStudioService, request: dict[str, Any]):
+    selected = list(service.load_training_examples(request["dataset_digest"]))
+    selection = request["recipe"].get("failure_selection")
+    if selection is None:
+        return selected, selected
+    if selection.get("filtered_dataset_digest") != request["dataset_digest"]:
+        raise WeightEditInputError("filtered training roster differs from failure-selection binding")
+    parent = list(service.load_training_examples(selection["parent_dataset_digest"]))
+    selected_ids = selection["selected_scenario_ids"]
+    parent_ids = [row.get("scenario_id") for row in parent]
+    if len(set(parent_ids)) != len(parent_ids):
+        raise WeightEditInputError("parent training roster contains duplicate scenario IDs")
+    parent_selected = [row for row in parent if row["scenario_id"] in set(selected_ids)]
+    if ([row.get("scenario_id") for row in selected] != selected_ids
+        or [row.get("scenario_id") for row in parent_selected] != selected_ids
+        or [_document_digest(row) for row in selected] != selection["selected_example_digests"]
+        or [_document_digest(row) for row in parent_selected] != selection["selected_example_digests"]):
+        raise WeightEditInputError("filtered examples differ from the digest-bound parent train roster")
+    return selected, parent
+
+
 def open_sweep_checkpoint(path: Path, binding: dict[str, Any]) -> list[dict[str, Any]]:
     if path.exists():
         lines = [line for line in path.read_bytes().splitlines() if line]
@@ -375,13 +396,14 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
     if job.digest != task.job.digest:
         raise WeightEditInputError("profile differs from frozen task")
     service = GymStudioService(state_dir=state_dir)
-    approved = service.load_training_examples(request["dataset_digest"])
+    approved, train_examples = _load_training_rosters(service, request)
     examples = [{"example_digest": _document_digest(row), "interaction": task.project(row["input"], row["response"])}
                 for row in approved]
     if _document_digest({"examples": examples}) != request["projected_examples_digest"]:
         raise WeightEditInputError("profile examples differ from frozen training dataset")
-    train_rows = [{"scenario_id": f"train:frozen-dataset:{index}", "input": row["input"], "reference": row["response"]}
-                  for index, row in enumerate(approved)]
+    train_rows = [{"scenario_id": row["scenario_id"], "input": row["input"], "reference": row["response"]}
+                  for row in train_examples]
+    train_interactions = [task.project(row["input"], row["response"]) for row in train_examples]
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
@@ -401,7 +423,7 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
     if loaded.base_digest != request["loaded_base"]["state_digest"]:
         raise WeightEditInputError("profile base differs from frozen request")
     baseline_likelihood_start = time.perf_counter()
-    baseline_train_logprob = expected_answer_logprob(loaded, [example["interaction"] for example in examples], batch_size=16)
+    baseline_train_logprob = expected_answer_logprob(loaded, train_interactions, batch_size=16)
     baseline_validation_logprob = expected_answer_logprob(loaded, validation_interactions, batch_size=16)
     _sync_if_cuda(loaded.model)
     timings["baseline_batched_likelihood_seconds"] = time.perf_counter() - baseline_likelihood_start
@@ -442,7 +464,7 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
         timings["in_memory_apply_seconds"] = time.perf_counter() - apply_start
 
         likelihood_start = time.perf_counter()
-        train_logprob = expected_answer_logprob(loaded, [example["interaction"] for example in examples], batch_size=16)
+        train_logprob = expected_answer_logprob(loaded, train_interactions, batch_size=16)
         validation_logprob = expected_answer_logprob(loaded, validation_interactions, batch_size=16)
         _sync_if_cuda(loaded.model)
         timings["batched_likelihood_seconds"] = time.perf_counter() - likelihood_start
@@ -482,6 +504,7 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
             "baseline_train_exact_match": baseline_train_score["exact_match"],
             "baseline_validation_exact_match": baseline_validation_score["exact_match"],
             "train_exact_match": train_score["exact_match"], "validation_exact_match": validation_score["exact_match"],
+            "train_scoring_cases": len(train_rows), "edit_example_count": len(examples),
             "train_exact_match_gain": train_score["exact_match"] - baseline_train_score["exact_match"],
             "validation_exact_match_gain": validation_score["exact_match"] - baseline_validation_score["exact_match"],
             "baseline_train_mean_token_logprob": baseline_train_logprob["mean_token_logprob"],
@@ -551,14 +574,14 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     if job.digest != task.job.digest:
         raise WeightEditInputError("layer sweep differs from frozen task")
     service = GymStudioService(state_dir=state_dir)
-    approved = service.load_training_examples(request["dataset_digest"])
+    approved, train_examples = _load_training_rosters(service, request)
     examples = [{"example_digest": _document_digest(row), "interaction": task.project(row["input"], row["response"])}
                 for row in approved]
     if _document_digest({"examples": examples}) != request["projected_examples_digest"]:
         raise WeightEditInputError("layer sweep examples differ from frozen training dataset")
-    train_rows = [{"scenario_id": f"train:frozen-dataset:{index}", "input": row["input"], "reference": row["response"]}
-                  for index, row in enumerate(approved)]
-    train_interactions = [example["interaction"] for example in examples]
+    train_rows = [{"scenario_id": row["scenario_id"], "input": row["input"], "reference": row["response"]}
+                  for row in train_examples]
+    train_interactions = [task.project(row["input"], row["response"]) for row in train_examples]
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
@@ -597,11 +620,8 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
         for left, right in zip(batch_baseline_validation["responses"], serial_baseline_validation["responses"], strict=True))
     exact_batch_size = 8 if batch_equivalent else 1
     baseline_validation_score = batch_baseline_validation if batch_equivalent else serial_baseline_validation
-    base_train_records = batch_baseline_train["responses"]
-    failing_examples = [example for example, score in zip(examples, base_train_records, strict=True)
-                        if score["exact_match"] == 0.0]
-    passing_interactions = [task.project(row["input"], None) for row, score in zip(approved, base_train_records, strict=True)
-                            if score["exact_match"] == 1.0]
+    failing_examples = examples
+    passing_interactions = list(request["recipe"].get("protected_training_interactions", ()))
     baseline_train = {"task": _compact_score(batch_baseline_train),
                       "expected_answer_logprob": expected_answer_logprob(loaded, train_interactions, batch_size=16)}
     baseline_validation_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
@@ -842,6 +862,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
               "job_digest": job.digest, "training_request_digest": request["training_request_digest"],
               "dataset_digest": request["dataset_digest"], "base_model_digest": base_digest,
               "failing_training_examples": len(failing_examples),
+              "training_scoring_cases": len(train_rows),
               "passing_training_examples_protected": len(passing_interactions),
               "base_train": baseline_train, "base_validation": baseline_validation,
               "strengths": list(strengths), "discovered_layer_count": len(all_writers),
