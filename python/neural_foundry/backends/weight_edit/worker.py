@@ -22,7 +22,7 @@ from ...vllm_container_adapter import VllmCandidateServer
 from .adapter import WeightEditBackendConfig, validate_recipe, weight_edit_trainer
 from .apply import apply, save, seal_serving_probes
 from .capture import capture
-from .demonstrations import prepare_demonstration
+from .demonstrations import answer_token_groups, prepare_demonstration
 from .discover import SiteMap, find_blocks, find_sites
 from .loader import load_model
 from .methods import LegacyKeyValueEdit
@@ -44,12 +44,13 @@ def preservation_logits(loaded, interactions):
     return values
 
 
-def _edit_key_diagnostics(keys, outputs, active, correct_tokens, *, target_step, retention_weight):
+def _edit_key_diagnostics(keys, outputs, active, correct_tokens, *, target_step, retention_weight,
+                          gradient_norms=None, token_groups=None, token_losses=None, retention_key_count=None):
     used_keys, used_outputs = keys[active], outputs[active]
     mean_diagonal = float(used_keys.square().sum() / used_keys.shape[1])
     mean_input_norm = float(used_keys.norm(dim=1).mean())
     mean_output_norm = float(used_outputs.norm(dim=1).mean())
-    return {"gram_orientation": "K[input_dimension, active_key_count]; diagonal of K @ K.T",
+    report = {"gram_orientation": "K[input_dimension, active_key_count]; diagonal of K @ K.T",
             "mean_gram_diagonal": mean_diagonal, "fixed_ridge": 1e-3,
             "ridge_to_mean_gram_diagonal": 1e-3 / mean_diagonal if mean_diagonal > 0 else None,
             "key_count": keys.shape[0], "active_key_count": int(active.sum()),
@@ -66,6 +67,30 @@ def _edit_key_diagnostics(keys, outputs, active, correct_tokens, *, target_step,
             "retention_nullspace_weight": retention_weight,
             "retention_penalty_enabled": retention_weight != 0,
             "diagnostics_only": True}
+    report["already_correct_token_fraction"] = float(correct_tokens.double().mean())
+    report["active_already_correct_token_fraction"] = float(correct_tokens[active].double().mean())
+    report["retention_key_count"] = retention_key_count
+    report["retention_positions"] = "one last prompt token per retention interaction; default capture positions"
+    if gradient_norms is not None:
+        values = gradient_norms.detach().double().cpu()
+        quantiles = torch.quantile(values, torch.tensor([0.0, 0.01, 0.25, 0.5, 0.75, 0.95, 0.99, 1.0], dtype=torch.float64))
+        report["gradient_norm_distribution"] = {name: float(value) for name, value in zip(
+            ("min", "p01", "p25", "median", "p75", "p95", "p99", "max"), quantiles, strict=True)}
+        report["gradient_norm_distribution"].update({"mean": float(values.mean()), "count": values.numel(),
+            "zero_count": int((values == 0).sum()), "measurement_stage": "unchanged mean-loss output gradients before per-key normalization"})
+    if token_groups is not None and token_losses is not None:
+        if len(token_groups) != keys.shape[0] or token_losses.numel() != keys.shape[0]:
+            raise GymJobError("token-loss groups do not match edit keys")
+        losses = token_losses.detach().double().cpu()
+        report["answer_token_groups"] = {}
+        for group in dict.fromkeys(token_groups):
+            mask = torch.tensor([value == group for value in token_groups], dtype=torch.bool)
+            report["answer_token_groups"][group] = {"key_count": int(mask.sum()),
+                "active_key_count": int((mask & active).sum()),
+                "base_mean_nll_nats": float(losses[mask].mean()),
+                "base_already_correct_keys": int(correct_tokens[mask].sum())}
+        report["token_grouping_policy"] = "tokenizer offsets over exact compact sorted JSON; field contents are values; syntax, mixed tokens and EOS are separate"
+    return report
 
 
 def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = None, discovered_sites: SiteMap | None = None):
@@ -97,7 +122,7 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
         if len(renderer.render(interaction).token_ids) > recipe["max_sequence_tokens"]:
             raise GymJobError("preservation prompt exceeds the frozen sequence budget")
     retention = capture(loaded, selected, panel, output_dtype=torch.float64)[site.tensor_name].inputs
-    keys, gradients, outputs, correct_tokens = [], [], [], []
+    keys, gradients, outputs, correct_tokens, token_losses, token_groups = [], [], [], [], [], []
     total_tokens, key_count = 0, 0
     for example in examples:
         interaction = example["interaction"]
@@ -107,6 +132,7 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
             response = parse_strict_json(interaction["messages"][-1]["content"].encode())
             validate_task_instance(job.task_output_schema, response, field="approved_response")
         demonstration = prepare_demonstration(renderer, interaction)
+        token_groups.extend(answer_token_groups(renderer, interaction))
         total_tokens += len(demonstration.rendered.token_ids)
         key_count += len(demonstration.positions)
         if (len(demonstration.rendered.token_ids) > recipe["max_sequence_tokens"]
@@ -114,7 +140,7 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
             raise GymJobError("weight-edit demonstrations exceed frozen token/key budgets")
         captured = capture(loaded, selected, [demonstration.rendered], positions=[demonstration.positions],
                            loss_labels=[demonstration.labels], output_dtype=torch.float64,
-                           token_outcome_sink=correct_tokens.append)[site.tensor_name]
+                           token_outcome_sink=correct_tokens.append, token_loss_sink=token_losses.append)[site.tensor_name]
         keys.append(captured.inputs)
         gradients.append(captured.output_gradients)
         outputs.append(captured.outputs)
@@ -137,12 +163,14 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
                 "protected_training_interactions": len(recipe.get("protected_training_interactions", ())),
                 "renderer_digest": renderer.digest,
                 "key_diagnostics": _edit_key_diagnostics(keys, torch.cat(outputs), active, torch.cat(correct_tokens),
-                    target_step=recipe["target_step"], retention_weight=recipe["retention_nullspace_weight"])}
+                    target_step=recipe["target_step"], retention_weight=recipe["retention_nullspace_weight"],
+                    gradient_norms=norms[:, 0], token_groups=token_groups, token_losses=torch.cat(token_losses),
+                    retention_key_count=retention.shape[0])}
     return sites, site, delta, evidence
 
 
 def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
-                              retention_interactions: Sequence[Mapping[str, Any]]) -> dict[str, tuple[Any, dict[str, Any]]]:
+                              retention_interactions: Sequence[Mapping[str, Any]], diagnostics_only=False) -> dict[str, tuple[Any, dict[str, Any]]]:
     """Capture each demonstration once across all selected MLP sites, then reuse it for every strength."""
     recipe = validate_recipe(recipe)
     if not sites.checkpoint_names_verified or not sites.sites or not retention_interactions:
@@ -155,7 +183,7 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
     keys: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
     gradients: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
     write_outputs: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
-    correct_tokens = []
+    correct_tokens, token_losses, token_groups = [], [], []
 
     def collect(destination, *, collect_gradients=False):
         def consume(name, inputs, outputs, output_gradient, prompt_digest):
@@ -177,6 +205,7 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
             response = parse_strict_json(interaction["messages"][-1]["content"].encode())
             validate_task_instance(job.task_output_schema, response, field="approved_response")
         demonstration = prepare_demonstration(renderer, interaction)
+        token_groups.extend(answer_token_groups(renderer, interaction))
         total_tokens += len(demonstration.rendered.token_ids)
         key_count += len(demonstration.positions)
         if (len(demonstration.rendered.token_ids) > recipe["max_sequence_tokens"]
@@ -184,7 +213,8 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
             raise GymJobError("multi-site demonstrations exceed frozen token/key budgets")
         capture(loaded, sites, [demonstration.rendered], positions=[demonstration.positions],
                 loss_labels=[demonstration.labels], output_dtype=torch.float64,
-            sink=collect(keys, collect_gradients=True), token_outcome_sink=correct_tokens.append)
+            sink=collect(keys, collect_gradients=True), token_outcome_sink=correct_tokens.append,
+            token_loss_sink=token_losses.append)
     if not examples:
         raise GymJobError("multi-site edit requires at least one base-failing training example")
     result = {}
@@ -199,8 +229,8 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
         weights = working_weight(loaded, site)
         targets = key[active] @ weights.T - recipe["target_step"] * gradient[active] / norms[active]
         protected = torch.cat(retained[name])
-        delta = LegacyKeyValueEdit(protected).compute(site, weights, key[active], targets,
-                    {"retention_nullspace_weight": recipe["retention_nullspace_weight"]})
+        delta = None if diagnostics_only else LegacyKeyValueEdit(protected).compute(site, weights, key[active], targets,
+                {"retention_nullspace_weight": recipe["retention_nullspace_weight"]})
         result[name] = (delta, {"layer": site.layer, "site": site.document(), "failing_key_count": int(active.sum()),
             "zero_gradient_keys": int((~active).sum()), "training_tokens": total_tokens,
             "target_objective": "teacher_forced_token_loss_output_gradient", "gradient_inspection_used": True,
@@ -208,7 +238,9 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
                 protected.detach().cpu().contiguous().numpy().tobytes()).hexdigest(),
             "renderer_digest": renderer.digest,
             "key_diagnostics": _edit_key_diagnostics(key, torch.cat(write_outputs[name]), active, torch.cat(correct_tokens),
-                target_step=recipe["target_step"], retention_weight=recipe["retention_nullspace_weight"])})
+                target_step=recipe["target_step"], retention_weight=recipe["retention_nullspace_weight"],
+                gradient_norms=norms[:, 0], token_groups=token_groups, token_losses=torch.cat(token_losses),
+                retention_key_count=protected.shape[0])})
     return result
 
 

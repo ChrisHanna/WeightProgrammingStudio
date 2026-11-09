@@ -1017,6 +1017,79 @@ def load_sweep_likelihood_selection(source_path: Path, request: dict[str, Any]) 
     return source
 
 
+def fixed_case_breakdown(base_score, candidate_score):
+    before = base_score["responses"]
+    after = candidate_score["responses"]
+    if [row["scenario_id"] for row in before] != [row["scenario_id"] for row in after]:
+        raise WeightEditInputError("fixed-case audit requires identical ordered scenario rosters")
+    repaired_format, corrected_values = [], []
+    for base, candidate in zip(before, after, strict=True):
+        if base["exact_match"] == 0 and candidate["exact_match"] == 1:
+            if not candidate["format_valid"]:
+                raise WeightEditInputError("fixed-case audit found an exact answer with invalid format")
+            destination = corrected_values if base["format_valid"] else repaired_format
+            destination.append(base["scenario_id"])
+    return {"format_invalid_now_valid": len(repaired_format),
+            "format_valid_value_corrected": len(corrected_values),
+            "format_invalid_now_valid_ids": repaired_format,
+            "format_valid_value_corrected_ids": corrected_values,
+            "interpretation": "paired schema-validity categories, not a causal attribution; format-invalid cases may also repair values"}
+
+
+def run_edit_key_audit(state_dir: Path, request_path: Path, output_path: Path, *, device="cuda:0", layers=(10, 9)):
+    request = parse_strict_json(request_path.read_bytes())
+    if request.get("training_request_digest") != _document_digest(
+        {key: value for key, value in request.items() if key != "training_request_digest"}):
+        raise WeightEditInputError("key audit request digest is invalid")
+    job = gym_job_from_document(parse_strict_json(
+        (state_dir / "jobs" / (request["job_digest"][7:] + ".json")).read_bytes()))
+    task = reference_task(rows_per_template=job.scenario_sources[0].parameters["rows_per_template"])
+    if task.job.digest != job.digest or output_path.exists():
+        raise WeightEditInputError("key audit requires the frozen task and a fresh output")
+    service = GymStudioService(state_dir=state_dir)
+    approved, parent = _load_training_rosters(service, request)
+    examples = [{"example_digest": _document_digest(row), "interaction": task.project(row["input"], row["response"])}
+                for row in approved]
+    if _document_digest({"examples": examples}) != request["projected_examples_digest"]:
+        raise WeightEditInputError("key audit demonstrations differ from the frozen request")
+    loaded = load_model(request["base_reference"]["artifact_path"], dtype=torch.bfloat16, device=device)
+    before = model_state_digest(loaded.model)
+    if before != request["loaded_base"]["state_digest"]:
+        raise WeightEditInputError("key audit belongs to another base state")
+    discovered = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                            checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    selected = tuple(site for site in _mlp_writer_site_map(discovered).sites if site.layer in layers)
+    if len(selected) != len(set(layers)):
+        raise WeightEditInputError("key audit layers are not uniquely discovered MLP writers")
+    protected = [*request["recipe"]["preservation_interactions"],
+                 *request["recipe"].get("protected_training_interactions", ())]
+    observations = calculate_edits_for_sites(loaded, job, examples, request["recipe"],
+        sites=SiteMap(selected, checkpoint_names_verified=True), retention_interactions=protected, diagnostics_only=True)
+    if any(delta is not None for delta, evidence in observations.values()):
+        raise WeightEditInputError("read-only key audit unexpectedly produced an edit")
+    if model_state_digest(loaded.model) != before:
+        raise WeightEditInputError("read-only key audit changed model state")
+    report = {"kind": "nf_read_only_edit_key_audit_v1", "evidence_status": "measured",
+        "training_request_digest": request["training_request_digest"], "job_digest": job.digest,
+        "dataset_digest": request["dataset_digest"], "base_state_digest": before,
+        "failing_examples": len(examples), "parent_train_examples": len(parent),
+        "retention_interactions": len(protected),
+        "per_layer": {str(site.layer): observations[site.tensor_name][1]["key_diagnostics"] for site in selected},
+        "demonstration_format": "compact sorted JSON with tokenizer EOS appended; no markdown fence or indentation",
+        "tokenizer_eos": {"token": loaded.tokenizer.eos_token, "id": loaded.tokenizer.eos_token_id},
+        "chat_template_digest": _document_digest({"chat_template": loaded.tokenizer.chat_template}),
+        "solver_called": False, "edit_applied": False, "base_unchanged": True,
+        "holdout_accessed": False, "candidate_published": False}
+    report["evidence_digest"] = _document_digest(report)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("xb") as stream:
+        stream.write(_wire_document(report))
+    if device.startswith("cuda"):
+        loaded.model.to("cpu")
+        torch.cuda.empty_cache()
+    return report
+
+
 def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path: Path, output_path: Path,
                          *, device="cuda:0", composition_sizes=(2, 3), single_layer_candidates=None):
     request = parse_strict_json(request_path.read_bytes())
@@ -1208,6 +1281,7 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                 "training_exact_match_gain": train_score["exact_match"] - base_train["exact_match"],
                 "validation_exact_match_gain": validation_score["exact_match"] - base_validation["exact_match"],
                 "validation_fixed_cases": fixed, "validation_broken_cases": broken,
+                "validation_fixed_breakdown": fixed_case_breakdown(base_validation, validation_score),
                 "training_fixed_cases": train_fixed, "training_broken_cases": train_broken,
                 "edit_key_diagnostics": calculation_diagnostics,
                 "training_logprob_gain": train_logprob["mean_token_logprob"] - base_train_logprob["mean_token_logprob"],
@@ -1459,7 +1533,13 @@ def main():
     mode.add_argument("--audit-truncation", action="store_true")
     mode.add_argument("--rescore-finalists", action="store_true")
     mode.add_argument("--single-layer-stop-gate", action="store_true")
+    mode.add_argument("--audit-failing-keys", action="store_true")
     args = parser.parse_args()
+    if args.audit_failing_keys:
+        report = run_edit_key_audit(args.state_dir, args.request, args.output, device=args.device)
+        print(json.dumps({"layers": list(report["per_layer"]), "failing_examples": report["failing_examples"],
+                          "base_unchanged": report["base_unchanged"], "solver_called": report["solver_called"]}))
+        return
     if args.profile_one:
         report = run_single_candidate_profile(args.state_dir, args.request, args.output)
         print(json.dumps({"timings_seconds": report["timings_seconds"], "layer": report["layer"],

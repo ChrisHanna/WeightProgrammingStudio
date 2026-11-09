@@ -34,6 +34,7 @@ def capture(
     max_capture_bytes: int = 256 * 1024 * 1024,
     sink: Callable[[str, torch.Tensor, torch.Tensor, torch.Tensor | None, str], None] | None = None,
     token_outcome_sink: Callable[[torch.Tensor], None] | None = None,
+    token_loss_sink: Callable[[torch.Tensor], None] | None = None,
 ) -> dict[str, Activations]:
     if output_dtype not in {torch.float32, torch.float64}:
         raise WeightEditInputError("capture output dtype must be float32 or float64")
@@ -120,12 +121,17 @@ def capture(
                     result = loaded.model(**encoded)
                 if set(active) != set(collected):
                     raise UnsupportedModel("not every selected site ran during capture")
-                if token_outcome_sink is not None:
+                if token_outcome_sink is not None or token_loss_sink is not None:
                     if not gradient_mode or any(position + 1 >= length for position in selected):
                         raise WeightEditInputError("token diagnostics require valid next-token teacher-forced labels")
                     expected = labels[0, [position + 1 for position in selected]]
-                    predicted = result.logits[0, selected].detach().argmax(dim=-1)
-                    token_outcome_sink((predicted == expected).detach().cpu())
+                    token_logits = result.logits[0, selected].detach()
+                    if token_outcome_sink is not None:
+                        predicted = token_logits.argmax(dim=-1)
+                        token_outcome_sink((predicted == expected).detach().cpu())
+                    if token_loss_sink is not None:
+                        token_losses = torch.nn.functional.cross_entropy(token_logits.float(), expected, reduction="none")
+                        token_loss_sink(token_losses.detach().cpu())
                 if gradient_mode:
                     if result.loss.ndim != 0 or not bool(torch.isfinite(result.loss)):
                         raise UnsupportedModel("capture loss is not finite")

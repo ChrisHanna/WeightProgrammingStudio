@@ -183,7 +183,9 @@ def test_key_scale_diagnostics_match_gram_and_norms():
     outputs = torch.tensor([[6.0, 8.0], [0.0, 0.0]], dtype=torch.float64)
     active = torch.tensor([True, False])
     correct = torch.tensor([True, False])
-    measured = _edit_key_diagnostics(keys, outputs, active, correct, target_step=1.0, retention_weight=0.0)
+    measured = _edit_key_diagnostics(keys, outputs, active, correct, target_step=1.0, retention_weight=0.0,
+        gradient_norms=torch.tensor([0.1, 0.0]), token_groups=["format", "quantity"],
+        token_losses=torch.tensor([2.0, 6.0]), retention_key_count=7)
     assert measured["mean_gram_diagonal"] == 12.5
     assert measured["ridge_to_mean_gram_diagonal"] == pytest.approx(1e-3 / 12.5)
     assert measured["mean_key_input_l2_norm"] == 5.0
@@ -193,6 +195,12 @@ def test_key_scale_diagnostics_match_gram_and_norms():
     assert measured["active_already_correct_token_keys"] == 1
     assert measured["key_count"] == 2 and measured["active_key_count"] == 1
     assert measured["retention_penalty_enabled"] is False
+    assert measured["already_correct_token_fraction"] == 0.5
+    assert measured["retention_key_count"] == 7
+    assert measured["answer_token_groups"]["format"]["base_mean_nll_nats"] == 2.0
+    assert measured["answer_token_groups"]["quantity"]["base_mean_nll_nats"] == 6.0
+    assert measured["gradient_norm_distribution"]["median"] == pytest.approx(0.05)
+    assert measured["gradient_norm_distribution"]["zero_count"] == 1
 
 
 def test_token_diagnostic_observer_does_not_change_capture(numerical_fixture):
@@ -209,8 +217,9 @@ def test_token_diagnostic_observer_does_not_change_capture(numerical_fixture):
     demo = prepare_demonstration(PromptRenderer(loaded.tokenizer), examples[0]["interaction"])
     arguments = {"positions": [demo.positions], "loss_labels": [demo.labels], "output_dtype": torch.float64}
     plain = capture(loaded, selected, [demo.rendered], **arguments)[site.tensor_name]
-    outcomes = []
-    observed = capture(loaded, selected, [demo.rendered], token_outcome_sink=outcomes.append, **arguments)[site.tensor_name]
+    outcomes, losses = [], []
+    observed = capture(loaded, selected, [demo.rendered], token_outcome_sink=outcomes.append,
+        token_loss_sink=losses.append, **arguments)[site.tensor_name]
     assert torch.equal(plain.inputs, observed.inputs)
     assert torch.equal(plain.outputs, observed.outputs)
     assert torch.equal(plain.output_gradients, observed.output_gradients)
@@ -220,6 +229,32 @@ def test_token_diagnostic_observer_does_not_change_capture(numerical_fixture):
         logits = loaded.model(input_ids=ids, attention_mask=torch.ones_like(ids)).logits
     expected = torch.tensor([demo.labels[position + 1] for position in demo.positions])
     assert torch.equal(outcomes[0], logits[0, list(demo.positions)].argmax(dim=-1).cpu() == expected)
+    expected_losses = torch.nn.functional.cross_entropy(logits[0, list(demo.positions)].float(), expected, reduction="none")
+    assert torch.equal(losses[0], expected_losses.cpu())
+
+
+def test_json_answer_token_groups_match_frozen_response_positions(numerical_fixture):
+    from neural_foundry.backends.weight_edit.demonstrations import answer_token_groups, prepare_demonstration
+    from neural_foundry.prompt_rendering import PromptRenderer
+
+    loaded, task, examples, recipe = numerical_fixture
+    renderer = PromptRenderer(loaded.tokenizer)
+    interaction = examples[0]["interaction"]
+    groups = answer_token_groups(renderer, interaction)
+    assert len(groups) == len(prepare_demonstration(renderer, interaction).positions)
+    assert groups[-1] == "end_of_answer"
+    assert {"format", "customer", "product", "quantity"} <= set(groups)
+
+    class MixedTokenizer:
+        def encode(self, text, *, add_special_tokens=False):
+            return [1]
+
+        def __call__(self, text, **kwargs):
+            return {"input_ids": [1], "offset_mapping": [(0, len(text))]}
+
+    from types import SimpleNamespace
+    assert answer_token_groups(SimpleNamespace(tokenizer=MixedTokenizer()), interaction) == [
+        "mixed_format_and_value", "end_of_answer"]
 
 
 def test_multi_site_capture_computes_all_layer_deltas_once(numerical_fixture):

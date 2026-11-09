@@ -414,14 +414,14 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
         assert candidate["composition_size"] == 1 and len(candidate["stored_weight_changes"]) == 1
         assert candidate["validation_fixed_cases"] == candidate["validation_broken_cases"] == 0
         assert candidate["training_fixed_cases"] == candidate["training_broken_cases"] == 0
-        diagnostic = candidate["edit_key_diagnostics"][str(candidate["layer"])]
-        assert diagnostic["target_shift_l2"] == candidate["target_step"]
-        assert diagnostic["target_shift_fraction_of_mean_write_output_norm"] == pytest.approx(
-            candidate["target_step"] / diagnostic["mean_write_output_l2_norm"])
-        assert diagnostic["already_correct_token_keys"] + diagnostic["incorrect_token_keys"] == diagnostic["key_count"]
-        assert diagnostic["retention_nullspace_weight"] == 0
-        assert diagnostic["retention_penalty_enabled"] is False
-        assert diagnostic["gradient_recomputed_after_scaling"] is False
+        key_diagnostic = candidate["edit_key_diagnostics"][str(candidate["layer"])]
+        assert key_diagnostic["target_shift_l2"] == candidate["target_step"]
+        assert key_diagnostic["target_shift_fraction_of_mean_write_output_norm"] == pytest.approx(
+            candidate["target_step"] / key_diagnostic["mean_write_output_l2_norm"])
+        assert key_diagnostic["already_correct_token_keys"] + key_diagnostic["incorrect_token_keys"] == key_diagnostic["key_count"]
+        assert key_diagnostic["retention_nullspace_weight"] == 0
+        assert key_diagnostic["retention_penalty_enabled"] is False
+        assert key_diagnostic["gradient_recomputed_after_scaling"] is False
         assert "zero_short_truncation" not in candidate["specialist_v2_gate"]["checks"]
         metrics = next(iter(candidate["stored_weight_changes"].values()))
         assert "relative_frobenius_norm" in metrics and "changed_entry_fraction" in metrics
@@ -430,6 +430,36 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
         assert checks["bf16_top5"]["threshold"] == 0.95
     assert single_report["strength_1_stop_gate"]["automatic_followup_authorized"] is False
     assert single_report["base_restored"] and model_state_digest(loaded.model) == loaded.base_digest
+    from neural_foundry.backends.weight_edit.methods import LegacyKeyValueEdit
+
+    def forbid_solver(*args, **kwargs):
+        raise AssertionError("read-only audit called the solver")
+
+    with monkeypatch.context() as audit_patch:
+        audit_patch.setattr(LegacyKeyValueEdit, "compute", forbid_solver)
+        audit = diagnostic.run_edit_key_audit(state_dir, request_path, tmp_path / "key-audit.json",
+                                               device="cpu", layers=(1, 0))
+    assert audit["solver_called"] is False and audit["edit_applied"] is False
+    assert audit["base_unchanged"] and model_state_digest(loaded.model) == loaded.base_digest
+    for observations in audit["per_layer"].values():
+        assert observations["retention_key_count"] == audit["retention_interactions"]
+        assert sum(group["key_count"] for group in observations["answer_token_groups"].values()) == observations["key_count"]
+
+
+def test_fixed_cases_separate_format_repairs_from_value_corrections():
+    from neural_foundry.backends.weight_edit.drift_diagnostic import fixed_case_breakdown
+
+    base = {"responses": [
+        {"scenario_id": "invalid", "format_valid": False, "exact_match": 0},
+        {"scenario_id": "wrong_value", "format_valid": True, "exact_match": 0},
+        {"scenario_id": "already_correct", "format_valid": True, "exact_match": 1}]}
+    candidate = {"responses": [{"scenario_id": row["scenario_id"], "format_valid": True, "exact_match": 1}
+                                for row in base["responses"]]}
+    result = fixed_case_breakdown(base, candidate)
+    assert result["format_invalid_now_valid"] == 1
+    assert result["format_valid_value_corrected"] == 1
+    assert result["format_invalid_now_valid_ids"] == ["invalid"]
+    assert result["format_valid_value_corrected_ids"] == ["wrong_value"]
 
 
 def test_validation_results_and_logprobs_are_reported_by_template():
