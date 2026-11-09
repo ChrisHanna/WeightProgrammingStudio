@@ -19,7 +19,7 @@ from ...gym_artifacts import CandidateRef
 from ...gym_service import ExecutionResponse, GymStudioService, _document_digest, _wire_document
 from ...model_digest import model_state_digest
 from ...provenance import parse_strict_json
-from ...reference_json_extraction import generate_scenarios, reference_task
+from ...reference_json_extraction import TEMPLATES, generate_scenarios, reference_task
 from ...json_proof_loop import SPECIALIST_POLICY, public_required_rows, score_public_rows, specialist_acceptance
 from ...prompt_rendering import PromptRenderer
 from .apply import apply, save, tensor_digests
@@ -43,6 +43,18 @@ def select_top_third(screen_rows: list[dict[str, Any]]) -> list[str]:
                                    row["training_logprob_gain"], -row["layer"], -row["target_step"]), reverse=True)
     count = max(1, (len(eligible) + 2) // 3) if eligible else 0
     return [row["checkpoint_key"] for row in eligible[:count]]
+
+
+def select_validation_screen(rows: list[dict[str, Any]], *, per_family: int = 8) -> list[dict[str, Any]]:
+    if type(per_family) is not int or per_family < 1:
+        raise WeightEditInputError("validation screen must select at least one row per family")
+    by_family: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        family = row.get("family_id")
+        if not isinstance(family, str) or not family:
+            raise WeightEditInputError("validation screen rows require a family ID")
+        by_family.setdefault(family, []).append(row)
+    return [row for family_rows in by_family.values() for row in family_rows[:per_family]]
 
 
 def open_sweep_checkpoint(path: Path, binding: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,6 +144,53 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
                 "precision": str(next(loaded.model.parameters()).dtype).removeprefix("torch."),
                 "renderer_digest": renderer.digest, "served_model_identity_verified": False}
     return SimpleNamespace(infer=infer, infer_many=infer_many, loaded_identity=lambda: identity)
+
+
+def run_public_split_baseline(state_dir: Path, request_path: Path, output_path: Path, device="cuda:0"):
+    request = parse_strict_json(request_path.read_bytes())
+    if request["training_request_digest"] != _document_digest({key: value for key, value in request.items() if key != "training_request_digest"}):
+        raise WeightEditInputError("baseline request digest is invalid")
+    job = gym_job_from_document(parse_strict_json((state_dir / "jobs" / (request["job_digest"][7:] + ".json")).read_bytes()))
+    if job.digest != request["job_digest"]:
+        raise WeightEditInputError("baseline source job digest is invalid")
+    rows_per_template = job.scenario_sources[0].parameters["rows_per_template"]
+    seed = request["recipe"]["seed"]
+    task = reference_task(rows_per_template=rows_per_template)
+    train_rows = generate_scenarios(split="train", seed=seed, parameters={"rows_per_template": rows_per_template})
+    validation_rows = generate_scenarios(split="validation", seed=seed, parameters={"rows_per_template": rows_per_template})
+    loaded = load_model(request["base_reference"]["artifact_path"], dtype=torch.bfloat16, device=device)
+    if loaded.base_digest != request["loaded_base"]["state_digest"]:
+        raise WeightEditInputError("baseline loaded state differs from the frozen base")
+    renderer = PromptRenderer(loaded.tokenizer)
+    if renderer.digest != request["inference_config"]["prompt_renderer_digest"]:
+        raise WeightEditInputError("baseline renderer differs from the frozen run")
+    model = validation_model(loaded, max_new_tokens=80, batch_size=16)
+    train_score = score_public_rows(task, model, train_rows, split="train")
+    validation_score = score_public_rows(task, model, validation_rows, split="validation")
+    train_logprob = expected_answer_logprob(loaded, [task.project(row["input"], row["reference"]) for row in train_rows], batch_size=16)
+    validation_logprob = expected_answer_logprob(loaded, [task.project(row["input"], row["reference"]) for row in validation_rows], batch_size=16)
+    report = {"kind": "nf_json_public_split_baseline_v1", "evidence_status": "measured",
+        "source_job_digest": job.digest, "current_job_digest": task.job.digest,
+        "scenario_origin": "synthetic", "seed": seed,
+        "rows_per_template": rows_per_template, "train_template_count": len(TEMPLATES["train"]),
+        "validation_template_count": len(TEMPLATES["validation"]),
+        "base_candidate_digest": request["base_reference"]["model_digest"],
+        "base_state_digest": loaded.base_digest, "renderer_digest": renderer.digest,
+        "train": {"score": train_score, "failures": [row["scenario_id"] for row in train_score["responses"] if row["exact_match"] < 1.0],
+                  "failure_count": sum(row["exact_match"] < 1.0 for row in train_score["responses"]),
+                  "expected_answer_logprob": train_logprob},
+        "validation": {"score": validation_score, "failures": [row["scenario_id"] for row in validation_score["responses"] if row["exact_match"] < 1.0],
+                       "failure_count": sum(row["exact_match"] < 1.0 for row in validation_score["responses"]),
+                       "expected_answer_logprob": validation_logprob},
+        "batch_size": 16, "holdout_accessed": False, "candidate_published": False, "release_authorized": False}
+    report["evidence_digest"] = _document_digest(report)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("xb") as stream:
+        stream.write(_wire_document(report))
+    if device.startswith("cuda"):
+        loaded.model.to("cpu")
+        torch.cuda.empty_cache()
+    return report
 
 
 def measure_validation_strengths(loaded, task, examples, recipe, *, seed, freeze_calibration):
@@ -285,10 +344,7 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
-    validation_by_family: dict[str, list[dict[str, Any]]] = {}
-    for row in validation_rows:
-        validation_by_family.setdefault(row["family_id"], []).append(row)
-    screening_rows = [row for family_rows in validation_by_family.values() for row in family_rows[:8]]
+    screening_rows = select_validation_screen(validation_rows)
     screening_interactions = [task.project(row["input"], row["reference"]) for row in screening_rows]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
@@ -442,6 +498,8 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
+    screening_rows = select_validation_screen(validation_rows)
+    screening_interactions = [task.project(row["input"], row["reference"]) for row in screening_rows]
     loaded = load_model(request["base_reference"]["artifact_path"], dtype=torch.bfloat16, device=device)
     if loaded.base_digest != request["loaded_base"]["state_digest"]:
         raise WeightEditInputError("layer sweep base differs from frozen request")
@@ -827,11 +885,20 @@ def main():
     mode.add_argument("--training-fit", action="store_true")
     mode.add_argument("--layer-strength-sweep", action="store_true")
     mode.add_argument("--profile-one", action="store_true")
+    mode.add_argument("--public-split-baseline", action="store_true")
     args = parser.parse_args()
     if args.profile_one:
         report = run_single_candidate_profile(args.state_dir, args.request, args.output)
         print(json.dumps({"timings_seconds": report["timings_seconds"], "layer": report["layer"],
                           "strength": report["strength"], "validation_exact_match": report["validation_exact_match"]}))
+        return
+    if args.public_split_baseline:
+        report = run_public_split_baseline(args.state_dir, args.request, args.output)
+        print(json.dumps({"train_cases": report["train"]["score"]["cases"],
+                          "train_failures": report["train"]["failure_count"],
+                          "validation_cases": report["validation"]["score"]["cases"],
+                          "validation_failures": report["validation"]["failure_count"],
+                          "holdout_accessed": report["holdout_accessed"]}))
         return
     if args.training_fit:
         report = run_training_fit_diagnostic(args.state_dir, args.request, args.output)

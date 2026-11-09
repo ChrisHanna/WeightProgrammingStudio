@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
-    expected_answer_logprob, measure_mode, open_sweep_checkpoint, select_top_third)
+    expected_answer_logprob, measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -60,12 +60,79 @@ def test_sweep_checkpoint_appends_each_result_and_rejects_mismatched_resume(tmp_
         open_sweep_checkpoint(path, {**binding, "request_digest": "sha256:" + "c" * 64})
 
 
+def test_public_split_baseline_rebuilds_train_and_validation_without_holdout(tmp_path, numerical_fixture, monkeypatch):
+    import json
+    from neural_foundry.backends.weight_edit import drift_diagnostic
+    from neural_foundry.gym_service import _wire_document
+    from neural_foundry.prompt_rendering import PromptRenderer
+    from neural_foundry.reference_json_extraction import TEMPLATES
+
+    loaded, task, examples, recipe = numerical_fixture
+    state_dir = tmp_path / "state"
+    jobs = state_dir / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / f"{task.job.digest[7:]}.json").write_bytes(_wire_document(task.job.to_document()))
+    request = {"kind": "nf_gym_training_request_v1", "job_digest": task.job.digest,
+        "loaded_base": {"state_digest": loaded.base_digest},
+        "base_reference": {"artifact_path": str(loaded.checkpoint_path), "model_digest": loaded.base_digest},
+        "inference_config": {"prompt_renderer_digest": PromptRenderer(loaded.tokenizer).digest},
+        "recipe": {"seed": 17}}
+    request["training_request_digest"] = _document_digest(request)
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(_wire_document(request))
+    monkeypatch.setattr(drift_diagnostic, "load_model", lambda *args, **kwargs: loaded)
+    monkeypatch.setattr(drift_diagnostic, "score_public_rows", lambda task, model, rows, split="validation": {
+        "split": split, "cases": len(rows), "exact_match": 0.5, "format_valid": 1.0,
+        "panel_digest": "sha256:" + "a" * 64,
+        "responses": [{"scenario_id": row["scenario_id"], "exact_match": float(index % 2 == 0)}
+                      for index, row in enumerate(rows)]})
+    monkeypatch.setattr(drift_diagnostic, "expected_answer_logprob", lambda *args, **kwargs: {
+        "cases": 2, "response_tokens": 2, "mean_case_logprob": -1.0,
+        "mean_token_logprob": -1.0, "sum_logprob": -2.0, "case_logprobs": [-1.0, -1.0]})
+    report_path = tmp_path / "baseline.json"
+    report = drift_diagnostic.run_public_split_baseline(state_dir, request_path, report_path, device="cpu")
+    assert report["train"]["score"]["cases"] == len(TEMPLATES["train"])
+    assert report["validation"]["score"]["cases"] == len(TEMPLATES["validation"])
+    assert report["train"]["failure_count"] > 0 and report["validation"]["failure_count"] > 0
+    assert report["holdout_accessed"] is False and report["release_authorized"] is False
+    assert json.loads(report_path.read_bytes()) == report
+
+
+def test_recorded_expanded_base_baseline_is_digest_bound_and_has_minimum_failures():
+    import hashlib
+    import json
+
+    root = Path(__file__).resolve().parents[1] / "docs" / "evidence"
+    path = root / "weight-edit-expanded-baseline-qwen3-train-validation-v1.json"
+    report = json.loads(path.read_bytes())
+    assert report["evidence_digest"] == _document_digest({key: value for key, value in report.items() if key != "evidence_digest"})
+    assert report["train_template_count"] == 10 and report["train"]["score"]["cases"] == 320
+    assert report["train"]["failure_count"] == 155 and report["train"]["failure_count"] >= 10
+    assert report["validation"]["score"]["cases"] == 64 and report["validation"]["failure_count"] == 18
+    assert report["holdout_accessed"] is False
+    summary = json.loads((root / "weight-edit-expanded-baseline-qwen3-summary.json").read_bytes())
+    for record in summary["raw_runs"]:
+        raw_path = Path(__file__).resolve().parents[1] / record["path"]
+        assert hashlib.sha256(raw_path.read_bytes()).hexdigest().upper() == record["sha256_file"]
+
+
 def test_successive_halving_selects_top_third_by_public_validation_likelihood():
     rows = [{"checkpoint_key": f"candidate-{index}", "status": "measured", "layer": index % 4,
              "target_step": (index % 4) + 0.01, "training_logprob_gain": 0.0,
              "validation_screen_logprob_gain": float(index)} for index in range(9)]
     rows.append({"checkpoint_key": "failed", "status": "failed", "layer": 0, "target_step": 1.0})
     assert select_top_third(rows) == ["candidate-8", "candidate-7", "candidate-6"]
+
+
+def test_validation_screen_selects_eight_rows_per_family():
+    rows = [{"family_id": family, "scenario_id": f"{family}:{index}"}
+            for family in ("invoice_a", "invoice_b") for index in range(10)]
+    selected = select_validation_screen(rows)
+    assert len(selected) == 16
+    assert [row["scenario_id"] for row in selected] == [
+        *(f"invoice_a:{index}" for index in range(8)),
+        *(f"invoice_b:{index}" for index in range(8)),
+    ]
 
 
 def test_layer_specific_calculation_reuses_verified_site_map(numerical_fixture):
