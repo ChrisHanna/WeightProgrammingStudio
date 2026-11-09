@@ -25,8 +25,10 @@ def compare_records(expected: Mapping[str, Any], observed: Mapping[str, Any]) ->
     for index, (left, right) in enumerate(zip(first, second, strict=True)):
         if not isinstance(left, Mapping) or not isinstance(right, Mapping):
             raise UnsupportedModel("probe record must be an object")
-        if left.get("prompt_token_ids") != right.get("prompt_token_ids") or left.get("greedy_token_id") != right.get("greedy_token_id"):
-            raise UnsupportedModel(f"probe {index} prompt or greedy tokens differ")
+        if left.get("prompt_token_ids") != right.get("prompt_token_ids"):
+            raise UnsupportedModel(f"probe {index} prompt token IDs differ")
+        if left.get("greedy_token_id") != right.get("greedy_token_id"):
+            raise UnsupportedModel(f"probe {index} greedy tokens differ: expected={left.get('greedy_token_id')}, observed={right.get('greedy_token_id')}")
         tokens = left.get("prompt_token_ids")
         if (not isinstance(tokens, list) or not tokens or any(type(token) is not int or token < 0 for token in tokens)
             or type(left.get("greedy_token_id")) is not int or left["greedy_token_id"] < 0):

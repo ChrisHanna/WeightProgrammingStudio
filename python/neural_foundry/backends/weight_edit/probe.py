@@ -63,7 +63,7 @@ def _logits(loaded: LoadedModel, prompts: tuple[str, ...]) -> list[torch.Tensor]
     return values
 
 
-def probe_model(model_ref: str | Path, out_dir: str | Path, *, dtype: torch.dtype, device: str,
+def _probe_model(model_ref: str | Path, out_dir: str | Path, *, dtype: torch.dtype, device: str,
                 model_id: str, serving_factory: Any = None) -> dict[str, Any]:
     loaded = load_model(model_ref, dtype=dtype, device=device)
     calibration = None
@@ -147,3 +147,19 @@ def probe_model(model_ref: str | Path, out_dir: str | Path, *, dtype: torch.dtyp
     output = Path(out_dir)
     (output.parent / (output.name + ".probe.json")).write_bytes(_wire_document(report))
     return report
+
+
+def probe_model(model_ref: str | Path, out_dir: str | Path, *, dtype: torch.dtype, device: str,
+                model_id: str, serving_factory: Any = None) -> dict[str, Any]:
+    try:
+        return _probe_model(model_ref, out_dir, dtype=dtype, device=device, model_id=model_id,
+                            serving_factory=serving_factory)
+    except UnsupportedModel as error:
+        report = {"kind": "nf_weight_edit_compatibility_v1", "supported": False, "model_id": model_id,
+                  "precision": str(dtype).removeprefix("torch."), "qualification_status": "failed_gate",
+                  "reasons": [str(error)], "measurements_complete": False}
+        report["probe_digest"] = _document_digest(report)
+        output = Path(out_dir)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        (output.parent / (output.name + ".probe.json")).write_bytes(_wire_document(report))
+        return report

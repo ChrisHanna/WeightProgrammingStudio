@@ -78,28 +78,49 @@ def test_cached_model_complete_compatibility_probe(tmp_path, model_id) -> None:
     revisions = {"HuggingFaceTB/SmolLM2-1.7B-Instruct": "31b70e2e869a7173562077fd711b654946d38674"}
     memory_fractions = {"Qwen/Qwen3-0.6B": 0.25, "HuggingFaceTB/SmolLM2-1.7B-Instruct": 0.35,
                         "nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1": 0.5}
+    precision = os.environ.get("NF_WEIGHT_EDIT_PROBE_PRECISION", "bfloat16")
+    assert precision in {"bfloat16", "float32"}
     checkpoint = resolve_checkpoint(model_id, revision=revisions.get(model_id))
     assert isinstance(checkpoint.revision, str) and len(checkpoint.revision) == 40
-    report = probe_model(checkpoint.path, tmp_path / "candidate", dtype=torch.bfloat16, device="cuda:0", model_id=model_id,
+    report = probe_model(checkpoint.path, tmp_path / "candidate", dtype=getattr(torch, precision), device="cuda:0", model_id=model_id,
                          serving_factory=lambda reference: VllmCandidateServer(reference, revision=checkpoint.revision,
-                                                                                timeout_seconds=300, precision="bfloat16",
+                                                                                timeout_seconds=300, precision=precision,
                                                                                 gpu_memory_utilization=memory_fractions[model_id]))
-    assert report["supported"] is True and report["serving_verified"] is True
+    assert report["supported"] is True, report.get("reasons")
+    assert report["serving_verified"] is True
     assert report["serving_evidence"]["fixed_prompts"] == 16
     assert report["serving_evidence"]["max_logprob_absolute_error"] <= 1e-6
     assert report["portability_verification"]["verified"] is True
 
 
-def test_retained_qwen_bf16_probe_evidence_is_digest_bound() -> None:
+@pytest.mark.parametrize("filename,model_id,precision", [
+    ("weight-edit-qwen3-bf16.json", "Qwen/Qwen3-0.6B", "bfloat16"),
+    ("weight-edit-smollm2-float32.json", "HuggingFaceTB/SmolLM2-1.7B-Instruct", "float32"),
+])
+def test_retained_probe_evidence_is_digest_bound(filename, model_id, precision) -> None:
     from neural_foundry.gym_service import _document_digest
 
-    path = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "weight-edit-qwen3-bf16.json"
+    path = Path(__file__).resolve().parents[1] / "docs" / "evidence" / filename
     report = json.loads(path.read_bytes())
     assert report["probe_digest"] == _document_digest({key: value for key, value in report.items() if key != "probe_digest"})
-    assert report["model_id"] == "Qwen/Qwen3-0.6B" and report["precision"] == "bfloat16"
+    assert report["model_id"] == model_id and report["precision"] == precision
     assert report["supported"] and report["reload_verified"] and report["unchanged_tensors_verified"]
     assert report["serving_evidence"]["verified"] is True
     assert report["serving_evidence"]["max_logprob_absolute_error"] <= 1e-6
     portability = report["portability_verification"]
     calibration = report["portability_calibration"]
     assert portability["verified"] is True and portability["max_logprob_absolute_error"] <= calibration["logprob_atol"]
+
+
+def test_failed_model_gate_is_recorded_without_scores(tmp_path, monkeypatch) -> None:
+    from neural_foundry.backends.weight_edit import probe
+    from neural_foundry.backends.weight_edit.loader import UnsupportedModel
+
+    def fail(*args, **kwargs):
+        raise UnsupportedModel("fixed probe greedy tokens differ")
+
+    monkeypatch.setattr(probe, "_probe_model", fail)
+    report = probe_model("fixture", tmp_path / "failed", dtype=torch.bfloat16, device="cpu", model_id="fixture")
+    assert report["supported"] is False and report["measurements_complete"] is False
+    assert "serving_verified" not in report and "candidate" not in report
+    assert json.loads((tmp_path / "failed.probe.json").read_bytes()) == report
