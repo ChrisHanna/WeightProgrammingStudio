@@ -34,6 +34,7 @@ MAX_PRACTICE_ATTEMPTS = 100_000
 MAX_PRACTICE_BATCH = 128
 MAX_STATE_BYTES = 256 * 1024 * 1024
 CHUNK_BYTES = 512 * 1024
+_WINDOWS = os.name == "nt"
 
 
 def _wire_document(document: Any) -> bytes:
@@ -459,17 +460,21 @@ class GymStudioService:
         descriptor, temporary_name = tempfile.mkstemp(prefix=".nf-gym-state-", dir=path.parent)
         temporary = Path(temporary_name)
         try:
-            os.fchmod(descriptor, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            else:
+                os.chmod(temporary, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if not _WINDOWS:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             temporary.unlink(missing_ok=True)
 
