@@ -1145,6 +1145,11 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                 "base_case_outcomes": [row["exact_match"] for row in base_validation["responses"]],
                 "candidate_case_outcomes": [row["exact_match"] for row in validation_score["responses"]]},
                 required_gate)
+            validation_truncations = sum(score["truncated_answer_count"] for score in
+                (_compact_score(base_validation), _compact_score(base_required),
+                 _compact_score(validation_score), _compact_score(required_score)))
+            specialist_gate["checks"]["zero_short_truncation"] = validation_truncations == 0
+            specialist_gate["passed"] = specialist_gate["passed"] and validation_truncations == 0
             candidate = {"kind": "nf_multilayer_finalist_v1", "composition_size": composition_size,
                 "layers": [row["layer"] for row in composition],
                 "target_steps": {str(row["layer"]): row["best_strength"] for row in composition},
@@ -1164,6 +1169,7 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                     for family, value in validation_logprob_by_template.items()},
                 "preservation_v2_report_only": {"passed": preservation_passed, "per_site": preservation_reports},
                 "specialist_v2_gate": specialist_gate,
+                "validation_truncated_answer_count": validation_truncations,
                 "effective_change_norms": edited.receipt["change_norms"],
                 "candidate_model_digest": model_state_digest(loaded.model),
                 "candidate_published": False}
