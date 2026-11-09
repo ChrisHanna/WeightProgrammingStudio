@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 from neural_foundry import nemo_gym
 from neural_foundry.baselines import build_splits
-from neural_foundry.cumulative_edit import CumulativeSearch
 from neural_foundry.gym_data import (
     GymDataError,
     gym_digest,
@@ -100,16 +99,11 @@ def test_nemo_mcqa_panels_feed_identical_wsp_and_lora_data(tmp_path: Path) -> No
     panels = load_mcqa_panels(train, validation, holdout, tokenizer=model.tokenizer)
     assert panels.source_manifest()["gym_digest"] == gym_digest(panels.gym)
     splits = build_splits(panels.gym, (), model=model)
-    search = CumulativeSearch(
-        build_mini_pythia_model(),
-        1e-7,
-        gym=panels.gym,
-        include_training_baselines=False,
-    )
+    shared_data = materialize_public_task_data(panels.gym, tokenizer=model.tokenizer)
 
-    assert splits.dev == tuple(search.lab.dev_items)
-    assert splits.val == tuple(search.lab.val_items)
-    assert splits.dataset_digest == search.lab.task_data.dataset_digest
+    assert splits.dev == shared_data.train_items
+    assert splits.val == shared_data.validation_items
+    assert splits.dataset_digest == shared_data.dataset_digest
     assert len(panels.gym.holdout_rules) == 2
     assert panels.source_manifest()["source_panels"]["train"]["sha256"].startswith("sha256:")
     changed_train = _write_jsonl(
@@ -215,14 +209,10 @@ def test_seeded_arithmetic_panels_are_reproducible_disjoint_and_shared(tmp_path:
         )
 
     splits = build_splits(panels.gym, (), model=model)
-    search = CumulativeSearch(
-        build_mini_pythia_model(),
-        1e-7,
-        gym=panels.gym,
-        include_training_baselines=False,
-    )
-    assert splits.dev == tuple(search.lab.dev_items)
-    assert splits.val == tuple(search.lab.val_items)
+    shared_data = materialize_public_task_data(panels.gym, tokenizer=model.tokenizer)
+    assert splits.dev == shared_data.train_items
+    assert splits.val == shared_data.validation_items
+    assert splits.dataset_digest == shared_data.dataset_digest
 
 
 def test_nemo_panels_bind_into_job_spec_with_private_answer_references(tmp_path: Path) -> None:
