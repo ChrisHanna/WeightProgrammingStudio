@@ -22,7 +22,8 @@ MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 
 
 def train_reference(*, state_dir: Path, automodel_python: str, seed: int, rows_per_template: int,
-                    compatibility_probe_path: str, sft_steps: int = 32) -> dict[str, Any]:
+                    compatibility_probe_path: str, sft_steps: int = 32, weight_edit_target_step: float = 0.01,
+                    preservation_policy_version: int = 2) -> dict[str, Any]:
     task = reference_task(rows_per_template=rows_per_template)
     service = GymStudioService(state_dir=state_dir)
     base = transformers_model(MODEL_ID, MODEL_REVISION, device="cuda:0", precision="bfloat16",
@@ -61,7 +62,8 @@ def train_reference(*, state_dir: Path, automodel_python: str, seed: int, rows_p
     edited_run = lifecycle.run({"run_id": "json-reference-weight-edit", "task": "reference_invoice_extraction@1",
         "model": base.identity.adapter_id + "@1", "trainer": "weight_edit.generic@1", "evaluator": "public@1",
         "dataset_digest": run["dataset"]["dataset_digest"],
-        "recipe": {"method": "weight_edit", "edit_method": "legacy_key_value_v1", "seed": seed, "target_step": 0.01,
+        "recipe": {"method": "weight_edit", "edit_method": "legacy_key_value_v1", "seed": seed, "target_step": weight_edit_target_step,
+                   "preservation_policy_version": preservation_policy_version,
                    "retention_nullspace_weight": 20.0, "max_sequence_tokens": 512, "max_training_tokens": 16384,
                    "max_keys": 4096, "preservation_source": "public_train", "max_preservation_logit_drift": 0.25,
                    "preservation_interactions": preservation}})
@@ -79,10 +81,11 @@ def train_reference(*, state_dir: Path, automodel_python: str, seed: int, rows_p
 
 
 def main() -> None:
-    if len(sys.argv) != 7:
-        raise ValueError("expected state directory, AutoModel Python, seed, rows, compatibility probe, and SFT steps")
+    if len(sys.argv) != 9:
+        raise ValueError("expected state directory, AutoModel Python, seed, rows, compatibility probe, SFT steps, edit step, and preservation version")
     result = train_reference(state_dir=Path(sys.argv[1]), automodel_python=sys.argv[2],
-                             seed=int(sys.argv[3]), rows_per_template=int(sys.argv[4]), compatibility_probe_path=sys.argv[5], sft_steps=int(sys.argv[6]))
+                             seed=int(sys.argv[3]), rows_per_template=int(sys.argv[4]), compatibility_probe_path=sys.argv[5],
+                             sft_steps=int(sys.argv[6]), weight_edit_target_step=float(sys.argv[7]), preservation_policy_version=int(sys.argv[8]))
     print("NF_JSON_PROOF_TRAINING=" + json.dumps(result, allow_nan=False, separators=(",", ":")))
 
 

@@ -11,6 +11,7 @@ from typing import Any, Callable
 from .execution_runner import run_local_worker
 from .gym_artifacts import CandidateRef
 from .gym_job import GymJobError
+from .gym_job import is_finite_number
 from .gym_service import GymStudioService, _document_digest
 from .json_frontier_model import JsonFrontierModel
 from .json_proof_loop import compare_synthetic_holdout
@@ -25,10 +26,16 @@ def run_json_proof(
     output_dir: str | Path, *, gpu_python: str, automodel_python: str, seed: int = 17,
     rows_per_template: int = 32, frontier_factory: Callable[[], Any] | None = None,
     compatibility_probe_path: str | Path | None = None, sft_steps: int = 32,
+    weight_edit_target_step: float = 0.01,
+    preservation_policy_version: int = 2,
 ) -> dict[str, Any]:
     if (type(seed) is not int or seed < 0 or type(rows_per_template) is not int
         or not 1 <= rows_per_template <= 64 or type(sft_steps) is not int or not 1 <= sft_steps <= 256):
         raise GymJobError("synthetic proof seed or row count is invalid")
+    if not is_finite_number(weight_edit_target_step) or not 0 < weight_edit_target_step <= 1:
+        raise GymJobError("weight-edit target step is invalid")
+    if type(preservation_policy_version) is not int or preservation_policy_version not in {1, 2}:
+        raise GymJobError("preservation policy version must be 1 or 2")
     for interpreter in (gpu_python, automodel_python):
         if not isinstance(interpreter, str) or not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise GymJobError("synthetic proof requires absolute existing GPU and AutoModel interpreters")
@@ -50,7 +57,7 @@ def run_json_proof(
                         "TRANSFORMERS_OFFLINE": "1", "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2",
                         "CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
     trained = run_local_worker([gpu_python, "-m", "neural_foundry.json_proof_train_worker", str(output / "training_state"),
-                                automodel_python, str(seed), str(rows_per_template), str(probe_path), str(sft_steps)], cwd=output, timeout_seconds=2400,
+                                automodel_python, str(seed), str(rows_per_template), str(probe_path), str(sft_steps), str(weight_edit_target_step), str(preservation_policy_version)], cwd=output, timeout_seconds=2400,
                                cleanup_descendants=True, env=environment)
     if trained.returncode != 0 or trained.timed_out:
         raise GymJobError(f"synthetic proof training failed; stderr digest {trained.receipt['stderr_digest']}")
@@ -107,12 +114,16 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--rows-per-template", type=int, default=32)
     parser.add_argument("--sft-steps", type=int, default=32)
+    parser.add_argument("--weight-edit-target-step", type=float, default=0.01)
+    parser.add_argument("--preservation-policy", type=int, choices=(1, 2), default=2)
     parser.add_argument("--compatibility-probe")
     parser.add_argument("--frontier", action="store_true")
     args = parser.parse_args()
     report = run_json_proof(args.output_dir, gpu_python=args.gpu_python, automodel_python=args.automodel_python,
                             seed=args.seed, rows_per_template=args.rows_per_template, sft_steps=args.sft_steps,
                             compatibility_probe_path=args.compatibility_probe,
+                            weight_edit_target_step=args.weight_edit_target_step,
+                            preservation_policy_version=args.preservation_policy,
                             frontier_factory=JsonFrontierModel.from_env if args.frontier else None)
     print(json.dumps({"complete": report["complete"], "report_digest": report["report_digest"]}))
     return 0 if report["complete"] else 1

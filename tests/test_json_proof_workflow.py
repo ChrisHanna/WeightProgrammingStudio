@@ -76,6 +76,7 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
 
     def train(command, *, env, **kwargs):
         assert "NF_FRONTIER_API_KEY" not in env
+        assert command[-2:] == ["0.01", "2"]
         return SimpleNamespace(returncode=0, timed_out=False, receipt={},
                                stdout=b"NF_JSON_PROOF_TRAINING=" + json.dumps(result).encode() + b"\n")
 
@@ -109,6 +110,17 @@ def test_missing_frontier_fails_before_creating_output(tmp_path, monkeypatch) ->
                           frontier_factory=JsonFrontierModel.from_env)
     assert not output.exists()
 
+
+def test_retained_failed_public_recipes_do_not_claim_holdout_scores():
+    path = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "weight-edit-three-way-preservation-failures.json"
+    report = json.loads(path.read_bytes())
+    assert report["evidence_digest"] == _document_digest({key: value for key, value in report.items() if key != "evidence_digest"})
+    assert report["three_way_complete"] is False and report["holdout_evaluated"] is False
+    assert report["scores"] is None and report["release_authorized"] is False
+    assert [trial["target_step"] for trial in report["trials"]] == [0.01, 0.001, 0.0001]
+    assert all(trial["limit"] == 0.25 and trial["complete"] is False for trial in report["trials"])
+    assert report["trials"][0]["measured_drift"] is None
+    assert report["trials"][1]["measured_drift"] == 0.5625 and report["trials"][2]["measured_drift"] == 0.4375
 
 def test_real_gpu_workflow_with_explicit_frontier_stub(tmp_path) -> None:
     gpu_python = os.environ.get("NF_GPU_PYTHON")

@@ -13,7 +13,7 @@ import torch
 from ...gym_artifacts import CandidateRef
 from ...gym_adapters import _resolve_training_checkpoint
 from ...gym_job import GymJobError, gym_job_from_document, validate_task_instance
-from ...gym_service import _document_digest
+from ...gym_service import _document_digest, _wire_document
 from ...prompt_rendering import PromptRenderer
 from ...provenance import parse_strict_json
 from ...vllm_container_adapter import VllmCandidateServer
@@ -27,6 +27,7 @@ from .methods import LegacyKeyValueEdit
 from .numerics import deterministic_execution, working_weight
 from .probe import record_portability_probes
 from .serving_probes import verify_portability
+from .preservation import calibrate_one_ulp, float32_logits_of_exact_weights, metrics, verify_v2
 
 
 def preservation_logits(loaded, interactions):
@@ -126,17 +127,43 @@ def train_payload(payload: dict[str, Any], serving_factory=None) -> CandidateRef
     sites, site, delta, evidence = calculate_edit(loaded, job, payload["examples"], recipe)
     if sites.digest != probe["site_map_digest"]:
         raise GymJobError("worker site map differs from the qualified model")
+    calibration, float32_before = None, None
+    if recipe.get("preservation_policy_version", 1) == 2:
+        calibration = calibrate_one_ulp(loaded, site, recipe["preservation_interactions"])
+        calibration_path = Path(payload["output_dir"]).parent / "preservation-calibration-v2.json"
+        frozen = _wire_document(calibration)
+        if calibration_path.exists():
+            if calibration_path.read_bytes() != frozen:
+                raise GymJobError("preservation calibration differs from the previously frozen evidence")
+        else:
+            with calibration_path.open("xb") as stream:
+                stream.write(frozen)
+        float32_before = float32_logits_of_exact_weights(loaded, recipe["preservation_interactions"])
     edited = apply(loaded, {site.tensor_name: delta}, sites=sites, method="legacy_key_value_v1", settings=recipe)
     if edited.receipt["edited_tensors"] != [site.tensor_name]:
         raise GymJobError("edit did not produce exactly one effective tensor change")
     after = preservation_logits(loaded, recipe["preservation_interactions"])
     drift = max(float((left - right).abs().max()) for left, right in zip(before, after, strict=True))
-    if drift > recipe["max_preservation_logit_drift"]:
-        raise GymJobError("candidate violates the frozen preservation-logit drift bound")
+    preservation_verification = None
+    if calibration is not None:
+        precise = metrics(float32_before, float32_logits_of_exact_weights(loaded, recipe["preservation_interactions"]))
+        behaviour = metrics(before, after)
+        preservation_verification = verify_v2(precise, behaviour, calibration)
+        verification_path = Path(payload["output_dir"]).parent / "preservation-verification-v2.json"
+        with verification_path.open("xb") as stream:
+            stream.write(_wire_document(preservation_verification))
+        if not preservation_verification["passed"]:
+            raise GymJobError(f"candidate violates frozen preservation v2: {json.dumps(preservation_verification, allow_nan=False)}")
+    elif drift > recipe["max_preservation_logit_drift"]:
+        raise GymJobError(f"candidate violates the frozen preservation-logit drift bound: measured={drift}, limit={recipe['max_preservation_logit_drift']}")
     edited = replace(edited, receipt={**edited.receipt, **evidence, "preservation_max_logit_drift": drift,
                                      "trainer_implementation_digest": payload["implementation_digest"],
                                      "compatibility_probe_digest": probe["probe_digest"], "job_digest": job.digest,
                                      "scorer": job.scorer.to_document(), "dataset_digest": request["dataset_digest"]})
+    if calibration is not None:
+        edited = replace(edited, receipt={**edited.receipt, "preservation_policy_version": 2,
+                                          "preservation_calibration": calibration,
+                                          "preservation_verification": preservation_verification})
     portability = record_portability_probes(loaded)
     directory = Path(payload["output_dir"])
     reference = save(edited, directory, model_id=base.model_id, request_digest=request["training_request_digest"],

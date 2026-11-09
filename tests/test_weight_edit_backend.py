@@ -41,6 +41,11 @@ def test_recipe_requires_public_preservation_and_explicit_budgets():
                    {"preservation_interactions": []}, {"edit_method": "unknown"}):
         with pytest.raises(GymJobError):
             validate_recipe({**recipe, **change})
+    assert validate_recipe({**recipe, "preservation_policy_version": 2})["preservation_policy_version"] == 2
+    with pytest.raises(GymJobError, match="frozen"):
+        validate_recipe({**recipe, "preservation_policy_version": 2, "max_preservation_logit_drift": 1.0})
+    with pytest.raises(GymJobError, match="version"):
+        validate_recipe({**recipe, "preservation_policy_version": 3})
 
 
 def test_teacher_forcing_preserves_served_prompt_tokens_and_shifts_targets():
@@ -165,3 +170,19 @@ def test_trainer_calculates_exports_and_seals_execution_receipt(tmp_path, numeri
     receipt = json.loads((tmp_path / "trained" / "training_receipt.json").read_bytes())
     assert receipt["worker_execution"]["returncode"] == 0
     assert receipt["preservation_max_logit_drift"] <= recipe["max_preservation_logit_drift"]
+    receipt_path = tmp_path / "trained" / "training_receipt.json"
+    original_receipt = receipt_path.read_bytes()
+    altered = {key: value for key, value in receipt.items() if key != "worker_execution"}
+    receipt_path.write_text(json.dumps(altered))
+    try:
+        with pytest.raises(GymJobError, match="execution receipt"):
+            trainer.load(request, base, tmp_path / "trained")
+    finally:
+        receipt_path.write_bytes(original_receipt)
+    def failed_run(*args, **kwargs):
+        return WorkerResult(1, False, {"kind": "nf_local_worker_receipt_v1", "returncode": 1, "timed_out": False,
+                                      "stderr_digest": "sha256:" + "c" * 64}, b"", b"worker preflight failed")
+    monkeypatch.setattr(adapter, "run_local_worker", failed_run)
+    with pytest.raises(GymJobError, match="local diagnostics"):
+        trainer.train(request, examples, base, tmp_path / "failed-training")
+    assert (tmp_path / "weight-edit-worker-failure" / "stderr.txt").read_bytes() == b"worker preflight failed"

@@ -38,6 +38,10 @@ class WeightEditBackendConfig:
 def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     fields = {"method", "edit_method", "seed", "target_step", "retention_nullspace_weight", "max_sequence_tokens",
               "max_training_tokens", "max_keys", "preservation_interactions", "preservation_source", "max_preservation_logit_drift"}
+    if "preservation_policy_version" in recipe:
+        fields.add("preservation_policy_version")
+        if type(recipe["preservation_policy_version"]) is not int or recipe["preservation_policy_version"] not in {1, 2}:
+            raise GymJobError("preservation policy version must be explicitly 1 or 2")
     if not isinstance(recipe, Mapping) or set(recipe) != fields or recipe.get("method") != "weight_edit" or recipe.get("edit_method") != "legacy_key_value_v1":
         raise GymJobError("weight-edit recipe has unsupported methods or fields")
     if type(recipe["seed"]) is not int or recipe["seed"] < 0:
@@ -51,6 +55,8 @@ def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise GymJobError("weight-edit retention weight is invalid")
     if not is_finite_number(recipe["max_preservation_logit_drift"]) or recipe["max_preservation_logit_drift"] < 0:
         raise GymJobError("weight-edit preservation drift bound is invalid")
+    if recipe.get("preservation_policy_version", 1) == 2 and recipe["max_preservation_logit_drift"] != 0.25:
+        raise GymJobError("v2 preservation thresholds are frozen and cannot be changed by the recipe")
     if recipe["preservation_source"] != "public_train":
         raise GymJobError("weight-edit preservation cannot use holdout or selection validation")
     panel = recipe["preservation_interactions"]
@@ -72,7 +78,7 @@ def weight_edit_trainer(config: WeightEditBackendConfig, job: GymJobSpec) -> Tra
         "adapter": sha256_file(__file__), "probe": probe["probe_digest"], "config": config.document(), "job": job.digest,
         "worker": sha256_file(worker) if worker.is_file() else None,
         "helpers": {name: sha256_file(Path(__file__).parent / name) for name in
-                ("apply.py", "capture.py", "demonstrations.py", "loader.py", "numerics.py", "methods/base.py", "serving_probes.py", "near_ties.py")},
+                ("apply.py", "capture.py", "demonstrations.py", "loader.py", "numerics.py", "methods/base.py", "serving_probes.py", "near_ties.py", "preservation.py")},
     }))
 
     def preflight(request: Mapping[str, Any], base: CandidateRef) -> dict[str, Any]:
@@ -86,10 +92,13 @@ def weight_edit_trainer(config: WeightEditBackendConfig, job: GymJobSpec) -> Tra
             or probe.get("portability_calibration", {}).get("context_tokens") != request.get("inference_config", {}).get("context_tokens")
             or request.get("base_reference") != vars(base)):
             raise GymJobError("weight-edit request base differs from the qualified frozen model")
-        return validate_recipe(request["recipe"])
+        recipe = validate_recipe(request["recipe"])
+        if recipe.get("preservation_policy_version", 1) == 2 and request["inference_config"]["precision"] != "bfloat16":
+            raise GymJobError("preservation v2 requires the declared bf16 serving precision")
+        return recipe
 
     def load(request: Mapping[str, Any], base: CandidateRef, directory: Path, *, require_execution: bool = True) -> CandidateRef:
-        preflight(request, base)
+        recipe = preflight(request, base)
         receipt = parse_strict_json((directory / "training_receipt.json").read_bytes())
         if (receipt.get("training_request_digest") != request["training_request_digest"]
             or receipt.get("trainer_implementation_digest") != identity.implementation_digest
@@ -97,9 +106,17 @@ def weight_edit_trainer(config: WeightEditBackendConfig, job: GymJobSpec) -> Tra
             or receipt.get("identity_probes", {}).get("kind") != "nf_vllm_weight_identity_v2"
             or receipt.get("portability_verification", {}).get("verified") is not True):
             raise GymJobError("weight-edit receipt differs from its frozen training request")
-            if require_execution and (receipt.get("worker_execution", {}).get("returncode") != 0
-                          or receipt.get("worker_execution", {}).get("timed_out") is not False):
-                raise GymJobError("weight-edit worker execution receipt is missing or incomplete")
+        if require_execution and (receipt.get("worker_execution", {}).get("returncode") != 0
+                                  or receipt.get("worker_execution", {}).get("timed_out") is not False):
+            raise GymJobError("weight-edit worker execution receipt is missing or incomplete")
+        if recipe.get("preservation_policy_version", 1) == 2:
+            from .preservation import verify_v2
+            verification = receipt.get("preservation_verification", {})
+            calibration = receipt.get("preservation_calibration", {})
+            if (calibration.get("base_digest") != request["loaded_base"]["state_digest"]
+                or calibration.get("panel_digest") != _document_digest({"source": "public_train", "interactions": recipe["preservation_interactions"]})
+                or not verify_v2(verification.get("float32", {}), verification.get("bf16", {}), calibration)["passed"]):
+                raise GymJobError("weight-edit v2 preservation receipt failed verification")
         manifest = read_candidate_manifest(directory, request["training_request_digest"])
         if manifest["kind"] != "weight_edit" or manifest["base_digest"] != base.base_digest:
             raise GymJobError("weight-edit artifact lineage differs from the base")
@@ -131,7 +148,12 @@ def weight_edit_trainer(config: WeightEditBackendConfig, job: GymJobSpec) -> Tra
                                       cwd=directory.parent, timeout_seconds=config.timeout_seconds, env=environment,
                                       cleanup_descendants=True)
         if result.returncode != 0 or result.timed_out:
-            raise GymJobError(f"weight-edit worker failed; stderr digest {result.receipt['stderr_digest']}")
+            failure = directory.parent / "weight-edit-worker-failure"
+            failure.mkdir(exist_ok=True)
+            (failure / "receipt.json").write_bytes(_wire_document(result.receipt))
+            (failure / "stderr.txt").write_bytes(result.stderr[-65536:])
+            (failure / "stdout.txt").write_bytes(result.stdout[-65536:])
+            raise GymJobError(f"weight-edit worker failed; stderr digest {result.receipt['stderr_digest']}; local diagnostics {failure}")
         output = parse_strict_json(result.stdout)
         previous = load(request, base, directory, require_execution=False)
         if (output.get("kind") != "nf_weight_edit_worker_result_v1"
