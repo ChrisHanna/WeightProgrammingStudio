@@ -182,6 +182,17 @@ def evidence_grade_for_model(model: Any) -> str:
     return "fixture_synthetic" if "mini" in name or "fixture" in name or name.startswith("nf/") else "unverified_model"
 
 
+def inference_identity_digest(model: Any) -> str:
+    tokenizer = getattr(model, "tokenizer", None)
+    state = {"config": getattr(model, "config", None), "tokenizer": None if tokenizer is None else {
+        "type": f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}",
+        "vocab": getattr(tokenizer, "vocab", None),
+        "merges": [" ".join(pair) for pair, _ in sorted(getattr(tokenizer, "bpe_ranks", {}).items(), key=lambda row: row[1])],
+        "byte_level": getattr(tokenizer, "byte_level", None), "added_tokens": getattr(tokenizer, "added_tokens", None),
+    }}
+    return "sha256:" + hashlib.sha256(json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":")).encode()).hexdigest()
+
+
 def write_artifact_manifest(
     directory: str | Path,
     *,

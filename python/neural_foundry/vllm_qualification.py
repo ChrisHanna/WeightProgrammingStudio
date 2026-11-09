@@ -15,6 +15,7 @@ vLLM is run from its own interpreter, so it doesn't need to be importable in thi
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import signal
@@ -101,12 +102,25 @@ def _resolve_interpreter(vllm_python: str | Path | None) -> Path:
 
 
 def _probe_runtime(interpreter: Path, pinned_version: str) -> dict[str, Any]:
-    """Read versions and the GPU from the vLLM interpreter, and refuse anything but the pinned setup."""
+    """Probe pinned versions and prove the vLLM interpreter can execute a synchronized CUDA kernel."""
     code = (
         "import json, importlib.metadata as m, torch\n"
         "gpu = torch.cuda.is_available()\n"
+        "gpu_error = ''\n"
+        "gpu_executable = False\n"
+        "if gpu:\n"
+        " try:\n"
+        "  left = torch.ones((2, 2), device='cuda:0', dtype=torch.float32)\n"
+        "  right = torch.ones((2, 2), device='cuda:0', dtype=torch.float32)\n"
+        "  output = left @ right\n"
+        "  torch.cuda.synchronize(0)\n"
+        "  gpu_executable = bool(torch.equal(output, torch.full((2, 2), 2.0, device='cuda:0')))\n"
+        " except Exception as exc:\n"
+        "  gpu_error = type(exc).__name__ + ': ' + str(exc)\n"
         "print('NFPROBE' + json.dumps({'vllm': m.version('vllm'), 'torch': torch.__version__,"
-        " 'gpu': torch.cuda.get_device_name(0) if gpu else None}))\n"
+        " 'gpu': torch.cuda.get_device_name(0) if gpu else None,"
+        " 'gpu_executable': gpu_executable, 'gpu_error': gpu_error,"
+        " 'torch_arch_list': torch.cuda.get_arch_list() if gpu else []}))\n"
     )
     done = subprocess.run(
         [str(interpreter), "-c", code], capture_output=True, text=True, check=False, timeout=180,
@@ -124,6 +138,11 @@ def _probe_runtime(interpreter: Path, pinned_version: str) -> dict[str, Any]:
         )
     if not info["gpu"]:
         raise VllmQualificationFailure("GPU_UNAVAILABLE", "vLLM interpreter reports no CUDA device")
+    if not info["gpu_executable"]:
+        raise VllmQualificationFailure(
+            "GPU_KERNEL_UNAVAILABLE",
+            f"vLLM interpreter sees {info['gpu']} but cannot execute CUDA kernels: {info['gpu_error']}",
+        )
     return info
 
 
@@ -289,8 +308,30 @@ def _reference(adapter: serving.TransformersAdapter, prompt: str) -> _Reference:
     return _Reference(prompt_ids, tuple(tokens), tuple(logprobs))
 
 
+def _parity_input_problem(served: _Completion, reference: _Reference) -> str | None:
+    lengths = [len(served.token_ids), len(served.logprobs), len(served.top_logprobs), len(reference.token_ids), len(reference.logprobs)]
+    if not lengths[0] or len(set(lengths)) != 1:
+        return "incomplete or mismatched completion lengths"
+    for index, expected in enumerate(reference.logprobs):
+        if expected.ndim != 1 or not bool(torch.isfinite(expected).all()):
+            return "nonfinite or malformed reference scores"
+        vocab_size = expected.numel()
+        tokens = [served.token_ids[index], reference.token_ids[index], *served.top_logprobs[index]]
+        if any(type(token) is not int or not 0 <= token < vocab_size for token in tokens):
+            return "out-of-range or malformed token IDs"
+        if len(served.top_logprobs[index]) != TOP_LOGPROBS or served.token_ids[index] not in served.top_logprobs[index]:
+            return "malformed top_logprobs"
+        values = [served.logprobs[index], *served.top_logprobs[index].values()]
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value > 0 for value in values):
+            return "nonfinite or invalid served log probabilities"
+    return None
+
+
 def _compare(served: _Completion, reference: _Reference, *, prompt: str, label: str) -> tuple[float, list[str]]:
     """Return the largest |logprob difference| while the contexts match, and any parity problems."""
+    invalid = _parity_input_problem(served, reference)
+    if invalid is not None:
+        return math.inf, [f"{label}: {invalid}"]
     if served.prompt_ids != reference.prompt_ids:
         return 0.0, [f"{label}: tokenizers differ on {prompt!r}: {served.prompt_ids} vs {reference.prompt_ids}"]
     worst = 0.0
@@ -314,6 +355,9 @@ def _compare(served: _Completion, reference: _Reference, *, prompt: str, label: 
 
 
 def _first_position_distance(served: _Completion, reference: _Reference) -> float:
+    invalid = _parity_input_problem(served, reference)
+    if invalid is not None or served.prompt_ids != reference.prompt_ids:
+        raise VllmQualificationFailure("INVALID_PARITY_EVIDENCE", invalid or "tokenizers differ")
     return max(abs(value - float(reference.logprobs[0][token])) for token, value in served.top_logprobs[0].items())
 
 

@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 import subprocess
+import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -57,18 +61,175 @@ def _tensor_bytes_digest(tensor: torch.Tensor) -> str:
 
 @dataclass(frozen=True)
 class HardwareGpuInventory:
-    """Probed GPU hardware and Torch runtime availability."""
+    """Probed GPU hardware, runtime visibility, and executable kernel support."""
 
     torch_cuda_available: bool
     torch_device_count: int
     nvidia_smi_devices: tuple[str, ...]
     driver_version: str
+    torch_arch_list: tuple[str, ...]
+    kernel_probe_verified: bool
+    kernel_probe_error: str
+
+    @property
+    def cuda_executable(self) -> bool:
+        return self.torch_cuda_available and self.torch_device_count > 0 and self.kernel_probe_verified
+
+
+@dataclass(frozen=True)
+class TrainingComputePlacement:
+    device: str
+    dtype: Literal["f32", "f64"]
+    reason: str
+
+
+@dataclass(frozen=True)
+class ExternalGpuRuntime:
+    python_executable: str
+    torch_version: str
+    device_name: str
+    torch_arch_list: tuple[str, ...]
+    total_memory_bytes: int = 0
+    free_memory_bytes: int = 0
+    device: str = "cuda:0"
+
+
+def probe_external_gpu_runtime(python_executable: str | Path, *, device: str = "cuda:0") -> ExternalGpuRuntime:
+    """Verify a separate local interpreter before authorizing GPU training there."""
+    path = Path(python_executable).expanduser()
+    if not path.is_file():
+        raise GpuDispatchError("GPU_RUNTIME_UNAVAILABLE", f"GPU interpreter is missing: {path}")
+    if not isinstance(device, str) or not device.startswith("cuda:") or not device[5:].isascii() or not device[5:].isdecimal() or (len(device[5:]) > 1 and device[5] == "0"):
+        raise GpuDispatchError("INVALID_GPU_DEVICE", str(device))
+    code = (
+        "import json, torch\n"
+        f"device={device!r}\nindex=int(device.split(':')[1])\n"
+        "ok=False\n"
+        "error=''\n"
+        "try:\n"
+        " a=torch.ones((2,2),device=device,dtype=torch.float32)\n"
+        " b=a@a\n"
+        " torch.cuda.synchronize(index)\n"
+        " ok=bool(torch.equal(b,torch.full((2,2),2.0,device=device)))\n"
+        " free_memory,total_memory=torch.cuda.mem_get_info(index)\n"
+        "except Exception as exc:\n"
+        " error=type(exc).__name__+': '+str(exc)\n"
+        " free_memory,total_memory=0,0\n"
+        "print('NF_GPU_PROBE'+json.dumps({\"torch\":torch.__version__,"
+        "\"available\":torch.cuda.is_available(),"
+        "\"name\":torch.cuda.get_device_name(index) if torch.cuda.is_available() else None,"
+        "\"arch_list\":torch.cuda.get_arch_list() if torch.cuda.is_available() else [],"
+        "\"free_memory_bytes\":free_memory,\"total_memory_bytes\":total_memory,"
+        "\"ok\":ok,\"error\":error}))\n"
+    )
+    completed = subprocess.run(
+        [str(path), "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+    )
+    lines = [line for line in completed.stdout.splitlines() if line.startswith("NF_GPU_PROBE")]
+    if completed.returncode != 0 or not lines:
+        detail = completed.stderr.strip()[-500:]
+        raise GpuDispatchError(
+            "GPU_RUNTIME_UNAVAILABLE",
+            f"GPU interpreter probe exited {completed.returncode}: {detail}",
+        )
+    result: dict[str, Any] = json.loads(lines[-1].removeprefix("NF_GPU_PROBE"))
+    if not result.get("available"):
+        raise GpuDispatchError("GPU_DEVICE_UNAVAILABLE", "GPU interpreter reports no CUDA device")
+    if not result.get("ok"):
+        raise GpuDispatchError(
+            "GPU_KERNEL_UNAVAILABLE",
+            f"GPU interpreter cannot execute CUDA: {result.get('error', '')}",
+        )
+    return ExternalGpuRuntime(
+        python_executable=str(path),
+        torch_version=str(result["torch"]),
+        device_name=str(result["name"]),
+        torch_arch_list=tuple(str(item) for item in result["arch_list"]),
+        total_memory_bytes=int(result.get("total_memory_bytes", 0)),
+        free_memory_bytes=int(result.get("free_memory_bytes", 0)),
+        device=device,
+    )
+
+
+def discover_external_gpu_runtime(configured: str | Path | None = None, *, device: str | None = None) -> ExternalGpuRuntime | None:
+    """Return an explicitly configured or conventional local GPU runtime when executable."""
+    explicit = configured or os.environ.get("NF_GPU_PYTHON")
+    selected_device = device or os.environ.get("NF_GPU_DEVICE", "cuda:0")
+    if explicit:
+        return probe_external_gpu_runtime(explicit, device=selected_device)
+    candidates = (
+        Path.home() / ".venvs" / "neural-foundry-gpu" / "bin" / "python",
+        Path.home() / ".venvs" / "neural-foundry-gpu" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                return probe_external_gpu_runtime(candidate, device=selected_device)
+            except GpuDispatchError:
+                return None
+    return None
+
+
+def select_training_compute(requested_device: str = "auto") -> TrainingComputePlacement:
+    """Select GPU for gradient work only after an executable-kernel preflight."""
+    requested_index: int | None = None
+    if requested_device not in {"auto", "cpu"}:
+        if not isinstance(requested_device, str) or not requested_device.startswith("cuda:"):
+            raise GpuDispatchError("INVALID_TRAINING_DEVICE", str(requested_device))
+        index_text = requested_device.removeprefix("cuda:")
+        if (
+            not index_text
+            or not index_text.isascii()
+            or not index_text.isdecimal()
+            or (len(index_text) > 1 and index_text.startswith("0"))
+        ):
+            raise GpuDispatchError("INVALID_GPU_DEVICE", requested_device)
+        requested_index = int(index_text)
+    inventory = probe_gpu_hardware()
+    if requested_device == "auto":
+        if inventory.cuda_executable:
+            return TrainingComputePlacement("cuda:0", "f32", "verified_cuda_kernel")
+        reason = inventory.kernel_probe_error or "CUDA unavailable"
+        return TrainingComputePlacement("cpu", "f64", f"cpu_fallback: {reason}")
+    if requested_device == "cpu":
+        return TrainingComputePlacement("cpu", "f64", "cpu_requested")
+    if requested_index is not None:
+        if not inventory.cuda_executable:
+            raise GpuDispatchError(
+                "GPU_KERNEL_UNAVAILABLE",
+                f"CUDA training requested but no kernel can execute: {inventory.kernel_probe_error}",
+            )
+        if requested_index >= inventory.torch_device_count:
+            raise GpuDispatchError("INVALID_GPU_DEVICE", requested_device)
+        return TrainingComputePlacement(requested_device, "f32", "verified_cuda_kernel")
+    raise GpuDispatchError("INVALID_TRAINING_DEVICE", requested_device)
+
+
+def _probe_cuda_kernel() -> tuple[bool, str]:
+    """Synchronize a real operation so unsupported runtime/device architectures fail closed."""
+    try:
+        left = torch.ones((2, 2), device="cuda:0", dtype=torch.float32)
+        right = torch.ones((2, 2), device="cuda:0", dtype=torch.float32)
+        output = left @ right
+        torch.cuda.synchronize(0)
+        if not torch.equal(output, torch.full((2, 2), 2.0, device="cuda:0")):
+            return False, "CUDA smoke kernel returned an unexpected result"
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, ""
 
 
 def probe_gpu_hardware() -> HardwareGpuInventory:
-    """Probes both PyTorch CUDA runtime and system NVIDIA driver inventory."""
+    """Probe driver visibility and prove that the installed Torch build can execute on the GPU."""
     cuda_ok = bool(torch.cuda.is_available())
     dev_count = int(torch.cuda.device_count()) if cuda_ok else 0
+    arch_list = tuple(torch.cuda.get_arch_list()) if cuda_ok else ()
+    kernel_ok, kernel_error = _probe_cuda_kernel() if cuda_ok and dev_count else (False, "CUDA unavailable")
     smi_devices: list[str] = []
     driver = "unavailable"
     try:
@@ -97,6 +258,9 @@ def probe_gpu_hardware() -> HardwareGpuInventory:
         torch_device_count=dev_count,
         nvidia_smi_devices=tuple(smi_devices),
         driver_version=driver,
+        torch_arch_list=arch_list,
+        kernel_probe_verified=kernel_ok,
+        kernel_probe_error=kernel_error,
     )
 
 
@@ -309,11 +473,18 @@ def dispatch_weight_operation(
         )
 
     wants_cuda = requested_device.startswith("cuda")
-    if wants_cuda and not torch.cuda.is_available():
-        raise GpuDispatchError(
-            "GPU_DEVICE_UNAVAILABLE",
-            f"requested device '{requested_dtype}' on '{requested_device}', but torch.cuda.is_available() is False; refusing silent CPU fallback",
-        )
+    if wants_cuda:
+        inventory = probe_gpu_hardware()
+        if not inventory.torch_cuda_available:
+            raise GpuDispatchError(
+                "GPU_DEVICE_UNAVAILABLE",
+                f"requested {requested_device!r}, but no CUDA device is visible; refusing silent CPU fallback",
+            )
+        if not inventory.kernel_probe_verified:
+            raise GpuDispatchError(
+                "GPU_KERNEL_UNAVAILABLE",
+                f"CUDA is visible but no kernel can execute on it: {inventory.kernel_probe_error}",
+            )
 
     target_torch_dtype = _DTYPE_TO_TORCH[requested_dtype]
     accum_torch_dtype = torch.float32 if accumulation_dtype == "f32" else torch.float64
@@ -470,6 +641,16 @@ class GpuResourceScheduler:
         self.device_count = device_count
         self.vram_capacity_bytes_per_device = vram_capacity_bytes_per_device
         self._active_leases: dict[str, GpuLease] = {}
+        self._lock = threading.RLock()
+
+    def _expire_leases(self, now_ns: int) -> None:
+        expired = [
+            lease_id
+            for lease_id, lease in self._active_leases.items()
+            if now_ns >= lease.expires_ns
+        ]
+        for lease_id in expired:
+            del self._active_leases[lease_id]
 
     def acquire_lease(
         self,
@@ -484,45 +665,48 @@ class GpuResourceScheduler:
                 "INVALID_GPU_DEVICE",
                 f"device_index {device_index} out of range (0..{self.device_count})",
             )
-        if reserved_vram_bytes <= 0 or ttl_ms <= 0:
+        if not holder.strip() or reserved_vram_bytes <= 0 or ttl_ms <= 0:
             raise GpuDispatchError(
                 "INVALID_LEASE_REQUEST",
-                "reserved_vram_bytes and ttl_ms must be positive",
+                "holder must be non-empty and reserved_vram_bytes and ttl_ms must be positive",
             )
-        used = sum(
-            lease.reserved_vram_bytes
-            for lease in self._active_leases.values()
-            if lease.device_index == device_index
-        )
-        if used + reserved_vram_bytes > self.vram_capacity_bytes_per_device:
-            raise GpuDispatchError(
-                "GPU_VRAM_EXHAUSTED",
-                f"device {device_index} has {used} bytes leased; cannot reserve {reserved_vram_bytes} within {self.vram_capacity_bytes_per_device}",
+        with self._lock:
+            now = time.monotonic_ns()
+            self._expire_leases(now)
+            used = sum(
+                lease.reserved_vram_bytes
+                for lease in self._active_leases.values()
+                if lease.device_index == device_index
             )
-        now = time.monotonic_ns()
-        lease_id = _digest_obj(
-            {
-                "holder": holder,
-                "device_index": device_index,
-                "reserved_vram_bytes": reserved_vram_bytes,
-                "acquired_ns": now,
-            }
-        )
-        lease = GpuLease(
-            lease_id=lease_id,
-            holder=holder,
-            device_index=device_index,
-            reserved_vram_bytes=reserved_vram_bytes,
-            acquired_ns=now,
-            expires_ns=now + ttl_ms * 1_000_000,
-        )
-        self._active_leases[lease_id] = lease
-        return lease
+            if used + reserved_vram_bytes > self.vram_capacity_bytes_per_device:
+                raise GpuDispatchError(
+                    "GPU_VRAM_EXHAUSTED",
+                    f"device {device_index} has {used} bytes leased; cannot reserve {reserved_vram_bytes} within {self.vram_capacity_bytes_per_device}",
+                )
+            lease_id = _digest_obj(
+                {
+                    "holder": holder,
+                    "device_index": device_index,
+                    "reserved_vram_bytes": reserved_vram_bytes,
+                    "acquired_ns": now,
+                }
+            )
+            lease = GpuLease(
+                lease_id=lease_id,
+                holder=holder,
+                device_index=device_index,
+                reserved_vram_bytes=reserved_vram_bytes,
+                acquired_ns=now,
+                expires_ns=now + ttl_ms * 1_000_000,
+            )
+            self._active_leases[lease_id] = lease
+            return lease
 
     def release_lease(self, lease_id: str) -> None:
-        if lease_id not in self._active_leases:
-            raise GpuDispatchError("UNKNOWN_LEASE", f"unknown or already released lease {lease_id}")
-        del self._active_leases[lease_id]
+        with self._lock:
+            lease = self._active_leases.pop(lease_id, None)
+            if lease is None:
+                raise GpuDispatchError("UNKNOWN_LEASE", f"unknown or already released lease {lease_id}")
 
     def record_synchronized_measurement(
         self,
@@ -538,8 +722,12 @@ class GpuResourceScheduler:
         mix_compile_or_transfer_into_inference: bool = False,
     ) -> GpuResourceSample:
         """Records a GPU resource sample, rejecting unsynchronized timings or scope conflation."""
-        if lease.lease_id not in self._active_leases:
-            raise GpuDispatchError("INACTIVE_LEASE", "cannot record measurement for released/expired lease")
+        with self._lock:
+            now = time.monotonic_ns()
+            self._expire_leases(now)
+            active = self._active_leases.get(lease.lease_id)
+            if active is None or active != lease:
+                raise GpuDispatchError("INACTIVE_LEASE", "cannot record measurement for released, expired, or altered lease")
         if not synchronized:
             raise GpuDispatchError(
                 "UNSYNCHRONIZED_GPU_TIMING",

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 import torch
+from neural_foundry import gpu
 from neural_foundry.gpu import (
     GpuDispatchError,
     GpuResourceScheduler,
+    HardwareGpuInventory,
     dispatch_weight_operation,
     export_dlpack_contract,
     import_dlpack_verified,
@@ -18,9 +20,10 @@ def test_gpu_dispatch_dlpack_contract_immutability_and_no_silent_fallback() -> N
     """T108 (`gpu_dispatch`): DLPack view contracts, copy-on-write immutability, and fail-closed GPU/precision checks."""
     hw = probe_gpu_hardware()
     assert isinstance(hw.nvidia_smi_devices, tuple)
+    assert hw.cuda_executable == hw.kernel_probe_verified
 
     # 1. Valid DLPack export/import and bf16 weight operation with f32 accumulation on CPU/available device
-    exec_device = "cuda:0" if hw.torch_cuda_available else "cpu"
+    exec_device = "cuda:0" if hw.cuda_executable else "cpu"
     src = torch.tensor([[1.0, -2.0], [3.5, 0.5]], dtype=torch.bfloat16, device=exec_device)
     src_clone = src.clone()
 
@@ -71,7 +74,7 @@ def test_gpu_dispatch_dlpack_contract_immutability_and_no_silent_fallback() -> N
         import_dlpack_verified(
             capsule,
             contract,
-            expected_device_type="cuda" if hw.torch_cuda_available else "cpu",
+            expected_device_type="cuda" if hw.cuda_executable else "cpu",
             expected_dtype="f32",
             expected_stream_id=3,
             owner_alive=False,
@@ -84,7 +87,7 @@ def test_gpu_dispatch_dlpack_contract_immutability_and_no_silent_fallback() -> N
         import_dlpack_verified(
             capsule2,
             contract2,
-            expected_device_type="cuda" if hw.torch_cuda_available else "cpu",
+            expected_device_type="cuda" if hw.cuda_executable else "cpu",
             expected_dtype="f32",
             expected_stream_id=7,
         )
@@ -113,7 +116,7 @@ def test_gpu_dispatch_dlpack_contract_immutability_and_no_silent_fallback() -> N
         )
     assert exc_info.value.code == "PRECISION_MISMATCH"
 
-    if not hw.torch_cuda_available:
+    if not hw.cuda_executable:
         with pytest.raises(GpuDispatchError) as exc_info:
             dispatch_weight_operation(
                 src_f32,
@@ -122,7 +125,104 @@ def test_gpu_dispatch_dlpack_contract_immutability_and_no_silent_fallback() -> N
                 requested_device="cuda:0",
                 requested_dtype="f32",
             )
-        assert exc_info.value.code == "GPU_DEVICE_UNAVAILABLE"
+        expected = "GPU_KERNEL_UNAVAILABLE" if hw.torch_cuda_available else "GPU_DEVICE_UNAVAILABLE"
+        assert exc_info.value.code == expected
+
+
+def test_gpu_inventory_rejects_visible_but_inexecutable_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_arch_list", lambda: ["sm_90"])
+    monkeypatch.setattr(gpu, "_probe_cuda_kernel", lambda: (False, "no kernel image"))
+    inventory = probe_gpu_hardware()
+
+    assert inventory.torch_cuda_available is True
+    assert inventory.kernel_probe_verified is False
+    assert inventory.cuda_executable is False
+    assert inventory.kernel_probe_error == "no kernel image"
+
+
+def test_training_placement_uses_cuda_only_after_a_kernel_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visible = HardwareGpuInventory(True, 1, ("RTX 5090",), "596.36", ("sm_90",), False, "no kernel")
+    monkeypatch.setattr(gpu, "probe_gpu_hardware", lambda: visible)
+
+    assert gpu.select_training_compute("auto").device == "cpu"
+    with pytest.raises(GpuDispatchError) as failure:
+        gpu.select_training_compute("cuda:0")
+    assert failure.value.code == "GPU_KERNEL_UNAVAILABLE"
+
+    executable = HardwareGpuInventory(True, 1, ("RTX 5090",), "596.36", ("sm_120",), True, "")
+    monkeypatch.setattr(gpu, "probe_gpu_hardware", lambda: executable)
+    assert gpu.select_training_compute("auto").device == "cuda:0"
+
+
+@pytest.mark.parametrize("device", ["cuda:-1", "cuda:", "cuda:01", "cuda:+1"])
+def test_training_placement_rejects_malformed_cuda_indices_before_probe(
+    monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    def forbidden_probe() -> HardwareGpuInventory:
+        pytest.fail("malformed CUDA index must be rejected before hardware probing")
+
+    monkeypatch.setattr(gpu, "probe_gpu_hardware", forbidden_probe)
+    with pytest.raises(GpuDispatchError) as failure:
+        gpu.select_training_compute(device)
+    assert failure.value.code == "INVALID_GPU_DEVICE"
+
+
+def test_external_gpu_runtime_is_kernel_verified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    python_path = tmp_path / "python"
+    python_path.write_text("", encoding="ascii")
+    payload = {
+        "torch": "2.9.1+cu128",
+        "available": True,
+        "name": "NVIDIA GeForce RTX 5090",
+        "arch_list": ["sm_120"],
+        "total_memory_bytes": 32 * 1024**3,
+        "free_memory_bytes": 30 * 1024**3,
+        "ok": True,
+        "error": "",
+    }
+    completed = gpu.subprocess.CompletedProcess(
+        [], 0, stdout="NF_GPU_PROBE" + __import__("json").dumps(payload), stderr=""
+    )
+    monkeypatch.setattr(gpu.subprocess, "run", lambda *args, **kwargs: completed)
+
+    runtime = gpu.probe_external_gpu_runtime(python_path)
+    assert runtime.device_name == "NVIDIA GeForce RTX 5090"
+    assert runtime.torch_arch_list == ("sm_120",)
+    assert runtime.total_memory_bytes == 32 * 1024**3
+    assert runtime.free_memory_bytes == 30 * 1024**3
+
+
+def test_vllm_preflight_rejects_visible_but_inexecutable_cuda(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    from neural_foundry import vllm_qualification
+
+    python_path = tmp_path / "python"
+    python_path.write_text("", encoding="ascii")
+    payload = {
+        "vllm": "0.33.0",
+        "torch": "2.9.1+cu128",
+        "gpu": "NVIDIA GeForce RTX 5090",
+        "gpu_executable": False,
+        "gpu_error": "no kernel image",
+        "torch_arch_list": ["sm_90"],
+    }
+    completed = gpu.subprocess.CompletedProcess(
+        [], 0, stdout="NFPROBE" + __import__("json").dumps(payload), stderr=""
+    )
+    monkeypatch.setattr(vllm_qualification.subprocess, "run", lambda *args, **kwargs: completed)
+
+    with pytest.raises(vllm_qualification.VllmQualificationFailure) as failure:
+        vllm_qualification._probe_runtime(python_path, "0.33.0")
+    assert failure.value.code == "GPU_KERNEL_UNAVAILABLE"
 
 
 def test_gpu_resources_leasing_synchronization_and_memory_scopes() -> None:
@@ -207,3 +307,60 @@ def test_gpu_resources_leasing_synchronization_and_memory_scopes() -> None:
     assert exc_info.value.code == "MEMORY_SCOPE_UNAVAILABLE"
 
     scheduler.release_lease(lease.lease_id)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, 1.0])
+def test_parity_rejects_invalid_logprob_evidence(bad: float) -> None:
+    from neural_foundry import vllm_qualification as qualification
+
+    reference = qualification._Reference((0,), (0,), (torch.log_softmax(torch.ones(5), 0),))
+    served = qualification._Completion((0,), (0,), (bad,), ({index: -1.0 for index in range(5)},))
+    difference, problems = qualification._compare(served, reference, prompt="contract", label="test")
+    assert difference == float("inf") and problems
+    served = qualification._Completion((0,), (-1,), (-1.0,), ({index: -1.0 for index in range(5)},))
+    assert qualification._compare(served, reference, prompt="contract", label="test")[1]
+
+
+def test_first_position_model_separation_allows_valid_greedy_divergence() -> None:
+    from neural_foundry import vllm_qualification as qualification
+
+    reference = qualification._Reference((0,), (1,), (torch.log_softmax(torch.tensor([0., 2., 0., 0., 0.]), 0),))
+    served = qualification._Completion((0,), (0,), (-1.0,), ({index: -1.0 for index in range(5)},))
+    assert qualification._compare(served, reference, prompt="contract", label="test")[1]
+    assert qualification._first_position_distance(served, reference) > 0
+
+
+def test_training_worker_cpu_fallback_does_not_query_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    from neural_foundry import gpu_training_worker
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *_args, **_kwargs: pytest.fail("CPU worker queried CUDA"))
+    assert gpu_training_worker._device_name("cpu") == "cpu"
+
+
+def test_gpu_scheduler_rejects_expired_leases_and_reclaims_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1_000_000_000]
+    monkeypatch.setattr(gpu.time, "monotonic_ns", lambda: now[0])
+    scheduler = GpuResourceScheduler(device_count=1, vram_capacity_bytes_per_device=100)
+    lease = scheduler.acquire_lease(
+        holder="short-job", reserved_vram_bytes=80, ttl_ms=1
+    )
+    now[0] = lease.expires_ns
+
+    with pytest.raises(GpuDispatchError) as failure:
+        scheduler.record_synchronized_measurement(
+            lease=lease,
+            synchronized=True,
+            compile_ns=0,
+            transfer_ns=0,
+            steady_state_inference_ns=1,
+            allocator_peak_bytes=0,
+            device_total_nvml_bytes=None,
+            requested_memory_scope="framework_allocator_peak",
+        )
+    assert failure.value.code == "INACTIVE_LEASE"
+    new_lease = scheduler.acquire_lease(
+        holder="next-job", reserved_vram_bytes=100, ttl_ms=1
+    )
+    assert new_lease.reserved_vram_bytes == 100
