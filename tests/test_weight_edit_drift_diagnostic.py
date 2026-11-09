@@ -7,8 +7,8 @@ from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
     _aggregate_logprobs, _load_training_rosters, _validation_template_scores, expected_answer_logprob,
-    _interactions_by_template, measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen,
-    strength_one_stop_gate)
+    _interactions_by_template, _mlp_writer_site_map, measure_mode, open_sweep_checkpoint, select_top_third,
+    select_validation_screen, strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -146,6 +146,18 @@ def test_validation_interactions_are_grouped_for_each_template():
     assert set(grouped) == {row["family_id"] for row in rows}
     assert sum(map(len, grouped.values())) == len(rows)
     assert all(grouped[row["family_id"]] for row in rows)
+
+
+def test_sweep_site_map_contains_only_verified_mlp_writers(numerical_fixture):
+    from neural_foundry.backends.weight_edit.discover import find_blocks, find_sites
+
+    loaded, task, examples, recipe = numerical_fixture
+    sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                       checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    writers = _mlp_writer_site_map(sites)
+    assert writers.checkpoint_names_verified
+    assert writers.sites
+    assert all(site.role == "residual_write_mlp" for site in writers.sites)
 
 
 def test_validation_results_and_logprobs_are_reported_by_template():

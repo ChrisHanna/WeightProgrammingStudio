@@ -133,6 +133,15 @@ def _interactions_by_template(task, rows: list[dict[str, Any]]) -> dict[str, lis
     return grouped
 
 
+def _mlp_writer_site_map(sites: SiteMap) -> SiteMap:
+    if not sites.checkpoint_names_verified:
+        raise WeightEditInputError("layer sweep requires checkpoint-verified MLP writer sites")
+    writers = tuple(site for site in sites.sites if site.role == "residual_write_mlp")
+    if not writers:
+        raise WeightEditInputError("layer sweep found no MLP writer sites")
+    return SiteMap(writers, checkpoint_names_verified=True)
+
+
 def _aggregate_logprobs(reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
     case_logprobs = [value for report in reports.values() for value in report["case_logprobs"]]
     cases = sum(report["cases"] for report in reports.values())
@@ -598,7 +607,8 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
         raise WeightEditInputError("layer sweep base differs from frozen request")
     sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
                        checkpoint_tensor_names=loaded.checkpoint_tensor_names)
-    all_writers = [site for site in sites.sites if site.role == "residual_write_mlp"]
+    writer_sites = _mlp_writer_site_map(sites)
+    all_writers = list(writer_sites.sites)
     if len(all_writers) < 3:
         raise WeightEditInputError("layer sweep requires at least three discovered MLP write sites")
     writers = all_writers[len(all_writers) // 4:(3 * len(all_writers) + 3) // 4]
@@ -650,7 +660,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     if not failing_examples:
         raise WeightEditInputError("base has no failing approved training examples to target")
     protected_interactions = list(request["recipe"]["preservation_interactions"]) + passing_interactions
-    all_deltas = calculate_edits_for_sites(loaded, job, failing_examples, request["recipe"], sites=sites,
+    all_deltas = calculate_edits_for_sites(loaded, job, failing_examples, request["recipe"], sites=writer_sites,
                                            retention_interactions=protected_interactions)
     calculated_by_layer = {site.layer: (site, *all_deltas[site.tensor_name]) for site in writers}
 
