@@ -47,7 +47,12 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
             payload = json.loads(kwargs["input"])
             assert payload["prompt"] == [1, 2, 3] and payload["add_special_tokens"] is False
             assert "messages" not in payload
-            output = json.dumps({"choices": [completion]}).encode()
+            if payload["max_tokens"] == 1:
+                assert payload["logprobs"] == 2 and payload["return_tokens_as_token_ids"] is True
+                output = json.dumps({"choices": [{"token_ids": [16], "logprobs": {
+                    "token_logprobs": [-0.5], "top_logprobs": [{"token_id:16": -0.5, "token_id:17": -0.51}]}}]}).encode()
+            else:
+                output = json.dumps({"choices": [completion]}).encode()
         else:
             output = b""
         return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b"")
@@ -62,6 +67,9 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         assert adapter.loaded_identity()["served_model_identity_verified"] is False
         assert "state_digest" not in adapter.loaded_identity()
         assert result.interaction["prompt_renderer_digest"] == adapter.inference_config["prompt_renderer_digest"]
+        record = server.record_identity_probes()
+        assert len(record["records"]) == 16
+        assert record["records"][0]["top_two"] == [{"token_id": 16, "logprob": -0.5}, {"token_id": 17, "logprob": -0.51}]
         completion["finish_reason"] = "length"
         with pytest.raises(GymJobError, match="incomplete"):
             adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})

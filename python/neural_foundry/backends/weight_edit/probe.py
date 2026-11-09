@@ -41,10 +41,15 @@ def record_portability_probes(loaded: LoadedModel) -> dict[str, Any]:
             probabilities = torch.log_softmax(logits, dim=-1)
             token = int(logits.argmax())
             value = float(probabilities[token])
+            remaining = probabilities.clone()
+            remaining[token] = -torch.inf
+            runner_up = int(remaining.argmax())
             if not torch.isfinite(probabilities[token]):
                 raise UnsupportedModel("identity probe produced nonfinite log probabilities")
             records.append({"prompt_token_ids": list(rendered.token_ids), "prompt_digest": rendered.prompt_digest,
-                            "greedy_token_id": token, "greedy_logprob": value})
+                            "greedy_token_id": token, "greedy_logprob": value,
+                            "top_two": [{"token_id": token, "logprob": value},
+                                        {"token_id": runner_up, "logprob": float(probabilities[runner_up])}]})
         return {"kind": "nf_transformers_portability_probes_v1", "model_digest": model_state_digest(loaded.model),
             "renderer_digest": renderer.digest, "records": records,
             "weight_files": {name: digest for name, digest in loaded.file_digests.items() if name.endswith(".safetensors")},

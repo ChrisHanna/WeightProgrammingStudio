@@ -124,3 +124,13 @@ def test_failed_model_gate_is_recorded_without_scores(tmp_path, monkeypatch) -> 
     assert report["supported"] is False and report["measurements_complete"] is False
     assert "serving_verified" not in report and "candidate" not in report
     assert json.loads((tmp_path / "failed.probe.json").read_bytes()) == report
+
+
+def test_retained_nemotron_failure_is_not_supported() -> None:
+    from neural_foundry.gym_service import _document_digest
+
+    path = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "weight-edit-nemotron-bf16.json"
+    report = json.loads(path.read_bytes())
+    assert report["probe_digest"] == _document_digest({key: value for key, value in report.items() if key != "probe_digest"})
+    assert report["supported"] is False and report["qualification_status"] == "failed_gate"
+    assert report["reasons"] == ["candidate exceeds the frozen unedited-base portability limit"]

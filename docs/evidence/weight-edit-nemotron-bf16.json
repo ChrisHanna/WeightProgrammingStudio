@@ -1,0 +1,1 @@
+{"kind":"nf_weight_edit_compatibility_v1","supported":false,"model_id":"nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1","precision":"bfloat16","qualification_status":"failed_gate","reasons":["candidate exceeds the frozen unedited-base portability limit"],"measurements_complete":false,"probe_digest":"sha256:07a80a3a44f4ea62a2b0e3c8b8ffacaf351bd8568b0931a6f7243f84b7aec626"}

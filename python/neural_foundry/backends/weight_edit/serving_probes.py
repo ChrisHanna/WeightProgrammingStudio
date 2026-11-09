@@ -9,6 +9,7 @@ from typing import Any
 from ...gym_service import _document_digest
 from ...gym_job import _is_digest, is_finite_number
 from .loader import UnsupportedModel
+from .near_ties import calibrate_near_ties, verify_near_tie_tokens
 
 IDENTITY_LOGPROB_ATOL = 1e-6
 PORTABILITY_MARGIN = 1e-6
@@ -66,12 +67,21 @@ def calibrate_portability(base_transformers: Mapping[str, Any], base_vllm: Mappi
     if base_transformers.get("kind") != "nf_transformers_portability_probes_v1" or base_vllm.get("kind") != "nf_vllm_weight_identity_v2":
         raise UnsupportedModel("portability calibration requires the two declared runtime records")
     verify_identity(base_vllm, base_vllm)
-    difference = compare_records(base_transformers, base_vllm)
+    near_tie_policy = None
+    first, second = base_transformers.get("records", []), base_vllm.get("records", [])
+    has_top_two = any(isinstance(record, Mapping) and "top_two" in record for record in (*first, *second))
+    if base_vllm["precision"] == "bfloat16" and has_top_two:
+        near_tie_policy = calibrate_near_ties(base_transformers, base_vllm)
+        difference = near_tie_policy["measured_base_noise"]
+    else:
+        difference = compare_records(base_transformers, base_vllm)
     calibration = {"kind": "nf_base_portability_calibration_v1", "precision": base_vllm["precision"],
                    "renderer_digest": base_vllm["renderer_digest"], "image": base_vllm["image"],
                    "context_tokens": base_vllm["context_tokens"], "base_digest": base_transformers["model_digest"],
                    "base_weight_files": base_vllm["weight_files"], "measured_base_max_error": difference,
                    "margin": PORTABILITY_MARGIN, "logprob_atol": difference + PORTABILITY_MARGIN}
+    if near_tie_policy is not None:
+        calibration["near_tie_policy"] = near_tie_policy
     calibration["calibration_digest"] = _document_digest(calibration)
     return calibration
 
@@ -90,7 +100,17 @@ def verify_portability(transformers: Mapping[str, Any], vllm: Mapping[str, Any],
     for name in ("precision", "renderer_digest", "image", "context_tokens"):
         if vllm.get(name) != calibration.get(name):
             raise UnsupportedModel(f"portability {name} differs from the base calibration")
-    difference = compare_records(transformers, vllm)
+    near_tie_policy = calibration.get("near_tie_policy")
+    if near_tie_policy is None:
+        difference = compare_records(transformers, vllm)
+    else:
+        first, second = transformers.get("records"), vllm.get("records")
+        if not isinstance(first, list) or not isinstance(second, list) or len(first) != 16 or len(second) != 16:
+            raise UnsupportedModel("candidate near-tie verification requires all 16 probes")
+        if transformers.get("precision") != vllm.get("precision") or transformers.get("renderer_digest") != vllm.get("renderer_digest"):
+            raise UnsupportedModel("candidate runtime or rendering differs")
+        difference = max(verify_near_tie_tokens(left, right, index, near_tie_policy)
+                         for index, (left, right) in enumerate(zip(first, second, strict=True)))
     if difference > calibration["logprob_atol"]:
         raise UnsupportedModel("candidate exceeds the frozen unedited-base portability limit")
     return {"kind": "nf_portability_verification_v1", "verified": True,

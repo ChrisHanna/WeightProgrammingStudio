@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import os
 import shutil
 import subprocess
@@ -249,7 +250,8 @@ class VllmCandidateServer:
         for index, prompt in enumerate(IDENTITY_PROMPTS):
             rendered = self._renderer.render(prompt)
             payload = {"model": "nf-candidate", "prompt": list(rendered.token_ids), "max_tokens": 1, "temperature": 0,
-                       "seed": 0, "add_special_tokens": False, "return_token_ids": True, "logprobs": 0}
+                       "seed": 0, "add_special_tokens": False, "return_token_ids": True,
+                       "return_tokens_as_token_ids": True, "logprobs": 2}
             result = self._docker(["exec", "-i", self._container, "python3", "-c", _HTTP_CLIENT, "/v1/completions"],
                                   data=json.dumps(payload, allow_nan=False).encode(), timeout=75)
             if result.returncode != 0:
@@ -264,10 +266,25 @@ class VllmCandidateServer:
                     or isinstance(values[0], bool) or not isinstance(values[0], (int, float))
                     or not math.isfinite(values[0]) or values[0] > 0):
                     raise ValueError("invalid token/log-probability evidence")
+                candidates = choice["logprobs"]["top_logprobs"][0]
+                if not isinstance(candidates, dict):
+                    raise ValueError("top-two log probabilities are missing")
+                decoded = {}
+                for name, value in candidates.items():
+                    if (not isinstance(name, str) or not re.fullmatch(r"token_id:(0|[1-9][0-9]*)", name)
+                        or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value > 0):
+                        raise ValueError("top-two token IDs or probabilities are malformed")
+                    decoded[int(name.removeprefix("token_id:"))] = value
+                alternatives = [(token, value) for token, value in decoded.items() if token != tokens[0]]
+                if not alternatives:
+                    raise ValueError("runner-up token is missing")
+                runner_up, runner_probability = max(alternatives, key=lambda item: item[1])
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise GymJobError(f"vLLM identity response is invalid at fixed prompt {index}") from exc
             records.append({"prompt_token_ids": list(rendered.token_ids), "prompt_digest": rendered.prompt_digest,
-                            "greedy_token_id": tokens[0], "greedy_logprob": values[0]})
+                            "greedy_token_id": tokens[0], "greedy_logprob": values[0],
+                            "top_two": [{"token_id": tokens[0], "logprob": values[0]},
+                                        {"token_id": runner_up, "logprob": runner_probability}]})
         if artifact_files(self._snapshot) != self._files:
             raise GymJobError("mounted files changed during vLLM identity recording")
         return {"kind": "nf_vllm_weight_identity_v2", "precision": self.precision, "image": self.image,
