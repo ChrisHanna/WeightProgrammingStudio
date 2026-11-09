@@ -233,6 +233,14 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     monkeypatch.setattr(diagnostic, "LAYER_SWEEP_EXACT_LAYER_COUNT", 2)
     monkeypatch.setattr(diagnostic, "score_public_rows", fake_score)
     monkeypatch.setattr(diagnostic, "expected_answer_logprob", fake_logprob)
+    generation_limits = []
+    make_validation_model = diagnostic.validation_model
+
+    def track_generation_limit(model, **kwargs):
+        generation_limits.append(kwargs["max_new_tokens"])
+        return make_validation_model(model, **kwargs)
+
+    monkeypatch.setattr(diagnostic, "validation_model", track_generation_limit)
     monkeypatch.setattr(diagnostic, "calibrate_one_ulp", lambda *args, **kwargs: {"calibration_digest": "cpu-smoke"})
     monkeypatch.setattr(diagnostic, "preservation_logits", lambda model, panel: [torch.zeros(4) for _ in panel])
     monkeypatch.setattr(diagnostic, "float32_logits_of_exact_weights", lambda model, panel: [torch.zeros(4) for _ in panel])
@@ -252,6 +260,7 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     assert report["base_train"]["task"]["cases"] == len(parent)
     assert report["base_validation"]["task"]["cases"] == 4
     assert report["base_validation"]["task_by_template"]
+    assert generation_limits and set(generation_limits) == {diagnostic.LAYER_SWEEP_MAX_NEW_TOKENS}
     assert all(row["preservation_v2_report_only"]["passed"] for row in report["results"]
                if row.get("phase") == "exact" and row.get("status") == "measured")
     assert report["strength_1_stop_gate"]["continue_to_multilayer"] is False

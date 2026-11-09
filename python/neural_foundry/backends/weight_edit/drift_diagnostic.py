@@ -33,6 +33,7 @@ from .demonstrations import prepare_demonstration
 
 STRENGTHS = (0.0, 1e-5, 1e-4, 1e-3)
 LAYER_SWEEP_STRENGTHS = (1e-2, 0.1, 0.5, 1.0)
+LAYER_SWEEP_MAX_NEW_TOKENS = 40
 LAYER_SWEEP_EXACT_LAYER_COUNT = 3
 
 
@@ -621,16 +622,20 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     run_digest = _document_digest({"kind": "nf_layer_strength_run_v2", "request_digest": request["training_request_digest"],
         "dataset_digest": request["dataset_digest"], "base_digest": base_digest,
         "layers": [site.layer for site in writers], "strengths": list(strengths),
-        "generation_batch_size": 8, "likelihood_batch_size": 4, "exact_layer_count": LAYER_SWEEP_EXACT_LAYER_COUNT})
+        "generation_batch_size": 8, "generation_max_new_tokens": LAYER_SWEEP_MAX_NEW_TOKENS,
+        "likelihood_batch_size": 4, "exact_layer_count": LAYER_SWEEP_EXACT_LAYER_COUNT})
     binding = {"run_digest": run_digest, "request_digest": request["training_request_digest"],
                "dataset_digest": request["dataset_digest"], "base_digest": base_digest,
                "layers": [site.layer for site in writers], "strengths": list(strengths)}
     records = open_sweep_checkpoint(checkpoint_path, binding)
     by_key = {row["checkpoint_key"]: row for row in records if row.get("checkpoint_key")}
 
-    batch_baseline_train = score_public_rows(task, validation_model(loaded, batch_size=16), train_rows, split="train")
-    batch_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=16), validation_rows)
-    serial_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=1), validation_rows)
+    batch_baseline_train = score_public_rows(task, validation_model(loaded, batch_size=16,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
+    batch_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=16,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
+    serial_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=1,
+        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
     batch_equivalent = all(left["response"] == right["response"]
         and left.get("execution_evidence", {}).get("generated_token_ids") == right.get("execution_evidence", {}).get("generated_token_ids")
         for left, right in zip(batch_baseline_validation["responses"], serial_baseline_validation["responses"], strict=True))
@@ -814,7 +819,10 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                     edited = apply(loaded, {selected.tensor_name: delta}, sites=SiteMap((selected,), checkpoint_names_verified=True),
                         method="diagnostic_layer_strength_sweep", settings={"target_step": strength, "diagnostic_only": True})
                     train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
-                    validation_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), validation_rows)
+                    train_score = score_public_rows(task, validation_model(loaded, batch_size=16,
+                        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
+                    validation_score = score_public_rows(task, validation_model(loaded, batch_size=16,
+                        max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
                     validation_logprob_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
                         for family, interactions in validation_by_template.items()}
                     validation_logprob = _aggregate_logprobs(validation_logprob_by_template)
