@@ -44,4 +44,4 @@ def assess_specialist_v2(task: Mapping[str, Any], required: Mapping[str, Any], *
               "task_scoped_required_set": required.get("exact_match") == 1.0}
     return {"passed": all(checks.values()), "checks": checks, "paired_improvement": interval,
             "holdout_accessed": False, "generalist_authorized": False, "release_authorized": False,
-            "policy_status": "proposal_pending_approval"}
+            "policy_status": "approved_not_yet_integrated"}

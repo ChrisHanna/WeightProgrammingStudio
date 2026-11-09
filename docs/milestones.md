@@ -1,5 +1,7 @@
 # Milestones and Definition of Done
 
+The product sequencing and GymEdit objective are maintained in the [integration roadmap](integration-roadmap.md). This document continues to define qualification evidence and binary completion criteria; roadmap status does not imply qualification.
+
 A capability is done when its pass conditions hold on a real checkpoint. Passing on a fixture proves the software path only.
 
 ## Rules for every milestone

@@ -180,6 +180,6 @@ def test_specialist_v2_proposal_uses_paired_case_bootstrap_without_activation():
     evidence = {"split": "validation", "base_case_outcomes": base, "candidate_case_outcomes": candidate}
     required = {"split": "validation", "format_valid": 1.0, "exact_match": 1.0}
     result = assess_specialist_v2(evidence, required, minimum_net_cases=4)
-    assert result["policy_status"] == "proposal_pending_approval"
+    assert result["policy_status"] == "approved_not_yet_integrated"
     assert result["passed"] is (result["checks"]["confidence_interval_lower_bound"] is True)
     assert not result["holdout_accessed"] and not result["generalist_authorized"] and not result["release_authorized"]

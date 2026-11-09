@@ -1,15 +1,17 @@
 {
   "version": 2,
-  "status": "proposed_pending_user_approval",
+  "status": "approved_frozen",
+  "approved_by": "user_delegated_approval_2026-11-09",
+  "implementation_status": "not_yet_integrated",
   "retention_mode": "specialist",
   "purpose": "Allow a task-specialized weight edit to trade preservation for a measurable public task improvement while retaining the required-set gate.",
   "edit_calculation": {
     "retention_nullspace_weight": 0.0,
     "target_strengths_for_public_search": [0.01, 0.1, 0.5, 1.0],
-    "eligible_sites": "up to five discovered middle MLP write sites selected using public validation",
+    "eligible_sites": "discovered middle MLP write sites selected using public validation",
     "task_training_targets": "failing approved training examples only",
     "protected_examples": "passing approved training examples",
-    "active": false
+    "implementation_active": false
   },
   "task_gate": {
     "comparison": "paired exact-match outcomes on the same public validation cases against the unchanged base",
@@ -26,8 +28,11 @@
   },
   "preservation": "Report frozen v2 results; do not gate specialist mode on v2 preservation. Do not modify v2 thresholds or evidence.",
   "search_budget": {
-    "maximum_candidates": 16,
     "selection_split": "public_validation",
+    "maximum_screen_candidates": 56,
+    "maximum_exact_candidates": 12,
+    "screening": "14 middle MLP sites by 4 strengths; likelihood-first successive halving",
+    "exact_scoring": "top 3 layers by public-validation likelihood, all 4 strengths",
     "holdout_accessed_during_search": false
   },
   "prohibited_claims": [
@@ -36,5 +41,5 @@
     "independent confirmation from a validation-selected confidence interval",
     "release authorization"
   ],
-  "change_control": "No specialist-v2 candidate run until this policy is approved. Future policy changes require a new version and approval."
+  "change_control": "Approved for implementation. No threshold or required-set change without user approval and a new policy version."
 }
