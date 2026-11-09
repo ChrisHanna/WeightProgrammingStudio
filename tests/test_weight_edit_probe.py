@@ -88,3 +88,18 @@ def test_cached_model_complete_compatibility_probe(tmp_path, model_id) -> None:
     assert report["serving_evidence"]["fixed_prompts"] == 16
     assert report["serving_evidence"]["max_logprob_absolute_error"] <= 1e-6
     assert report["portability_verification"]["verified"] is True
+
+
+def test_retained_qwen_bf16_probe_evidence_is_digest_bound() -> None:
+    from neural_foundry.gym_service import _document_digest
+
+    path = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "weight-edit-qwen3-bf16.json"
+    report = json.loads(path.read_bytes())
+    assert report["probe_digest"] == _document_digest({key: value for key, value in report.items() if key != "probe_digest"})
+    assert report["model_id"] == "Qwen/Qwen3-0.6B" and report["precision"] == "bfloat16"
+    assert report["supported"] and report["reload_verified"] and report["unchanged_tensors_verified"]
+    assert report["serving_evidence"]["verified"] is True
+    assert report["serving_evidence"]["max_logprob_absolute_error"] <= 1e-6
+    portability = report["portability_verification"]
+    calibration = report["portability_calibration"]
+    assert portability["verified"] is True and portability["max_logprob_absolute_error"] <= calibration["logprob_atol"]
