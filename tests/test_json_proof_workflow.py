@@ -17,8 +17,8 @@ from neural_foundry.reference_json_extraction import reference_task
 
 
 def _references(tmp_path: Path):
-    base_dir, sft_dir = tmp_path / "base", tmp_path / "sft"
-    for root in (base_dir, sft_dir):
+    base_dir, sft_dir, edited_dir = tmp_path / "base", tmp_path / "sft", tmp_path / "edited"
+    for root in (base_dir, sft_dir, edited_dir):
         root.mkdir()
         for name in ("config.json", "tokenizer.json", "model.safetensors"):
             (root / name).write_text(name)
@@ -35,7 +35,15 @@ def _references(tmp_path: Path):
                  "candidate_model_digest": state, "artifact_digest": digest}
     write_candidate_manifest(sft_dir, model_id="test/model", kind="full", base_digest=base_digest,
                              model_digest=state, request_digest=request, metadata={"candidate": candidate})
-    return base, sft, revision
+    edited_request = "sha256:" + "e" * 64
+    (edited_dir / "training_receipt.json").write_text(json.dumps({"training_request_digest": edited_request, "model_digest": state}))
+    edited_digest = _document_digest({"training_request": edited_request, "files": artifact_files(edited_dir)})
+    edited = CandidateRef("test/model", "weight_edit", base_digest, state, edited_digest, str(edited_dir), "edited", "weight_edit", "qwen3")
+    write_candidate_manifest(edited_dir, model_id="test/model", kind="weight_edit", base_digest=base_digest,
+        model_digest=state, request_digest=edited_request, metadata={"candidate": {
+        "candidate_id": "edited", "method_id": "weight_edit", "base_model_digest": base_digest,
+        "candidate_model_digest": state, "artifact_digest": edited_digest}})
+    return base, sft, edited, revision
 
 
 class _FakeModel:
@@ -58,10 +66,12 @@ class _FakeModel:
 
 
 def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_path, monkeypatch) -> None:
-    base, sft, revision = _references(tmp_path)
+    base, sft, edited, revision = _references(tmp_path)
     task = reference_task(rows_per_template=1)
     result = {"job_digest": task.job.digest, "revision": revision, "base": vars(base), "sft": vars(sft),
-              "training_request_digest": "sha256:" + "c" * 64, "candidate_record_digest": "sha256:" + "d" * 64}
+              "training_request_digest": "sha256:" + "c" * 64, "candidate_record_digest": "sha256:" + "d" * 64,
+              "weight_edit": vars(edited), "weight_edit_training_request_digest": "sha256:" + "e" * 64,
+              "weight_edit_candidate_record_digest": "sha256:" + "f" * 64, "dataset_digest": "sha256:" + "a" * 64}
     monkeypatch.setenv("NF_FRONTIER_API_KEY", "private-token")
 
     def train(command, *, env, **kwargs):
@@ -73,7 +83,7 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
     monkeypatch.setattr(json_proof_workflow, "VllmCandidateServer", lambda *args, **kwargs: _FakeModel())
     output = tmp_path / "proof"
     report = json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
-                                                 frontier_factory=lambda: _FakeModel())
+                                                 rows_per_template=1, frontier_factory=lambda: _FakeModel())
     assert report["complete"] is True and report["comparison"]["scenario_count"] == 2
     assert report["scorer_audit"]["passed"] is True and report["scorer_audit"]["cases"] == 12
     assert all(card["value"] == 0 for card in report["comparison"]["scorecards"].values())
@@ -81,14 +91,22 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
     assert json.loads((output / "report.json").read_text()) == report
     assert "private-token" not in json.dumps(report)
     assert report["release_authorized"] is False
+    assert set(report["comparison"]["scorecards"]) == {"base", "sft", "weight_edit", "frontier"}
+    assert all(card["newly_broken_cases"] == 0 for card in report["comparison"]["scorecards"].values())
+    second = json_proof_workflow.run_json_proof(tmp_path / "local-proof", gpu_python=sys.executable,
+                                                automodel_python=sys.executable, rows_per_template=1)
+    assert second["frontier_configured"] is False
+    assert set(second["comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
 
 
 def test_missing_frontier_fails_before_creating_output(tmp_path, monkeypatch) -> None:
+    from neural_foundry.json_frontier_model import JsonFrontierModel
     for name in ("NF_FRONTIER_URL", "NF_FRONTIER_MODEL", "NF_FRONTIER_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     output = tmp_path / "proof"
     with pytest.raises(GymJobError, match="endpoint"):
-        json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable)
+        json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
+                          frontier_factory=JsonFrontierModel.from_env)
     assert not output.exists()
 
 
@@ -102,3 +120,17 @@ def test_real_gpu_workflow_with_explicit_frontier_stub(tmp_path) -> None:
     assert report["complete"] is True, report["comparison"].get("failure")
     assert report["comparison"]["scorecards"]["frontier"]["model_identity"]["fixture"] is True
     assert report["comparison"]["served_model_identity_verified"] is False
+
+
+def test_real_gpu_local_three_way_weight_edit_proof(tmp_path) -> None:
+    gpu_python = os.environ.get("NF_GPU_PYTHON")
+    automodel_python = os.environ.get("NF_AUTOMODEL_PYTHON")
+    if not gpu_python or not automodel_python or os.environ.get("NF_JSON_PROOF_LOCAL_LIVE") != "1":
+        pytest.skip("set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_JSON_PROOF_LOCAL_LIVE=1")
+    report = json_proof_workflow.run_json_proof(tmp_path / "proof", gpu_python=gpu_python,
+                                               automodel_python=automodel_python, rows_per_template=32, sft_steps=32)
+    assert report["complete"] is True, report["comparison"].get("failure")
+    assert report["frontier_configured"] is False
+    assert set(report["comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
+    assert report["comparison"]["scenario_count"] == 64
+    assert report["comparison"]["preservation_count"] > 0

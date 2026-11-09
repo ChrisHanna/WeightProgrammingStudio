@@ -46,3 +46,18 @@ def test_incomplete_comparison_never_scores_partial_results(monkeypatch) -> None
     assert report["failure"] == {"stage": "frontier", "reason": "RuntimeError"}
     missing = json_proof_loop.compare_synthetic_holdout(task, seed=31, models={"base": models["base"]})
     assert missing["complete"] is False and missing["scorecards"] is None
+
+
+def test_weight_edit_arm_uses_common_holdout_and_reports_preservation_regressions() -> None:
+    task = reference_task(rows_per_template=1)
+    rows = generate_scenarios(split="holdout", seed=31, parameters={"rows_per_template": 1})
+    preservation = generate_scenarios(split="train", seed=32, parameters={"rows_per_template": 1})[:1]
+    correct = [row["reference"] for row in rows]
+    preserved = preservation[0]["reference"]
+    models = {"base": _factory([None, None, preserved]), "sft": _factory([*correct, preserved]),
+              "weight_edit": _factory([*correct, None])}
+    report = json_proof_loop.compare_synthetic_holdout(task, seed=31, models=models, preservation_rows=preservation)
+    assert report["complete"] and report["preservation_count"] == 1
+    assert report["scorecards"]["weight_edit"]["value"] == 1.0
+    assert report["scorecards"]["weight_edit"]["newly_broken_cases"] == 1
+    assert report["scorecards"]["sft"]["newly_broken_cases"] == 0
