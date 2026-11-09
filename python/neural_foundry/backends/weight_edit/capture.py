@@ -33,6 +33,7 @@ def capture(
     output_dtype: torch.dtype = torch.float32,
     max_capture_bytes: int = 256 * 1024 * 1024,
     sink: Callable[[str, torch.Tensor, torch.Tensor, torch.Tensor | None, str], None] | None = None,
+    token_outcome_sink: Callable[[torch.Tensor], None] | None = None,
 ) -> dict[str, Activations]:
     if output_dtype not in {torch.float32, torch.float64}:
         raise WeightEditInputError("capture output dtype must be float32 or float64")
@@ -119,6 +120,12 @@ def capture(
                     result = loaded.model(**encoded)
                 if set(active) != set(collected):
                     raise UnsupportedModel("not every selected site ran during capture")
+                if token_outcome_sink is not None:
+                    if not gradient_mode:
+                        raise WeightEditInputError("token correctness diagnostics require teacher-forced labels")
+                    expected = labels[0, [position + 1 for position in selected]]
+                    predicted = result.logits[0, selected].detach().argmax(dim=-1)
+                    token_outcome_sink((predicted == expected).detach().cpu())
                 if gradient_mode:
                     if result.loss.ndim != 0 or not bool(torch.isfinite(result.loss)):
                         raise UnsupportedModel("capture loss is not finite")

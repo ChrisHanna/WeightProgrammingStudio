@@ -176,6 +176,55 @@ def test_stored_bf16_change_metrics_include_rounding_and_reload(numerical_fixtur
     assert edited.receipt["change_norms"][site.tensor_name] == measured["frobenius_norm"]
 
 
+def test_key_diagnostics_report_scale_and_already_correct_tokens_without_mutation():
+    from neural_foundry.backends.weight_edit.worker import _edit_key_diagnostics
+
+    keys = torch.tensor([[3.0, 4.0], [0.0, 2.0]], dtype=torch.float64)
+    outputs = torch.tensor([[0.0, 5.0], [0.0, 3.0]], dtype=torch.float64)
+    original_keys, original_outputs = keys.clone(), outputs.clone()
+    report = _edit_key_diagnostics(keys, outputs, torch.tensor([True, True]), torch.tensor([True, False]),
+                                   target_step=0.5, retention_weight=0.0)
+    assert report["mean_gram_diagonal"] == 14.5
+    assert report["ridge_to_mean_gram_diagonal"] == pytest.approx(1e-3 / 14.5)
+    assert report["mean_key_input_l2_norm"] == 3.5
+    assert report["mean_write_output_l2_norm"] == 4.0
+    assert report["target_shift_fraction_of_mean_write_output_norm"] == 0.125
+    assert report["key_count"] == report["active_key_count"] == 2
+    assert report["already_correct_token_keys"] == report["active_already_correct_token_keys"] == 1
+    assert report["incorrect_token_keys"] == 1
+    assert report["retention_penalty_enabled"] is False
+    assert torch.equal(keys, original_keys) and torch.equal(outputs, original_outputs)
+
+
+def test_token_correctness_observer_does_not_change_captured_gradients(numerical_fixture):
+    from neural_foundry.backends.weight_edit.capture import capture
+    from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
+    from neural_foundry.backends.weight_edit.discover import SiteMap, find_blocks, find_sites
+    from neural_foundry.prompt_rendering import PromptRenderer
+
+    loaded, task, examples, recipe = numerical_fixture
+    discovered = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                            checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    site = next(site for site in discovered.sites if site.role == "residual_write_mlp")
+    sites = SiteMap((site,), True)
+    demonstration = prepare_demonstration(PromptRenderer(loaded.tokenizer), examples[0]["interaction"])
+    arguments = {"positions": [demonstration.positions], "loss_labels": [demonstration.labels],
+                 "output_dtype": torch.float64}
+    before = capture(loaded, sites, [demonstration.rendered], **arguments)[site.tensor_name]
+    outcomes = []
+    after = capture(loaded, sites, [demonstration.rendered], **arguments,
+                    token_outcome_sink=outcomes.append)[site.tensor_name]
+    assert torch.equal(before.inputs, after.inputs)
+    assert torch.equal(before.outputs, after.outputs)
+    assert torch.equal(before.output_gradients, after.output_gradients)
+    assert len(outcomes) == 1 and outcomes[0].shape == (len(demonstration.positions),)
+    tokens = torch.tensor([demonstration.rendered.token_ids])
+    with torch.no_grad():
+        predicted = loaded.model(input_ids=tokens, attention_mask=torch.ones_like(tokens)).logits[0].argmax(dim=-1)
+    expected = torch.tensor([demonstration.labels[position + 1] for position in demonstration.positions])
+    assert torch.equal(outcomes[0], predicted[list(demonstration.positions)] == expected)
+
+
 def test_multi_site_capture_computes_all_layer_deltas_once(numerical_fixture):
     from neural_foundry.backends.weight_edit.worker import calculate_edits_for_sites
     from neural_foundry.backends.weight_edit.discover import find_blocks, find_sites
@@ -191,6 +240,11 @@ def test_multi_site_capture_computes_all_layer_deltas_once(numerical_fixture):
     assert set(results) == {site.tensor_name for site in selected}
     assert all(delta.kind == "low_rank" and evidence["failing_key_count"] > 0
                for delta, evidence in results.values())
+    for delta, evidence in results.values():
+        diagnostics = evidence["key_diagnostics"]
+        assert diagnostics["active_key_count"] == evidence["failing_key_count"]
+        assert diagnostics["key_count"] == diagnostics["already_correct_token_keys"] + diagnostics["incorrect_token_keys"]
+        assert diagnostics["mean_gram_diagonal"] > 0
     assert model_state_digest(loaded.model) == digest
     assert all(parameter.grad is None for parameter in loaded.model.parameters())
 

@@ -1122,11 +1122,21 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
         composition_size = len(composition)
         sites = tuple(site_by_layer[row["layer"]] for row in composition)
         deltas = {}
+        calculation_diagnostics = {}
         for row in composition:
             site = site_by_layer[row["layer"]]
             delta, evidence = calculated[site.tensor_name]
             scale = row["best_strength"] / request["recipe"]["target_step"]
             deltas[site.tensor_name] = Delta("low_rank", U=delta.U * scale, V=delta.V)
+            key_diagnostics = evidence["key_diagnostics"]
+            output_norm = key_diagnostics["mean_write_output_l2_norm"]
+            input_norm = key_diagnostics["mean_key_input_l2_norm"]
+            calculation_diagnostics[str(row["layer"])] = {**key_diagnostics,
+                "direction_capture_target_step": request["recipe"]["target_step"],
+                "target_shift_l2": row["best_strength"],
+                "target_shift_fraction_of_mean_write_output_norm": row["best_strength"] / output_norm if output_norm > 0 else None,
+                "target_shift_fraction_of_mean_key_input_norm": row["best_strength"] / input_norm if input_norm > 0 else None,
+                "gradient_recomputed_after_scaling": False}
         originals = {site.tensor_name: loaded.model.get_parameter(site.tensor_name).detach().clone()
                      for site in sites}
         try:
@@ -1171,6 +1181,12 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                         for before, after in zip(base_records, candidate_records, strict=True))
             broken = sum(before["exact_match"] == 1 and after["exact_match"] == 0
                          for before, after in zip(base_records, candidate_records, strict=True))
+            if [row["scenario_id"] for row in base_train["responses"]] != [row["scenario_id"] for row in train_score["responses"]]:
+                raise WeightEditInputError("candidate train roster differs from baseline")
+            train_fixed = sum(before["exact_match"] == 0 and after["exact_match"] == 1
+                for before, after in zip(base_train["responses"], train_score["responses"], strict=True))
+            train_broken = sum(before["exact_match"] == 1 and after["exact_match"] == 0
+                for before, after in zip(base_train["responses"], train_score["responses"], strict=True))
             preservation_checks = {}
             for layer, verification in preservation_reports.items():
                 values = (("float32_max_drift", verification["float32"]["max_absolute_logit_drift"],
@@ -1192,6 +1208,8 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                 "training_exact_match_gain": train_score["exact_match"] - base_train["exact_match"],
                 "validation_exact_match_gain": validation_score["exact_match"] - base_validation["exact_match"],
                 "validation_fixed_cases": fixed, "validation_broken_cases": broken,
+                "training_fixed_cases": train_fixed, "training_broken_cases": train_broken,
+                "edit_key_diagnostics": calculation_diagnostics,
                 "training_logprob_gain": train_logprob["mean_token_logprob"] - base_train_logprob["mean_token_logprob"],
                 "validation_logprob_gain": validation_logprob["mean_token_logprob"] - base_validation_logprob["mean_token_logprob"],
                 "validation_logprob_by_template": {family: {

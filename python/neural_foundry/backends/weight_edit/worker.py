@@ -44,6 +44,30 @@ def preservation_logits(loaded, interactions):
     return values
 
 
+def _edit_key_diagnostics(keys, outputs, active, correct_tokens, *, target_step, retention_weight):
+    used_keys, used_outputs = keys[active], outputs[active]
+    mean_diagonal = float(used_keys.square().sum() / used_keys.shape[1])
+    mean_input_norm = float(used_keys.norm(dim=1).mean())
+    mean_output_norm = float(used_outputs.norm(dim=1).mean())
+    return {"gram_orientation": "K[input_dimension, active_key_count]; diagonal of K @ K.T",
+            "mean_gram_diagonal": mean_diagonal, "fixed_ridge": 1e-3,
+            "ridge_to_mean_gram_diagonal": 1e-3 / mean_diagonal if mean_diagonal > 0 else None,
+            "key_count": keys.shape[0], "active_key_count": int(active.sum()),
+            "already_correct_token_keys": int(correct_tokens.sum()),
+            "active_already_correct_token_keys": int(correct_tokens[active].sum()),
+            "incorrect_token_keys": int((~correct_tokens).sum()),
+            "correctness_definition": "teacher-forced next-token top-1 equals approved token, including EOS",
+            "mean_key_input_l2_norm": mean_input_norm,
+            "mean_write_output_l2_norm": mean_output_norm,
+            "hidden_norm_scope": "MLP write-site input and output at edited keys, not full residual stream",
+            "target_shift_l2": target_step,
+            "target_shift_fraction_of_mean_write_output_norm": target_step / mean_output_norm if mean_output_norm > 0 else None,
+            "target_shift_fraction_of_mean_key_input_norm": target_step / mean_input_norm if mean_input_norm > 0 else None,
+            "retention_nullspace_weight": retention_weight,
+            "retention_penalty_enabled": retention_weight != 0,
+            "diagnostics_only": True}
+
+
 def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = None, discovered_sites: SiteMap | None = None):
     recipe = validate_recipe(recipe)
     failure_selection = recipe.get("failure_selection")
@@ -73,7 +97,7 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
         if len(renderer.render(interaction).token_ids) > recipe["max_sequence_tokens"]:
             raise GymJobError("preservation prompt exceeds the frozen sequence budget")
     retention = capture(loaded, selected, panel, output_dtype=torch.float64)[site.tensor_name].inputs
-    keys, gradients = [], []
+    keys, gradients, outputs, correct_tokens = [], [], [], []
     total_tokens, key_count = 0, 0
     for example in examples:
         interaction = example["interaction"]
@@ -89,9 +113,11 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
             or total_tokens > recipe["max_training_tokens"] or key_count > recipe["max_keys"]):
             raise GymJobError("weight-edit demonstrations exceed frozen token/key budgets")
         captured = capture(loaded, selected, [demonstration.rendered], positions=[demonstration.positions],
-                           loss_labels=[demonstration.labels], output_dtype=torch.float64)[site.tensor_name]
+                           loss_labels=[demonstration.labels], output_dtype=torch.float64,
+                           token_outcome_sink=correct_tokens.append)[site.tensor_name]
         keys.append(captured.inputs)
         gradients.append(captured.output_gradients)
+        outputs.append(captured.outputs)
     if not keys:
         raise GymJobError("weight editing requires approved demonstrations")
     keys, gradients = torch.cat(keys), torch.cat(gradients)
@@ -109,7 +135,9 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
                 "preservation_count": len(panel), "preservation_input_authority": "caller_supplied_public_panel",
                 "failure_selection_digest": _document_digest(failure_selection) if failure_selection else None,
                 "protected_training_interactions": len(recipe.get("protected_training_interactions", ())),
-                "renderer_digest": renderer.digest}
+                "renderer_digest": renderer.digest,
+                "key_diagnostics": _edit_key_diagnostics(keys, torch.cat(outputs), active, torch.cat(correct_tokens),
+                    target_step=recipe["target_step"], retention_weight=recipe["retention_nullspace_weight"])}
     return sites, site, delta, evidence
 
 
@@ -126,6 +154,8 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
     retained: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
     keys: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
     gradients: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
+    write_outputs: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
+    correct_tokens = []
 
     def collect(destination, *, collect_gradients=False):
         def consume(name, inputs, outputs, output_gradient, prompt_digest):
@@ -134,6 +164,7 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
                 if output_gradient is None:
                     raise GymJobError("multi-site gradient capture returned no output gradient")
                 gradients[name].append(output_gradient)
+                write_outputs[name].append(outputs)
         return consume
 
     capture(loaded, sites, retention_interactions, output_dtype=torch.float64, sink=collect(retained))
@@ -153,7 +184,7 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
             raise GymJobError("multi-site demonstrations exceed frozen token/key budgets")
         capture(loaded, sites, [demonstration.rendered], positions=[demonstration.positions],
                 loss_labels=[demonstration.labels], output_dtype=torch.float64,
-                sink=collect(keys, collect_gradients=True))
+            sink=collect(keys, collect_gradients=True), token_outcome_sink=correct_tokens.append)
     if not examples:
         raise GymJobError("multi-site edit requires at least one base-failing training example")
     result = {}
@@ -175,7 +206,9 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
             "target_objective": "teacher_forced_token_loss_output_gradient", "gradient_inspection_used": True,
             "protected_key_count": protected.shape[0], "preservation_digest": "sha256:" + hashlib.sha256(
                 protected.detach().cpu().contiguous().numpy().tobytes()).hexdigest(),
-            "renderer_digest": renderer.digest})
+            "renderer_digest": renderer.digest,
+            "key_diagnostics": _edit_key_diagnostics(key, torch.cat(write_outputs[name]), active, torch.cat(correct_tokens),
+                target_step=recipe["target_step"], retention_weight=recipe["retention_nullspace_weight"])})
     return result
 
 
