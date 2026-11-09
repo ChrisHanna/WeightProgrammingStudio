@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Install a real wheel offline in a fresh environment and run the packaged demo."""
+"""Verify a real wheel offline in a fresh environment and run the packaged demo."""
 
 import argparse
 import json
 import os
-import shutil
+import stat
 import subprocess
 import venv
 import zipfile
@@ -48,20 +48,29 @@ def main() -> None:
             for line in metadata.splitlines()
         ):
             raise SystemExit("Unexpected mandatory Python runtime dependency")
+        if any(name.split("/", 1)[0].endswith(".data") for name in names):
+            raise SystemExit("Wheel .data schemes are unsupported by the stdlib-only verifier")
     environment = work / "environment"
     venv.EnvBuilder(with_pip=False).create(environment)
     python = environment / "bin/python"
-    uv = shutil.which("uv")
-    if not uv:
-        raise SystemExit("uv is required to install into the clean pip-free environment")
-    env = os.environ.copy()
-    env["UV_CACHE_DIR"] = str(work / "uv-cache")
-    env["UV_LINK_MODE"] = "copy"
-    subprocess.run(
-        [uv, "pip", "install", "--python", str(python), "--offline", "--no-deps", str(wheel)],
-        check=True,
-        env=env,
-    )
+    site_packages = Path(subprocess.check_output(
+        [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True,
+    ).strip()).resolve()
+    site_packages.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(wheel) as archive:
+        for member in archive.infolist():
+            destination = (site_packages / member.filename).resolve()
+            if not destination.is_relative_to(site_packages):
+                raise SystemExit("Wheel member escapes the clean environment")
+            if stat.S_ISLNK(member.external_attr >> 16):
+                raise SystemExit("Wheel symlinks are unsupported by the stdlib-only verifier")
+            if member.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(archive.read(member))
+    env = {**os.environ, "PYTHONNOUSERSITE": "1"}
     code = """
 import json,sys
 from pathlib import Path

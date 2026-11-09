@@ -10,7 +10,7 @@ import pytest
 from neural_foundry.gym_job import GymJobError
 from neural_foundry.gym_service import GymStudioService
 from neural_foundry.nemo_json_compiler import compile_json_gym
-from neural_foundry.reference_json_extraction import reference_task
+from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
 
 
 @pytest.mark.parametrize("split", ["train", "validation"])
@@ -23,7 +23,10 @@ def test_compile_public_json_package(tmp_path, split: str) -> None:
     server = destination / "resources_servers" / "nf_json_extraction"
     rows = [json.loads(line) for line in (server / "data" / f"{split}.jsonl").read_text().splitlines()]
     config = json.loads((server / "configs" / "nf_json_extraction.yaml").read_text())
-    assert len(rows) == receipt["rows"] == 4
+    expected_rows = len(generate_scenarios(
+        split=split, seed=17, parameters={"rows_per_template": 2},
+    ))
+    assert len(rows) == receipt["rows"] == expected_rows
     assert config["nf_json_resources_server"]["resources_servers"]["nf_json_extraction"]["verified"] is False
     assert receipt["execution_ready"] is False and receipt["verifier_bound"] is True
     assert (server / "app.py").is_file()

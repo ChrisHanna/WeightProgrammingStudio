@@ -5,12 +5,17 @@ import pytest
 from neural_foundry import reference_json_extraction
 from neural_foundry.gym_job import GymJobError
 from neural_foundry.json_scorer_audit import audit_reference_scorer
+from neural_foundry.reference_json_extraction import generate_scenarios
 
 
 def test_scorer_audit_checks_public_counterfactuals_and_determinism() -> None:
     task = reference_json_extraction.reference_task(rows_per_template=2)
     report = audit_reference_scorer(task)
-    assert report["passed"] is True and report["cases"] == 12
+    expected_cases = 3 * sum(
+        len(generate_scenarios(split=split, seed=7, parameters={"rows_per_template": 1}))
+        for split in ("train", "validation")
+    )
+    assert report["passed"] is True and report["cases"] == expected_cases
     assert report["scorer_digest"] == task.job.scorer.implementation_digest
     assert report["splits"] == ["train", "validation"]
     assert report["evidence_class"] == "synthetic" and report["release_authorized"] is False
