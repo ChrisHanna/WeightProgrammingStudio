@@ -11,7 +11,7 @@ import hashlib
 import torch
 
 from .discover import SiteMap
-from ...prompt_rendering import PromptInputError, PromptRenderer
+from ...prompt_rendering import PromptInputError, PromptRenderer, RenderedPrompt
 from .loader import LoadedModel, UnsupportedModel, WeightEditInputError
 from .numerics import deterministic_execution
 
@@ -26,7 +26,7 @@ class Activations:
 
 
 def capture(
-    loaded: LoadedModel, sites: SiteMap, prompts: Sequence[str | Mapping[str, Any]],
+    loaded: LoadedModel, sites: SiteMap, prompts: Sequence[str | Mapping[str, Any] | RenderedPrompt],
     positions: Sequence[Sequence[int]] | None = None, *,
     response_starts: Sequence[int] | None = None,
     loss_labels: Sequence[Sequence[int]] | None = None,
@@ -39,7 +39,7 @@ def capture(
     element_size = torch.empty((), dtype=output_dtype).element_size()
     if type(max_capture_bytes) is not int or max_capture_bytes < 1 or (sink is not None and not callable(sink)):
         raise WeightEditInputError("capture requires a positive byte budget and a callable sink")
-    if not prompts or isinstance(prompts, (str, bytes)) or any(not isinstance(prompt, (str, Mapping)) for prompt in prompts):
+    if not prompts or isinstance(prompts, (str, bytes)) or any(not isinstance(prompt, (str, Mapping, RenderedPrompt)) for prompt in prompts):
         raise WeightEditInputError("capture requires a nonempty prompt sequence")
     if not sites.sites or len({site.tensor_name for site in sites.sites}) != len(sites.sites):
         raise WeightEditInputError("capture requires unique sites")
@@ -82,7 +82,13 @@ def capture(
         for index, prompt in enumerate(prompts):
             active.clear()
             try:
-                rendered = renderer.render(prompt)
+                if isinstance(prompt, RenderedPrompt):
+                    if (prompt.renderer_digest != renderer.digest or not prompt.token_ids
+                        or any(type(token) is not int or token < 0 for token in prompt.token_ids)):
+                        raise PromptInputError("pre-rendered demonstration differs from the tokenizer rendering policy")
+                    rendered = prompt
+                else:
+                    rendered = renderer.render(prompt)
             except PromptInputError as exc:
                 raise WeightEditInputError(str(exc)) from exc
             if sink is None:

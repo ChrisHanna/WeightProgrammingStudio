@@ -97,6 +97,8 @@ def reference_task(*, rows_per_template: int = 8) -> TaskAdapter:
     scorer = ComponentReference("reference_invoice_exact_match", "1", identity, {})
     verifier = ComponentReference("reference_invoice_verifier", "1", identity, {})
     methods = tuple(CandidateMethod(name, "1", identity, {}) for name in ("unchanged_base", "sft"))
+    methods += (CandidateMethod("weight_edit", "1", identity, {"target_surrogate": "teacher_forced_token_loss",
+                                                               "gradient_inspection_used": True}),)
     job = GymJobSpec(
         job_id="synthetic-invoice-extraction-v1", title="Synthetic invoice extraction",
         description="Extract customer, product, and quantity from synthetic invoice text.",

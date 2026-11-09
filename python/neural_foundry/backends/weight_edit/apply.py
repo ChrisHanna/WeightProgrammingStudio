@@ -21,7 +21,7 @@ from ...model_digest import model_state_digest
 from ...prompt_rendering import PromptRenderer
 from .discover import SiteMap
 from .loader import LoadedModel, UnsupportedModel, WeightEditInputError, load_model, require_editable, storage_groups
-from ...provenance import resolve_checkpoint
+from ...provenance import parse_strict_json, resolve_checkpoint
 from .methods.base import Delta
 
 
@@ -187,7 +187,8 @@ def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_dig
         raise
 
 
-def seal_serving_probes(reference: CandidateRef, identity: Mapping[str, Any], portability: Mapping[str, Any]) -> CandidateRef:
+def seal_serving_probes(reference: CandidateRef, identity: Mapping[str, Any], portability: Mapping[str, Any],
+                       *, worker_execution: Mapping[str, Any] | None = None) -> CandidateRef:
     from dataclasses import replace
     from .serving_probes import verify_identity
 
@@ -205,6 +206,11 @@ def seal_serving_probes(reference: CandidateRef, identity: Mapping[str, Any], po
         or identity["renderer_digest"] != receipt["renderer_digest"] or portability.get("verified") is not True):
         raise UnsupportedModel("creation-time serving evidence differs from the exported candidate")
     updated = {**receipt, "identity_probes": dict(identity), "portability_verification": dict(portability)}
+    if worker_execution is not None:
+        if (worker_execution.get("kind") != "nf_local_worker_receipt_v1" or type(worker_execution.get("returncode")) is not int
+            or worker_execution["returncode"] != 0 or worker_execution.get("timed_out") is not False):
+            raise UnsupportedModel("worker execution is incomplete and cannot be sealed")
+        updated["worker_execution"] = parse_strict_json(_wire_document(worker_execution))
     descriptor, temporary_name = tempfile.mkstemp(prefix=".nf-serving-receipt-", dir=root)
     temporary = Path(temporary_name)
     try:

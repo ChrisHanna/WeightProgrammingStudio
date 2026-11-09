@@ -57,6 +57,12 @@ Qwen3-0.6B passes the redesigned bf16 compatibility probe, including separate id
 
 The tests use tiny local instances of seven standard architectures, the original mini GPT-NeoX and Qwen2 engines, and the already-cached Qwen3 checkpoint. Complete compatibility qualification, lifecycle registration, the proof-loop weight-edit arm, and the evidence-generated catalog remain subsequent work. Distributed loading is not yet implemented. Stock NeMo Gym rollout rendering is separately confirmed not to use the shared token-ID path; no positive NeMo rendering claim is made.
 
+## Lifecycle Trainer
+
+`weight_edit.generic@1` is registered as a probe-gated TrainerAdapter. It rejects stale base state, file lineage, renderer, family, context, job, or request digests before dispatch. The execution runner invokes a bounded worker, which independently verifies its runtime/helper identity. The initial recipe uses the unchanged legacy key-value solve with target vectors derived from teacher-forced token-loss output gradients on approved demonstrations. This is an explicit gradient-based surrogate, not a ROME/MEMIT implementation or a fully gradient-free method.
+
+Training and preservation token/key budgets are frozen in the recipe. A separately supplied public-train preservation panel is measured before and after editing; candidates exceeding the declared logit-drift bound or producing no effective tensor edit are rejected. Panel provenance is caller-supplied public input, not independent custody or a global safety guarantee. The candidate is exported, checked for portability against the frozen base calibration, sealed with vLLM creation identity, verified on fresh serving, and bound to its execution receipt before lifecycle publication. Tiny-model numerical and mocked-serving orchestration tests pass; the live weight-edit proof-loop arm remains the next validation gate.
+
 ## Advanced Methods
 
 The [methods contract](methods/README.md) records the next milestone: locate, calculated edits, and measured preservation, followed by sequential updates, merging, portable directions, and restricted training. It also specifies the frozen gym-to-edit request, bounded preservation panel, and receipts. These remain planned; holdout is final one-shot evaluation, never feedback for iterative stopping or target optimization.

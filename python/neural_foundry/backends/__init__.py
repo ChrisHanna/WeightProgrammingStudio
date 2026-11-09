@@ -83,4 +83,9 @@ registry = BackendRegistry()
 def discover_backends() -> list[str]:
 	import_module(f"{__name__}.peft")
 	import_module(f"{__name__}.automodel")
+	try:
+		import_module(f"{__name__}.weight_edit.adapter")
+	except ModuleNotFoundError as error:
+		if error.name not in {"torch", "transformers"}:
+			raise
 	return registry.available()
