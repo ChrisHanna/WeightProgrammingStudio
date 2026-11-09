@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
-    expected_answer_logprob, measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen)
+    _aggregate_logprobs, _validation_template_scores, expected_answer_logprob, measure_mode, open_sweep_checkpoint,
+    select_top_third, select_validation_screen)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -133,6 +134,24 @@ def test_validation_screen_selects_eight_rows_per_family():
         *(f"invoice_a:{index}" for index in range(8)),
         *(f"invoice_b:{index}" for index in range(8)),
     ]
+
+
+def test_validation_results_and_logprobs_are_reported_by_template():
+    rows = [{"scenario_id": "a1", "family_id": "invoice_a"},
+            {"scenario_id": "a2", "family_id": "invoice_a"},
+            {"scenario_id": "b1", "family_id": "invoice_b"}]
+    score = {"responses": [
+        {"scenario_id": "a1", "exact_match": 1.0, "format_valid": True},
+        {"scenario_id": "a2", "exact_match": 0.0, "format_valid": True},
+        {"scenario_id": "b1", "exact_match": 1.0, "format_valid": False},
+    ]}
+    by_template = _validation_template_scores(rows, score)
+    assert by_template["invoice_a"] == {"cases": 2, "exact_match": 0.5, "exact_match_count": 1,
+                                        "format_valid": 1.0, "format_valid_count": 2}
+    assert by_template["invoice_b"]["format_valid"] == 0.0
+    family_logprobs = {family: {"cases": 1, "response_tokens": 2, "sum_logprob": -2.0,
+                                "case_logprobs": [-2.0]} for family in ("invoice_a", "invoice_b")}
+    assert _aggregate_logprobs(family_logprobs)["mean_token_logprob"] == -1.0
 
 
 def test_layer_specific_calculation_reuses_verified_site_map(numerical_fixture):

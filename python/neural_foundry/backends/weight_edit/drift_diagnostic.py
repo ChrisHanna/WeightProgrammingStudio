@@ -87,6 +87,37 @@ def _compact_score(score: dict[str, Any]) -> dict[str, Any]:
     return {key: score[key] for key in ("split", "cases", "exact_match", "format_valid", "panel_digest", "responses") if key in score}
 
 
+def _validation_template_scores(rows: list[dict[str, Any]], score: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    family_by_id = {row["scenario_id"]: row["family_id"] for row in rows}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for response in score["responses"]:
+        family = family_by_id.get(response.get("scenario_id"))
+        if family is None:
+            raise WeightEditInputError("validation score contains an unknown scenario ID")
+        grouped.setdefault(family, []).append(response)
+    if sum(map(len, grouped.values())) != len(rows):
+        raise WeightEditInputError("validation score is missing template cases")
+    return {family: {"cases": len(responses),
+                     "exact_match": sum(row["exact_match"] for row in responses) / len(responses),
+                     "exact_match_count": sum(row["exact_match"] == 1.0 for row in responses),
+                     "format_valid": sum(row.get("format_valid", 0.0) for row in responses) / len(responses),
+                     "format_valid_count": sum(row.get("format_valid", 0.0) == 1.0 for row in responses)}
+            for family, responses in grouped.items()}
+
+
+def _aggregate_logprobs(reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    case_logprobs = [value for report in reports.values() for value in report["case_logprobs"]]
+    cases = sum(report["cases"] for report in reports.values())
+    response_tokens = sum(report["response_tokens"] for report in reports.values())
+    sum_logprob = sum(report["sum_logprob"] for report in reports.values())
+    if cases == 0 or response_tokens == 0 or len(case_logprobs) != cases:
+        raise WeightEditInputError("validation template likelihood reports are incomplete")
+    return {"cases": cases, "response_tokens": response_tokens,
+            "mean_case_logprob": sum(case_logprobs) / cases,
+            "mean_token_logprob": sum_logprob / response_tokens,
+            "sum_logprob": sum_logprob, "case_logprobs": case_logprobs}
+
+
 def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
     renderer = PromptRenderer(loaded.tokenizer)
     if type(batch_size) is not int or not 1 <= batch_size <= 16:
@@ -344,6 +375,9 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
     validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
                                          parameters=task.job.scenario_sources[0].parameters)
     validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
+    validation_by_template = {}
+    for row in validation_rows:
+        validation_by_template.setdefault(row["family_id"], []).append(task.project(row["input"], row["reference"]))
     screening_rows = select_validation_screen(validation_rows)
     screening_interactions = [task.project(row["input"], row["reference"]) for row in screening_rows]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -540,8 +574,12 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                             if score["exact_match"] == 1.0]
     baseline_train = {"task": _compact_score(batch_baseline_train),
                       "expected_answer_logprob": expected_answer_logprob(loaded, train_interactions, batch_size=16)}
+    baseline_validation_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
+                                       for family, interactions in validation_by_template.items()}
     baseline_validation = {"task": _compact_score(baseline_validation_score),
-                           "expected_answer_logprob": expected_answer_logprob(loaded, validation_interactions, batch_size=16)}
+                           "task_by_template": _validation_template_scores(validation_rows, baseline_validation_score),
+                           "expected_answer_logprob": _aggregate_logprobs(baseline_validation_by_template),
+                           "expected_answer_logprob_by_template": baseline_validation_by_template}
     baseline_validation_screen_logprob = expected_answer_logprob(loaded, screening_interactions, batch_size=16)
     baseline_record = {"kind": "nf_layer_sweep_baseline_v2", "phase": "baseline", "run_digest": run_digest,
                        "training": baseline_train, "validation": baseline_validation,
@@ -698,15 +736,28 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                         method="diagnostic_layer_strength_sweep", settings={"target_step": strength, "diagnostic_only": True})
                     train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
                     validation_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), validation_rows)
+                    validation_logprob_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
+                        for family, interactions in validation_by_template.items()}
+                    validation_logprob = _aggregate_logprobs(validation_logprob_by_template)
                     screen = by_key[f"screen:{layer}:{strength:.8g}"]
                     row = {"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": key, "phase": "exact",
                         "run_digest": run_digest, "layer": layer, "tensor_name": selected.tensor_name,
                         "target_step": strength, "status": "measured", "training": _compact_score(train_score),
                         "validation": _compact_score(validation_score),
+                        "validation_by_template": _validation_template_scores(validation_rows, validation_score),
                         "training_exact_match_gain": train_score["exact_match"] - baseline_train["task"]["exact_match"],
                         "validation_exact_match_gain": validation_score["exact_match"] - baseline_validation["task"]["exact_match"],
                         "training_logprob_gain": screen["training_logprob_gain"],
-                        "validation_logprob_gain": screen["validation_logprob_gain"],
+                        "validation_logprob_gain": validation_logprob["mean_token_logprob"]
+                            - baseline_validation["expected_answer_logprob"]["mean_token_logprob"],
+                        "validation_logprob": validation_logprob,
+                        "validation_logprob_by_template": {family: {
+                            "cases": report["cases"],
+                            "baseline_mean_token_logprob": baseline_validation_by_template[family]["mean_token_logprob"],
+                            "mean_token_logprob": report["mean_token_logprob"],
+                            "mean_token_logprob_gain": report["mean_token_logprob"]
+                                - baseline_validation_by_template[family]["mean_token_logprob"]}
+                            for family, report in validation_logprob_by_template.items()},
                         "effective_change_norm": edited.receipt["change_norms"][selected.tensor_name],
                         "changed_tensors": edited.receipt["edited_tensors"],
                         "candidate_model_digest": model_state_digest(loaded.model), "calculation_evidence": calculation}
