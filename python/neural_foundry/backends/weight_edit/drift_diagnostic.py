@@ -821,7 +821,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                     train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
                     train_score = score_public_rows(task, validation_model(loaded, batch_size=16,
                         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
-                    validation_score = score_public_rows(task, validation_model(loaded, batch_size=16,
+                    validation_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
                         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
                     validation_logprob_by_template = {family: expected_answer_logprob(loaded, interactions, batch_size=16)
                         for family, interactions in validation_by_template.items()}

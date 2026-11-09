@@ -220,9 +220,10 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
                 "case_logprobs": [mean] * cases}
 
     def fake_score(task, model, rows, split="validation"):
+        scoring_batch_sizes.append((split, model.batch_size))
         responses = [{"scenario_id": row["scenario_id"], "response": row["reference"],
                       "format_valid": True, "exact_match": float(index % 2),
-                      "execution_evidence": {"generated_token_ids": [index]}}
+                      "execution_evidence": {"generated_token_ids": [index, model.batch_size]}}
                      for index, row in enumerate(rows)]
         return {"split": split, "cases": len(rows), "exact_match": sum(row["exact_match"] for row in responses) / len(rows),
                 "format_valid": 1.0, "panel_digest": "sha256:" + "d" * 64, "responses": responses}
@@ -234,11 +235,14 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     monkeypatch.setattr(diagnostic, "score_public_rows", fake_score)
     monkeypatch.setattr(diagnostic, "expected_answer_logprob", fake_logprob)
     generation_limits = []
+    scoring_batch_sizes = []
     make_validation_model = diagnostic.validation_model
 
     def track_generation_limit(model, **kwargs):
         generation_limits.append(kwargs["max_new_tokens"])
-        return make_validation_model(model, **kwargs)
+        validation = make_validation_model(model, **kwargs)
+        validation.batch_size = kwargs["batch_size"]
+        return validation
 
     monkeypatch.setattr(diagnostic, "validation_model", track_generation_limit)
     monkeypatch.setattr(diagnostic, "calibrate_one_ulp", lambda *args, **kwargs: {"calibration_digest": "cpu-smoke"})
@@ -259,8 +263,12 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     assert len(report["exact_scored_layer_indices"]) == 1
     assert report["base_train"]["task"]["cases"] == len(parent)
     assert report["base_validation"]["task"]["cases"] == 4
+    assert report["batch_generation_equivalent_to_serial"] is False
+    assert report["exact_batch_size"] == 1
     assert report["base_validation"]["task_by_template"]
     assert generation_limits and set(generation_limits) == {diagnostic.LAYER_SWEEP_MAX_NEW_TOKENS}
+    validation_batches = [batch for split, batch in scoring_batch_sizes if split == "validation"]
+    assert validation_batches[2:] == [1, 1]
     assert all(row["preservation_v2_report_only"]["passed"] for row in report["results"]
                if row.get("phase") == "exact" and row.get("status") == "measured")
     assert report["strength_1_stop_gate"]["continue_to_multilayer"] is False
