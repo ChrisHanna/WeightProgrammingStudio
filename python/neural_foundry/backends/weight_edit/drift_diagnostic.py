@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,24 +15,34 @@ import torch
 
 from ...gym_job import GymJobError, gym_job_from_document
 from ...gym_adapters import _parse_generated_json
+from ...gym_artifacts import CandidateRef
 from ...gym_service import ExecutionResponse, GymStudioService, _document_digest, _wire_document
 from ...model_digest import model_state_digest
 from ...provenance import parse_strict_json
 from ...reference_json_extraction import generate_scenarios, reference_task
 from ...json_proof_loop import SPECIALIST_POLICY, public_required_rows, score_public_rows, specialist_acceptance
 from ...prompt_rendering import PromptRenderer
-from .apply import apply, tensor_digests
+from .apply import apply, save, tensor_digests
 from .loader import WeightEditInputError, load_model
 from .discover import SiteMap, find_blocks, find_sites
 from .methods import Delta
 from .numerics import deterministic_execution
 from .preservation import calibrate_one_ulp, float32_logits_of_exact_weights, metrics, verify_v2
-from .worker import calculate_edit, preservation_logits
+from .worker import calculate_edit, calculate_edits_for_sites, preservation_logits
 from .demonstrations import prepare_demonstration
 
 STRENGTHS = (0.0, 1e-5, 1e-4, 1e-3)
 LAYER_SWEEP_STRENGTHS = (1e-2, 0.1, 0.5, 1.0)
 LAYER_SWEEP_EXACT_LAYER_COUNT = 3
+
+
+def select_top_third(screen_rows: list[dict[str, Any]]) -> list[str]:
+    eligible = [row for row in screen_rows if row.get("status") == "measured"
+                and isinstance(row.get("validation_screen_logprob_gain"), (int, float))]
+    eligible.sort(key=lambda row: (row["validation_screen_logprob_gain"],
+                                   row["training_logprob_gain"], -row["layer"], -row["target_step"]), reverse=True)
+    count = max(1, (len(eligible) + 2) // 3) if eligible else 0
+    return [row["checkpoint_key"] for row in eligible[:count]]
 
 
 def open_sweep_checkpoint(path: Path, binding: dict[str, Any]) -> list[dict[str, Any]]:
@@ -76,6 +88,7 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
         if type(pad_token) is not int:
             raise WeightEditInputError("batched validation generation requires a pad or EOS token")
         results = []
+        use_json_stop = True
         for start in range(0, len(interactions), batch_size):
             chunk = interactions[start:start + batch_size]
             rendered = [renderer.render(interaction) for interaction in chunk]
@@ -91,8 +104,16 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
                 inputs[index, width - len(prompt_ids):] = prompt_ids
                 attention[index, width - len(prompt_ids):] = 1
             with deterministic_execution(loaded.model), torch.inference_mode():
-                output = loaded.model.generate(input_ids=inputs, attention_mask=attention, do_sample=False,
-                                               max_new_tokens=max_new_tokens, pad_token_id=pad_token)
+                try:
+                    output = loaded.model.generate(input_ids=inputs, attention_mask=attention, do_sample=False,
+                        max_new_tokens=max_new_tokens, pad_token_id=pad_token,
+                        **({"stop_strings": ["}"], "tokenizer": loaded.tokenizer} if use_json_stop else {}))
+                except ValueError as exc:
+                    if not use_json_stop or "substring not found" not in str(exc):
+                        raise
+                    use_json_stop = False
+                    output = loaded.model.generate(input_ids=inputs, attention_mask=attention, do_sample=False,
+                        max_new_tokens=max_new_tokens, pad_token_id=pad_token)
             for index in range(len(chunk)):
                 generated = output[index, width:].tolist()
                 eos = loaded.tokenizer.eos_token_id
@@ -239,9 +260,138 @@ def run_training_fit_diagnostic(state_dir: Path, request_path: Path, output_path
     return report
 
 
+def _sync_if_cuda(model) -> None:
+    if next(model.parameters()).device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def run_single_candidate_profile(state_dir: Path, request_path: Path, output_path: Path, *, strength=1e-3,
+                                 device="cuda:0"):
+    request = parse_strict_json(request_path.read_bytes())
+    if request["training_request_digest"] != _document_digest({key: value for key, value in request.items() if key != "training_request_digest"}):
+        raise WeightEditInputError("profile request digest is invalid")
+    job = gym_job_from_document(parse_strict_json((state_dir / "jobs" / (request["job_digest"][7:] + ".json")).read_bytes()))
+    task = reference_task(rows_per_template=job.scenario_sources[0].parameters["rows_per_template"])
+    if job.digest != task.job.digest:
+        raise WeightEditInputError("profile differs from frozen task")
+    service = GymStudioService(state_dir=state_dir)
+    approved = service.load_training_examples(request["dataset_digest"])
+    examples = [{"example_digest": _document_digest(row), "interaction": task.project(row["input"], row["response"])}
+                for row in approved]
+    if _document_digest({"examples": examples}) != request["projected_examples_digest"]:
+        raise WeightEditInputError("profile examples differ from frozen training dataset")
+    train_rows = [{"scenario_id": f"train:frozen-dataset:{index}", "input": row["input"], "reference": row["response"]}
+                  for index, row in enumerate(approved)]
+    validation_rows = generate_scenarios(split="validation", seed=request["recipe"]["seed"],
+                                         parameters=task.job.scenario_sources[0].parameters)
+    validation_interactions = [task.project(row["input"], row["reference"]) for row in validation_rows]
+    validation_by_family: dict[str, list[dict[str, Any]]] = {}
+    for row in validation_rows:
+        validation_by_family.setdefault(row["family_id"], []).append(row)
+    screening_rows = [row for family_rows in validation_by_family.values() for row in family_rows[:8]]
+    screening_interactions = [task.project(row["input"], row["reference"]) for row in screening_rows]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise WeightEditInputError("profile output already exists; choose a fresh path")
+    timings = {}
+    load_start = time.perf_counter()
+    loaded = load_model(request["base_reference"]["artifact_path"], dtype=torch.bfloat16, device=device)
+    _sync_if_cuda(loaded.model)
+    timings["model_load_seconds"] = time.perf_counter() - load_start
+    if loaded.base_digest != request["loaded_base"]["state_digest"]:
+        raise WeightEditInputError("profile base differs from frozen request")
+    baseline_likelihood_start = time.perf_counter()
+    baseline_train_logprob = expected_answer_logprob(loaded, [example["interaction"] for example in examples], batch_size=16)
+    baseline_validation_logprob = expected_answer_logprob(loaded, validation_interactions, batch_size=16)
+    _sync_if_cuda(loaded.model)
+    timings["baseline_batched_likelihood_seconds"] = time.perf_counter() - baseline_likelihood_start
+    baseline_exact_start = time.perf_counter()
+    baseline_train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
+    baseline_validation_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), validation_rows)
+    _sync_if_cuda(loaded.model)
+    timings["baseline_batched_exact_generation_seconds"] = time.perf_counter() - baseline_exact_start
+    discovery_start = time.perf_counter()
+    sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                       checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    writers = [site for site in sites.sites if site.role == "residual_write_mlp"]
+    if not writers:
+        raise WeightEditInputError("profile found no verified MLP write site")
+    profile_site = writers[len(writers) // 2]
+    timings["site_discovery_seconds"] = time.perf_counter() - discovery_start
+    capture_compute_start = time.perf_counter()
+    _, site, delta, calculation = calculate_edit(loaded, job, examples, request["recipe"],
+        site_layer=profile_site.layer, discovered_sites=sites)
+    _sync_if_cuda(loaded.model)
+    timings["capture_and_delta_compute_seconds"] = time.perf_counter() - capture_compute_start
+    base_digest = model_state_digest(loaded.model)
+    original = loaded.model.get_parameter(site.tensor_name).detach().clone()
+    try:
+        apply_start = time.perf_counter()
+        scaled = Delta("low_rank", U=delta.U * (strength / request["recipe"]["target_step"]), V=delta.V)
+        edited = apply(loaded, {site.tensor_name: scaled}, sites=SiteMap((site,), checkpoint_names_verified=True),
+                       method="single_candidate_profile", settings={"target_step": strength, "profile_only": True})
+        _sync_if_cuda(loaded.model)
+        timings["in_memory_apply_seconds"] = time.perf_counter() - apply_start
+
+        likelihood_start = time.perf_counter()
+        train_logprob = expected_answer_logprob(loaded, [example["interaction"] for example in examples], batch_size=16)
+        validation_logprob = expected_answer_logprob(loaded, validation_interactions, batch_size=16)
+        _sync_if_cuda(loaded.model)
+        timings["batched_likelihood_seconds"] = time.perf_counter() - likelihood_start
+
+        exact_start = time.perf_counter()
+        train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
+        validation_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), validation_rows)
+        _sync_if_cuda(loaded.model)
+        timings["batched_exact_generation_seconds"] = time.perf_counter() - exact_start
+
+        with tempfile.TemporaryDirectory(prefix="nf-one-candidate-profile-") as temporary:
+            artifact_path = Path(temporary) / "candidate"
+            export_start = time.perf_counter()
+            reference = save(edited, artifact_path, model_id=request["base_reference"]["model_id"],
+                             request_digest=request["training_request_digest"], base_reference=CandidateRef(**request["base_reference"]),
+                             base_revision=request["loaded_base"]["revision"])
+            _sync_if_cuda(loaded.model)
+            timings["export_and_builtin_reload_seconds"] = time.perf_counter() - export_start
+            reload_start = time.perf_counter()
+            reloaded = load_model(reference.artifact_path, dtype=torch.bfloat16, device="cpu")
+            timings["explicit_fresh_reload_seconds"] = time.perf_counter() - reload_start
+            if reloaded.base_digest != reference.model_digest:
+                raise WeightEditInputError("profile fresh reload differs from candidate")
+
+        report = {"kind": "nf_weight_edit_single_candidate_profile_v1", "evidence_status": "measured",
+            "strength": strength, "layer": site.layer, "tensor_name": site.tensor_name,
+            "base_digest": base_digest, "candidate_model_digest": edited.receipt["model_digest"],
+            "effective_change_norm": edited.receipt["change_norms"][site.tensor_name],
+            "baseline_train_exact_match": baseline_train_score["exact_match"],
+            "baseline_validation_exact_match": baseline_validation_score["exact_match"],
+            "train_exact_match": train_score["exact_match"], "validation_exact_match": validation_score["exact_match"],
+            "train_exact_match_gain": train_score["exact_match"] - baseline_train_score["exact_match"],
+            "validation_exact_match_gain": validation_score["exact_match"] - baseline_validation_score["exact_match"],
+            "baseline_train_mean_token_logprob": baseline_train_logprob["mean_token_logprob"],
+            "baseline_validation_mean_token_logprob": baseline_validation_logprob["mean_token_logprob"],
+            "train_mean_token_logprob": train_logprob["mean_token_logprob"],
+            "validation_mean_token_logprob": validation_logprob["mean_token_logprob"],
+            "train_mean_token_logprob_gain": train_logprob["mean_token_logprob"] - baseline_train_logprob["mean_token_logprob"],
+            "validation_mean_token_logprob_gain": validation_logprob["mean_token_logprob"] - baseline_validation_logprob["mean_token_logprob"],
+            "calculation_evidence": calculation, "timings_seconds": timings,
+            "evaluation_batch_size": 16, "generation_max_new_tokens": 40,
+            "serving_container_profiled": False, "candidate_published": False,
+            "holdout_accessed": False, "release_authorized": False}
+        report["profile_digest"] = _document_digest(report)
+        with output_path.open("xb") as stream:
+            stream.write(_wire_document(report))
+        return report
+    finally:
+        with torch.no_grad():
+            loaded.model.get_parameter(site.tensor_name).copy_(original)
+        if model_state_digest(loaded.model) != base_digest:
+            raise WeightEditInputError("single-candidate profile failed exact base restoration")
+
+
 def expected_answer_logprob(loaded, interactions, *, batch_size=4):
-    if type(batch_size) is not int or not 1 <= batch_size <= 8:
-        raise WeightEditInputError("likelihood batch size must be from 1 to 8")
+    if type(batch_size) is not int or not 1 <= batch_size <= 64:
+        raise WeightEditInputError("likelihood batch size must be from 1 to 64")
     renderer = PromptRenderer(loaded.tokenizer)
     device = next(loaded.model.parameters()).device
     case_sums, case_means, token_count = [], [], 0
@@ -317,35 +467,47 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     records = open_sweep_checkpoint(checkpoint_path, binding)
     by_key = {row["checkpoint_key"]: row for row in records if row.get("checkpoint_key")}
 
-    batch_baseline_train = score_public_rows(task, validation_model(loaded, batch_size=8), train_rows, split="train")
-    batch_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=8), validation_rows)
+    batch_baseline_train = score_public_rows(task, validation_model(loaded, batch_size=16), train_rows, split="train")
+    batch_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=16), validation_rows)
     serial_baseline_validation = score_public_rows(task, validation_model(loaded, batch_size=1), validation_rows)
     batch_equivalent = all(left["response"] == right["response"]
         and left.get("execution_evidence", {}).get("generated_token_ids") == right.get("execution_evidence", {}).get("generated_token_ids")
         for left, right in zip(batch_baseline_validation["responses"], serial_baseline_validation["responses"], strict=True))
     exact_batch_size = 8 if batch_equivalent else 1
     baseline_validation_score = batch_baseline_validation if batch_equivalent else serial_baseline_validation
+    base_train_records = batch_baseline_train["responses"]
+    failing_examples = [example for example, score in zip(examples, base_train_records, strict=True)
+                        if score["exact_match"] == 0.0]
+    passing_interactions = [task.project(row["input"], None) for row, score in zip(approved, base_train_records, strict=True)
+                            if score["exact_match"] == 1.0]
     baseline_train = {"task": _compact_score(batch_baseline_train),
-                      "expected_answer_logprob": expected_answer_logprob(loaded, train_interactions)}
+                      "expected_answer_logprob": expected_answer_logprob(loaded, train_interactions, batch_size=16)}
     baseline_validation = {"task": _compact_score(baseline_validation_score),
-                           "expected_answer_logprob": expected_answer_logprob(loaded, validation_interactions)}
+                           "expected_answer_logprob": expected_answer_logprob(loaded, validation_interactions, batch_size=16)}
+    baseline_validation_screen_logprob = expected_answer_logprob(loaded, screening_interactions, batch_size=16)
     baseline_record = {"kind": "nf_layer_sweep_baseline_v2", "phase": "baseline", "run_digest": run_digest,
                        "training": baseline_train, "validation": baseline_validation,
+                       "validation_screen_cases": len(screening_rows),
+                       "validation_screen_logprob": baseline_validation_screen_logprob,
                        "batch_generation_equivalent_to_serial": batch_equivalent, "exact_batch_size": exact_batch_size}
     if "baseline" not in by_key:
         baseline_record["checkpoint_key"] = "baseline"
         append_sweep_checkpoint(checkpoint_path, baseline_record)
         by_key["baseline"] = baseline_record
 
-    calculated_by_layer = {}
+    if not failing_examples:
+        raise WeightEditInputError("base has no failing approved training examples to target")
+    protected_interactions = list(request["recipe"]["preservation_interactions"]) + passing_interactions
+    all_deltas = calculate_edits_for_sites(loaded, job, failing_examples, request["recipe"], sites=sites,
+                                           retention_interactions=protected_interactions)
+    calculated_by_layer = {site.layer: (site, *all_deltas[site.tensor_name]) for site in writers}
+
     for site in writers:
         selected_strengths = [strength for strength in strengths
                               if f"screen:{site.layer}:{strength:.8g}" not in by_key]
         if not selected_strengths:
             continue
-        _, selected, calculated, calculation = calculate_edit(loaded, job, examples, request["recipe"],
-            site_layer=site.layer, discovered_sites=sites)
-        calculated_by_layer[site.layer] = (selected, calculated, calculation)
+        selected, calculated, calculation = calculated_by_layer[site.layer]
         original = loaded.model.get_parameter(selected.tensor_name).detach().clone()
         try:
             for strength in selected_strengths:
@@ -356,14 +518,15 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                 try:
                     edited = apply(loaded, {selected.tensor_name: delta}, sites=SiteMap((selected,), checkpoint_names_verified=True),
                         method="diagnostic_layer_strength_sweep", settings={"target_step": strength, "diagnostic_only": True})
-                    train_logprob = expected_answer_logprob(loaded, train_interactions)
-                    validation_logprob = expected_answer_logprob(loaded, validation_interactions)
+                    train_logprob = expected_answer_logprob(loaded, train_interactions, batch_size=16)
+                    validation_screen_logprob = expected_answer_logprob(loaded, screening_interactions, batch_size=16)
                     row = {"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": key, "phase": "screen",
                         "run_digest": run_digest, "layer": selected.layer, "tensor_name": selected.tensor_name,
                         "target_step": strength, "status": "measured", "training_logprob": train_logprob,
-                        "validation_logprob": validation_logprob,
+                        "validation_screen_logprob": validation_screen_logprob,
+                        "validation_screen_cases": len(screening_rows),
                         "training_logprob_gain": train_logprob["mean_token_logprob"] - baseline_train["expected_answer_logprob"]["mean_token_logprob"],
-                        "validation_logprob_gain": validation_logprob["mean_token_logprob"] - baseline_validation["expected_answer_logprob"]["mean_token_logprob"],
+                        "validation_screen_logprob_gain": validation_screen_logprob["mean_token_logprob"] - baseline_validation_screen_logprob["mean_token_logprob"],
                         "effective_change_norm": edited.receipt["change_norms"][selected.tensor_name],
                         "changed_tensors": edited.receipt["edited_tensors"],
                         "candidate_model_digest": model_state_digest(loaded.model), "calculation_evidence": calculation}
@@ -383,10 +546,62 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                 loaded.model.get_parameter(selected.tensor_name).copy_(original)
 
     screen_rows = [by_key[f"screen:{site.layer}:{strength:.8g}"] for site in writers for strength in strengths]
-    screen_measured = [row for row in screen_rows if row.get("status") == "measured"]
+    halving_key = "halving1"
+    if halving_key in by_key:
+        refine_keys = by_key[halving_key]["selected_candidate_keys"]
+    else:
+        refine_keys = select_top_third(screen_rows)
+        halving_record = {"kind": "nf_layer_sweep_halving_v2", "checkpoint_key": halving_key,
+            "phase": "successive_halving", "run_digest": run_digest,
+            "screen_cases": len(screening_rows), "screened_candidates": len(screen_rows),
+            "refined_candidate_keys": refine_keys, "selection_metric": "public_validation_screen_logprob_gain"}
+        append_sweep_checkpoint(checkpoint_path, halving_record)
+        by_key[halving_key] = halving_record
+
+    for candidate_key in refine_keys:
+        refine_key = candidate_key.replace("screen:", "refine:", 1)
+        if refine_key in by_key:
+            continue
+        screen = by_key[candidate_key]
+        layer = screen["layer"]
+        selected, calculated, calculation = calculated_by_layer[layer]
+        original = loaded.model.get_parameter(selected.tensor_name).detach().clone()
+        try:
+            strength = screen["target_step"]
+            if model_state_digest(loaded.model) != base_digest:
+                raise WeightEditInputError("refinement candidate did not start from exact base")
+            delta = Delta("low_rank", U=calculated.U * (strength / request["recipe"]["target_step"]), V=calculated.V)
+            try:
+                apply(loaded, {selected.tensor_name: delta}, sites=SiteMap((selected,), checkpoint_names_verified=True),
+                      method="diagnostic_likelihood_refinement", settings={"target_step": strength, "diagnostic_only": True})
+                validation_logprob = expected_answer_logprob(loaded, validation_interactions, batch_size=16)
+                row = {"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": refine_key,
+                    "phase": "refine", "run_digest": run_digest, "layer": layer,
+                    "tensor_name": selected.tensor_name, "target_step": strength, "status": "measured",
+                    "validation_logprob": validation_logprob,
+                    "validation_logprob_gain": validation_logprob["mean_token_logprob"]
+                        - baseline_validation["expected_answer_logprob"]["mean_token_logprob"],
+                    "screen_validation_logprob_gain": screen["validation_screen_logprob_gain"]}
+            except Exception as exc:
+                row = {"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": refine_key,
+                    "phase": "refine", "run_digest": run_digest, "layer": layer,
+                    "tensor_name": selected.tensor_name, "target_step": strength,
+                    "status": "failed", "failure_type": type(exc).__name__}
+            finally:
+                with torch.no_grad():
+                    loaded.model.get_parameter(selected.tensor_name).copy_(original)
+            if model_state_digest(loaded.model) != base_digest:
+                raise WeightEditInputError("refinement candidate failed exact base restoration")
+            append_sweep_checkpoint(checkpoint_path, row)
+            by_key[refine_key] = row
+        finally:
+            with torch.no_grad():
+                loaded.model.get_parameter(selected.tensor_name).copy_(original)
+
+    refined_rows = [by_key[key.replace("screen:", "refine:", 1)] for key in refine_keys]
     layer_rank = []
     for site in writers:
-        rows = [row for row in screen_rows if row["layer"] == site.layer and row.get("status") == "measured"]
+        rows = [row for row in refined_rows if row["layer"] == site.layer and row.get("status") == "measured"]
         if rows:
             best_row = max(rows, key=lambda row: row["validation_logprob_gain"])
             layer_rank.append({"layer": site.layer, "tensor_name": site.tensor_name,
@@ -399,7 +614,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     else:
         selected_layers = [row["layer"] for row in layer_rank[:LAYER_SWEEP_EXACT_LAYER_COUNT]]
         selection = {"kind": "nf_layer_sweep_selection_v2", "checkpoint_key": selection_key,
-            "phase": "selection", "run_digest": run_digest, "selection_metric": "public_validation_mean_token_logprob_gain",
+            "phase": "selection", "run_digest": run_digest, "selection_metric": "full_public_validation_mean_token_logprob_gain",
             "selected_layers": selected_layers, "layer_ranking": layer_rank,
             "selection_adjusted": False, "interpretation": "Exploratory; selection uses public validation."}
         append_sweep_checkpoint(checkpoint_path, selection)
@@ -412,8 +627,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
         if not missing:
             continue
         if calculated is None:
-            _, selected, calculated, calculation = calculate_edit(loaded, job, examples, request["recipe"],
-                site_layer=layer, discovered_sites=sites)
+            raise WeightEditInputError("selected screen layer has no cached one-pass edit calculation")
         original = loaded.model.get_parameter(selected.tensor_name).detach().clone()
         try:
             for strength in missing:
@@ -424,8 +638,8 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                 try:
                     edited = apply(loaded, {selected.tensor_name: delta}, sites=SiteMap((selected,), checkpoint_names_verified=True),
                         method="diagnostic_layer_strength_sweep", settings={"target_step": strength, "diagnostic_only": True})
-                    train_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size), train_rows, split="train")
-                    validation_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size), validation_rows)
+                    train_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), train_rows, split="train")
+                    validation_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), validation_rows)
                     screen = by_key[f"screen:{layer}:{strength:.8g}"]
                     row = {"kind": "nf_layer_sweep_candidate_v2", "checkpoint_key": key, "phase": "exact",
                         "run_digest": run_digest, "layer": layer, "tensor_name": selected.tensor_name,
@@ -466,6 +680,8 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
               "selection_split": "public_validation", "task_scorer": "frozen_exact_match_v1",
               "job_digest": job.digest, "training_request_digest": request["training_request_digest"],
               "dataset_digest": request["dataset_digest"], "base_model_digest": base_digest,
+              "failing_training_examples": len(failing_examples),
+              "passing_training_examples_protected": len(passing_interactions),
               "base_train": baseline_train, "base_validation": baseline_validation,
               "strengths": list(strengths), "discovered_layer_count": len(all_writers),
               "screened_layer_indices": [site.layer for site in writers], "exact_scored_layer_indices": selected_layers,
@@ -610,7 +826,13 @@ def main():
     mode.add_argument("--task-validation", action="store_true")
     mode.add_argument("--training-fit", action="store_true")
     mode.add_argument("--layer-strength-sweep", action="store_true")
+    mode.add_argument("--profile-one", action="store_true")
     args = parser.parse_args()
+    if args.profile_one:
+        report = run_single_candidate_profile(args.state_dir, args.request, args.output)
+        print(json.dumps({"timings_seconds": report["timings_seconds"], "layer": report["layer"],
+                          "strength": report["strength"], "validation_exact_match": report["validation_exact_match"]}))
+        return
     if args.training_fit:
         report = run_training_fit_diagnostic(args.state_dir, args.request, args.output)
         print(json.dumps({"split": "train", "cases": report["baseline"]["cases"], "base": report["baseline"]["exact_match"],

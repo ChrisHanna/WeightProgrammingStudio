@@ -109,6 +109,50 @@ def test_worker_calculates_real_model_gradient_targets_with_bounded_keys(numeric
         calculate_edit(loaded, task.job, examples, {**recipe, "max_keys": 1})
 
 
+def test_calculate_edit_selects_requested_layer_and_strength_one_moves_weights(numerical_fixture):
+    from neural_foundry.backends.weight_edit.worker import calculate_edit
+    from neural_foundry.backends.weight_edit.apply import apply
+    from neural_foundry.backends.weight_edit.methods import Delta
+    from neural_foundry.backends.weight_edit.discover import SiteMap
+    from neural_foundry.model_digest import model_state_digest
+
+    loaded, task, examples, recipe = numerical_fixture
+    base_digest = model_state_digest(loaded.model)
+    for layer in (0, 1):
+        sites, site, delta, evidence = calculate_edit(loaded, task.job, examples, recipe, site_layer=layer)
+        assert site.layer == layer
+        original = loaded.model.get_parameter(site.tensor_name).detach().clone()
+        try:
+            scaled = Delta("low_rank", U=delta.U * (1.0 / recipe["target_step"]), V=delta.V)
+            result = apply(loaded, {site.tensor_name: scaled}, sites=SiteMap((site,), checkpoint_names_verified=True),
+                           method="strength_one_diagnostic", settings={"target_step": 1.0})
+            assert result.receipt["change_norms"][site.tensor_name] > 0
+            assert result.receipt["edited_tensors"] == [site.tensor_name]
+        finally:
+            with torch.no_grad():
+                loaded.model.get_parameter(site.tensor_name).copy_(original)
+        assert model_state_digest(loaded.model) == base_digest
+
+
+def test_multi_site_capture_computes_all_layer_deltas_once(numerical_fixture):
+    from neural_foundry.backends.weight_edit.worker import calculate_edits_for_sites
+    from neural_foundry.backends.weight_edit.discover import find_blocks, find_sites
+    from neural_foundry.model_digest import model_state_digest
+
+    loaded, task, examples, recipe = numerical_fixture
+    sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                       checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    selected = tuple(site for site in sites.sites if site.role == "residual_write_mlp")
+    digest = model_state_digest(loaded.model)
+    results = calculate_edits_for_sites(loaded, task.job, examples, recipe, sites=type(sites)(selected, True),
+                                        retention_interactions=recipe["preservation_interactions"])
+    assert set(results) == {site.tensor_name for site in selected}
+    assert all(delta.kind == "low_rank" and evidence["failing_key_count"] > 0
+               for delta, evidence in results.values())
+    assert model_state_digest(loaded.model) == digest
+    assert all(parameter.grad is None for parameter in loaded.model.parameters())
+
+
 def test_trainer_calculates_exports_and_seals_execution_receipt(tmp_path, numerical_fixture, monkeypatch):
     from pathlib import Path
     from neural_foundry.backends.weight_edit import adapter, worker

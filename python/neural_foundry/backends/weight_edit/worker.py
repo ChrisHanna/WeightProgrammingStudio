@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -101,6 +103,72 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
                 "preservation_count": len(panel), "preservation_input_authority": "caller_supplied_public_panel",
                 "renderer_digest": renderer.digest}
     return sites, site, delta, evidence
+
+
+def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
+                              retention_interactions: Sequence[Mapping[str, Any]]) -> dict[str, tuple[Any, dict[str, Any]]]:
+    """Capture each demonstration once across all selected MLP sites, then reuse it for every strength."""
+    recipe = validate_recipe(recipe)
+    if not sites.checkpoint_names_verified or not sites.sites or not retention_interactions:
+        raise GymJobError("multi-site calculation requires verified sites and protected interactions")
+    renderer = PromptRenderer(loaded.tokenizer)
+    for interaction in (*retention_interactions, *(example["interaction"] for example in examples)):
+        if len(renderer.render(interaction).token_ids) > recipe["max_sequence_tokens"]:
+            raise GymJobError("multi-site example exceeds the frozen sequence budget")
+    retained: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
+    keys: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
+    gradients: dict[str, list[torch.Tensor]] = {site.tensor_name: [] for site in sites.sites}
+
+    def collect(destination, *, collect_gradients=False):
+        def consume(name, inputs, outputs, output_gradient, prompt_digest):
+            destination[name].append(inputs)
+            if collect_gradients:
+                if output_gradient is None:
+                    raise GymJobError("multi-site gradient capture returned no output gradient")
+                gradients[name].append(output_gradient)
+        return consume
+
+    capture(loaded, sites, retention_interactions, output_dtype=torch.float64, sink=collect(retained))
+    total_tokens, key_count = 0, 0
+    for example in examples:
+        interaction = example["interaction"]
+        if interaction.get("format") == "json_extraction_v1":
+            if interaction.get("output_schema") != job.to_document()["task"]["output_schema"]:
+                raise GymJobError("demonstration schema differs from frozen job")
+            response = parse_strict_json(interaction["messages"][-1]["content"].encode())
+            validate_task_instance(job.task_output_schema, response, field="approved_response")
+        demonstration = prepare_demonstration(renderer, interaction)
+        total_tokens += len(demonstration.rendered.token_ids)
+        key_count += len(demonstration.positions)
+        if (len(demonstration.rendered.token_ids) > recipe["max_sequence_tokens"]
+            or total_tokens > recipe["max_training_tokens"] or key_count > recipe["max_keys"]):
+            raise GymJobError("multi-site demonstrations exceed frozen token/key budgets")
+        capture(loaded, sites, [demonstration.rendered], positions=[demonstration.positions],
+                loss_labels=[demonstration.labels], output_dtype=torch.float64,
+                sink=collect(keys, collect_gradients=True))
+    if not examples:
+        raise GymJobError("multi-site edit requires at least one base-failing training example")
+    result = {}
+    for site in sites.sites:
+        name = site.tensor_name
+        key = torch.cat(keys[name])
+        gradient = torch.cat(gradients[name])
+        norms = gradient.norm(dim=1, keepdim=True)
+        active = norms[:, 0] > 0
+        if not bool(active.any()):
+            raise GymJobError(f"target loss has no gradient at {name}")
+        weights = working_weight(loaded, site)
+        targets = key[active] @ weights.T - recipe["target_step"] * gradient[active] / norms[active]
+        protected = torch.cat(retained[name])
+        delta = LegacyKeyValueEdit(protected).compute(site, weights, key[active], targets,
+                    {"retention_nullspace_weight": recipe["retention_nullspace_weight"]})
+        result[name] = (delta, {"layer": site.layer, "site": site.document(), "failing_key_count": int(active.sum()),
+            "zero_gradient_keys": int((~active).sum()), "training_tokens": total_tokens,
+            "target_objective": "teacher_forced_token_loss_output_gradient", "gradient_inspection_used": True,
+            "protected_key_count": protected.shape[0], "preservation_digest": "sha256:" + hashlib.sha256(
+                protected.detach().cpu().contiguous().numpy().tobytes()).hexdigest(),
+            "renderer_digest": renderer.digest})
+    return result
 
 
 def train_payload(payload: dict[str, Any], serving_factory=None) -> CandidateRef:

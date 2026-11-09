@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
-    expected_answer_logprob, measure_mode, open_sweep_checkpoint)
+    expected_answer_logprob, measure_mode, open_sweep_checkpoint, select_top_third)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -58,6 +58,14 @@ def test_sweep_checkpoint_appends_each_result_and_rejects_mismatched_resume(tmp_
     assert open_sweep_checkpoint(path, binding) == [record]
     with pytest.raises(WeightEditInputError, match="binding"):
         open_sweep_checkpoint(path, {**binding, "request_digest": "sha256:" + "c" * 64})
+
+
+def test_successive_halving_selects_top_third_by_public_validation_likelihood():
+    rows = [{"checkpoint_key": f"candidate-{index}", "status": "measured", "layer": index % 4,
+             "target_step": (index % 4) + 0.01, "training_logprob_gain": 0.0,
+             "validation_screen_logprob_gain": float(index)} for index in range(9)]
+    rows.append({"checkpoint_key": "failed", "status": "failed", "layer": 0, "target_step": 1.0})
+    assert select_top_third(rows) == ["candidate-8", "candidate-7", "candidate-6"]
 
 
 def test_layer_specific_calculation_reuses_verified_site_map(numerical_fixture):
