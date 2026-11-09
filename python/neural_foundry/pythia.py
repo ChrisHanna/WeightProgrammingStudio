@@ -840,6 +840,7 @@ class Qwen2CausalLM:
         *,
         capture_layer: int = -1,
         layer_down_proj_override: dict[int, torch.Tensor] | None = None,
+        site_inputs: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         h = int(self.config["hidden_size"])
         heads = int(self.config["num_attention_heads"])
@@ -885,12 +886,18 @@ class Qwen2CausalLM:
             probs = torch.softmax(scores + mask, dim=-1)
             ctx = torch.matmul(probs, v).permute(1, 0, 2).contiguous().view(seq, h)
             attn_out = F.linear(ctx, self.tensors[f"{p}.self_attn.o_proj.weight"])
+            if site_inputs is not None:
+                site_inputs[f"{p}.self_attn.o_proj.weight"] = ctx[-1]
             x = x + attn_out
 
             ln2 = _rms_norm(x, self.tensors[f"{p}.post_attention_layernorm.weight"])
             gate = F.linear(ln2, self.tensors[f"{p}.mlp.gate_proj.weight"])
             up = F.linear(ln2, self.tensors[f"{p}.mlp.up_proj.weight"])
             mlp_h = (gate * torch.sigmoid(gate)) * up
+            if site_inputs is not None:
+                site_inputs[f"{p}.mlp.gate_proj.weight"] = ln2[-1]
+                site_inputs[f"{p}.mlp.up_proj.weight"] = ln2[-1]
+                site_inputs[f"{p}.mlp.down_proj.weight"] = mlp_h[-1]
             if layer_idx == target_layer:
                 captured_key = mlp_h[-1].clone()
             w_down = (
@@ -1139,12 +1146,11 @@ def run_pythia_weight_programming_study(
 
     k_dev_mat = torch.stack(k_dev_list, dim=1)  # [in_dim, rank]
     left_factors = torch.stack(v_delta_list, dim=1).contiguous()  # [out_dim, rank]
-    gram = (
-        k_dev_mat @ k_dev_mat.T
-        + float(retention_nullspace_weight) * (k_ret_mat @ k_ret_mat.T)
-        + 1e-3 * torch.eye(in_dim, dtype=torch.float64)
+    from .backends.weight_edit.methods.base import legacy_rank_factors
+
+    left_factors, right_factors = legacy_rank_factors(
+        k_dev_mat, left_factors, k_ret_mat, retention_nullspace_weight,
     )
-    right_factors = torch.linalg.solve(gram, k_dev_mat).T.contiguous()  # [rank, in_dim]
 
     # 3. Compile and execute the low-rank weight update through the authoritative Rust surgeon
     tx = ir.WeightIRTransactionBuilder.execute_matrix_edit(
