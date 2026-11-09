@@ -21,8 +21,10 @@ from .prompt_rendering import PromptRenderer
 
 def _parse_generated_json(text: str) -> Any:
     candidate = text.strip()
-    if candidate.startswith("```json") and candidate.endswith("```"):
-        candidate = candidate[len("```json"): -len("```")].strip()
+    if candidate.startswith("```json"):
+        candidate = candidate[len("```json"):].strip()
+        if candidate.endswith("```"):
+            candidate = candidate[:-len("```")].strip()
     try:
         return parse_strict_json(candidate.encode())
     except ValueError:

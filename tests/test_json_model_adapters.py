@@ -15,6 +15,21 @@ from neural_foundry.gym_service import CandidateIdentity
 from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
 
 
+@pytest.mark.parametrize("text", [
+    '```json\n{"customer":"Aster","product":"folders","quantity":2}\n```',
+    '```json\n{"customer":"Aster","product":"folders","quantity":2}\n',
+])
+def test_generated_json_parser_accepts_closed_object_with_optional_fence(text: str) -> None:
+    assert gym_adapters._parse_generated_json(text) == {
+        "customer": "Aster", "product": "folders", "quantity": 2,
+    }
+
+
+def test_generated_json_parser_rejects_truncated_object_inside_fence() -> None:
+    text = '```json\n{"customer":"Aster","product":"folders","quantity":'
+    assert gym_adapters._parse_generated_json(text) == text
+
+
 def test_automodel_accepts_completed_json_demonstrations() -> None:
     task = reference_task(rows_per_template=1)
     row = generate_scenarios(split="train", seed=17, parameters={"rows_per_template": 1})[0]
