@@ -4,7 +4,7 @@
   "retention_mode": "specialist",
   "purpose": "Allow a task-specialized weight edit to trade preservation for a measurable public task improvement while retaining the required-set gate.",
   "edit_calculation": {
-    "retention_nullspace_weight": 0.1,
+    "retention_nullspace_weight": 0.0,
     "target_strengths_for_public_search": [0.01, 0.1, 0.5, 1.0],
     "eligible_sites": "up to five discovered middle MLP write sites selected using public validation",
     "task_training_targets": "failing approved training examples only",
