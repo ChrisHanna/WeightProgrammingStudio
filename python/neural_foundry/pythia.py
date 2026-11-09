@@ -426,6 +426,7 @@ class PythiaModel:
         layer_down_proj_override: dict[int, torch.Tensor] | None = None,
         residual_sink: list[torch.Tensor] | None = None,
         site_inputs: dict[str, torch.Tensor] | None = None,
+        match_transformers_internals: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Executes the exact GPT-NeoX causal forward pass and returns `(logits, final_token_mlp_key)`.
 
@@ -443,18 +444,25 @@ class PythiaModel:
 
         x = self.tensors["gpt_neox.embed_in.weight"][list(token_ids)]
         seq = int(x.shape[0])
-        inv_freq = 1.0 / (rot_base ** (torch.arange(0, rot_dim, 2, dtype=torch.float64) / rot_dim))
-        pos = torch.arange(seq, dtype=torch.float64)
+        device = x.device
+        dtype = x.dtype
+        rotary_dtype = torch.float32 if match_transformers_internals else dtype
+        inv_freq = 1.0 / (
+            rot_base ** (torch.arange(0, rot_dim, 2, dtype=rotary_dtype, device=device) / rot_dim)
+        )
+        pos = torch.arange(seq, dtype=rotary_dtype, device=device)
         freqs = torch.outer(pos, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
-        cos = emb.cos().unsqueeze(0)
-        sin = emb.sin().unsqueeze(0)
+        cos = emb.cos().unsqueeze(0).to(dtype)
+        sin = emb.sin().unsqueeze(0).to(dtype)
 
         def _rotate_half(t: torch.Tensor) -> torch.Tensor:
             half = t.shape[-1] // 2
             return torch.cat([-t[..., half:], t[..., :half]], dim=-1)
 
-        captured_key = torch.zeros(int(self.config["intermediate_size"]), dtype=torch.float64)
+        captured_key = torch.zeros(
+            int(self.config["intermediate_size"]), dtype=dtype, device=device
+        )
         for layer_idx in range(num_layers):
             prefix = f"gpt_neox.layers.{layer_idx}"
             ln1 = F.layer_norm(
@@ -486,10 +494,10 @@ class PythiaModel:
             k = torch.cat([kr, kp], dim=-1)
             scores = torch.matmul(q, k.transpose(-2, -1)) / (head_dim**0.5)
             mask = torch.triu(
-                torch.full((seq, seq), float("-inf"), dtype=torch.float64),
+                torch.full((seq, seq), float("-inf"), dtype=dtype, device=device),
                 diagonal=1,
             )
-            probs = torch.softmax(scores + mask, dim=-1)
+            probs = torch.softmax(scores + mask, dim=-1, dtype=torch.float32 if match_transformers_internals else dtype).to(dtype)
             ctx = torch.matmul(probs, v).permute(1, 0, 2).contiguous().view(seq, h)
             attn_out = F.linear(
                 ctx,
@@ -840,7 +848,9 @@ class Qwen2CausalLM:
         *,
         capture_layer: int = -1,
         layer_down_proj_override: dict[int, torch.Tensor] | None = None,
+        residual_sink: list[torch.Tensor] | None = None,
         site_inputs: dict[str, torch.Tensor] | None = None,
+        match_transformers_internals: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         h = int(self.config["hidden_size"])
         heads = int(self.config["num_attention_heads"])
@@ -851,19 +861,30 @@ class Qwen2CausalLM:
         eps = float(self.config.get("rms_norm_eps", 1e-6))
 
         def _rms_norm(x_in: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            if match_transformers_internals:
+                values = x_in.float()
+                rms = torch.rsqrt(values.pow(2).mean(-1, keepdim=True) + eps)
+                return weight * (values * rms).to(x_in.dtype)
             rms = torch.rsqrt(x_in.pow(2).mean(-1, keepdim=True) + eps)
             return x_in * rms * weight
 
         x = self.tensors["model.embed_tokens.weight"][list(token_ids)]
         seq = int(x.shape[0])
-        captured_key = torch.zeros(int(self.config["intermediate_size"]), dtype=torch.float64)
+        device = x.device
+        dtype = x.dtype
+        captured_key = torch.zeros(
+            int(self.config["intermediate_size"]), dtype=dtype, device=device
+        )
         rot_base = float(self.config.get("rope_theta", 10000.0))
-        inv_freq = 1.0 / (rot_base ** (torch.arange(0, head_dim, 2, dtype=torch.float64) / head_dim))
-        pos = torch.arange(seq, dtype=torch.float64)
+        rotary_dtype = torch.float32 if match_transformers_internals else dtype
+        inv_freq = 1.0 / (
+            rot_base ** (torch.arange(0, head_dim, 2, dtype=rotary_dtype, device=device) / head_dim)
+        )
+        pos = torch.arange(seq, dtype=rotary_dtype, device=device)
         freqs = torch.outer(pos, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
-        cos = emb.cos().unsqueeze(0)
-        sin = emb.sin().unsqueeze(0)
+        cos = emb.cos().unsqueeze(0).to(dtype)
+        sin = emb.sin().unsqueeze(0).to(dtype)
 
         def _rotate_half(t: torch.Tensor) -> torch.Tensor:
             half = t.shape[-1] // 2
@@ -882,8 +903,11 @@ class Qwen2CausalLM:
                 k = k.repeat_interleave(rep, dim=0)
                 v = v.repeat_interleave(rep, dim=0)
             scores = torch.matmul(q, k.transpose(-2, -1)) / (head_dim**0.5)
-            mask = torch.triu(torch.full((seq, seq), float("-inf"), dtype=torch.float64), diagonal=1)
-            probs = torch.softmax(scores + mask, dim=-1)
+            mask = torch.triu(
+                torch.full((seq, seq), float("-inf"), dtype=dtype, device=device),
+                diagonal=1,
+            )
+            probs = torch.softmax(scores + mask, dim=-1, dtype=torch.float32 if match_transformers_internals else dtype).to(dtype)
             ctx = torch.matmul(probs, v).permute(1, 0, 2).contiguous().view(seq, h)
             attn_out = F.linear(ctx, self.tensors[f"{p}.self_attn.o_proj.weight"])
             if site_inputs is not None:
@@ -907,6 +931,8 @@ class Qwen2CausalLM:
             )
             x = x + F.linear(mlp_h, w_down)
 
+        if residual_sink is not None:
+            residual_sink.append(x)
         x_norm = _rms_norm(x, self.tensors["model.norm.weight"])
         logits = F.linear(x_norm, self.tensors["lm_head.weight"])
         return logits, captured_key
