@@ -1080,6 +1080,42 @@ class GymStudioService:
             examples.append(example)
         return tuple(examples)
 
+    def select_training_dataset(
+        self, dataset_digest: str, scenario_ids: Sequence[str], *, dataset_id: str,
+        selection_policy: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Create a provenance-preserving subset of a frozen public-train dataset."""
+        _digest(dataset_digest, "dataset_digest")
+        if (self.state_dir is None or not isinstance(dataset_id, str) or not dataset_id.strip()
+            or not isinstance(scenario_ids, (list, tuple)) or not scenario_ids
+            or len(scenario_ids) > MAX_PRACTICE_ATTEMPTS
+            or any(not isinstance(value, str) or not value for value in scenario_ids)
+            or len(set(scenario_ids)) != len(scenario_ids)):
+            raise GymJobError("training subset requires durable state, a bounded unique scenario roster, and dataset ID")
+        if not isinstance(selection_policy, Mapping) or not selection_policy:
+            raise GymJobError("training subset requires an explicit selection policy")
+        selection_policy = json.loads(_wire_document(dict(selection_policy)))
+        parent = self._load_state("datasets", dataset_digest[7:])
+        if (parent is None or parent.get("dataset_digest") != dataset_digest
+            or _document_digest({key: value for key, value in parent.items() if key != "dataset_digest"}) != dataset_digest
+            or parent.get("source_split") != "train"):
+            raise GymJobError("training subset source must be an intact frozen train dataset")
+        examples = self.load_training_examples(dataset_digest)
+        by_scenario = {example["scenario_id"]: example for example in examples}
+        if not set(scenario_ids) <= set(by_scenario):
+            raise GymJobError("training subset scenario IDs must come from the frozen parent dataset")
+        selected_digests = {_document_digest(example) for example in (by_scenario[scenario_id] for scenario_id in scenario_ids)}
+        selected_rows = [row for row in parent["examples"] if row["example_digest"] in selected_digests]
+        if len(selected_rows) != len(scenario_ids):
+            raise GymJobError("training subset failed exact example provenance matching")
+        manifest = {key: value for key, value in parent.items() if key != "dataset_digest"}
+        manifest.update({"dataset_id": dataset_id, "examples": selected_rows,
+            "parent_dataset_digest": dataset_digest, "selection_policy": selection_policy,
+            "selected_scenario_ids": list(scenario_ids), "release_authorized": False})
+        manifest["dataset_digest"] = _document_digest(manifest)
+        self._persist_state("datasets", manifest["dataset_digest"][7:], manifest)
+        return manifest
+
     def _get_scenario_batch(self, manifest_digest: str) -> dict[str, Any] | None:
         if not _valid_digest(manifest_digest):
             raise GymJobError("scenario_manifest_digest must be a sha256 digest")
