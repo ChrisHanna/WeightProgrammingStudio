@@ -106,7 +106,14 @@ def append_sweep_checkpoint(path: Path, record: dict[str, Any]) -> None:
 
 
 def _compact_score(score: dict[str, Any]) -> dict[str, Any]:
-    return {key: score[key] for key in ("split", "cases", "exact_match", "format_valid", "panel_digest", "responses") if key in score}
+    compact = {key: score[key] for key in ("split", "cases", "exact_match", "format_valid", "panel_digest", "responses") if key in score}
+    compact["truncated_answer_count"] = sum(
+        bool(row.get("execution_evidence", {}).get("truncated")) for row in score.get("responses", ()))
+    return compact
+
+
+def _completion_was_truncated(generated_token_ids: list[int], text: str, max_new_tokens: int) -> bool:
+    return len(generated_token_ids) >= max_new_tokens and isinstance(_parse_generated_json(text), str)
 
 
 def _validation_template_scores(rows: list[dict[str, Any]], score: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -211,8 +218,11 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
                 if type(eos) is int and eos in generated:
                     generated = generated[:generated.index(eos) + 1]
                 text = loaded.tokenizer.decode(generated, skip_special_tokens=True)
-                results.append(ExecutionResponse(_parse_generated_json(text),
+                parsed = _parse_generated_json(text)
+                results.append(ExecutionResponse(parsed,
                     {"raw_text": text, "generated_token_ids": generated,
+                     "max_new_tokens": max_new_tokens,
+                     "truncated": _completion_was_truncated(generated, text, max_new_tokens),
                      "renderer_digest": renderer.digest, "batch_size": len(chunk)}))
         return results
 
@@ -889,6 +899,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
               "training_scoring_cases": len(train_rows),
               "passing_training_examples_protected": len(passing_interactions),
               "base_train": baseline_train, "base_validation": baseline_validation,
+              "generation_max_new_tokens": LAYER_SWEEP_MAX_NEW_TOKENS,
               "strengths": list(strengths), "discovered_layer_count": len(all_writers),
               "screened_layer_indices": [site.layer for site in writers], "exact_scored_layer_indices": selected_layers,
               "screen_candidate_count": len(screen_rows), "exact_candidate_count": len(exact_rows),
@@ -906,6 +917,20 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
               "checkpoint_path": str(checkpoint_path), "run_digest": run_digest,
               "base_restored": True, "specialist_policy_approval": "pending",
               "candidate_published": False, "holdout_accessed": False, "release_authorized": False}
+    report["generation_truncation"] = {
+        "baseline_train": baseline_train["task"]["truncated_answer_count"],
+        "baseline_validation": baseline_validation["task"]["truncated_answer_count"],
+        "exact_candidates": sum(row["training"]["truncated_answer_count"] + row["validation"]["truncated_answer_count"]
+                                for row in exact_measured),
+        "answer_count": (baseline_train["task"]["cases"] + baseline_validation["task"]["cases"]
+            + sum(row["training"]["cases"] + row["validation"]["cases"] for row in exact_measured)),
+    }
+    report["generation_truncation"]["total_truncated_answers"] = (
+        report["generation_truncation"]["baseline_train"]
+        + report["generation_truncation"]["baseline_validation"]
+        + report["generation_truncation"]["exact_candidates"])
+    report["generation_truncation"]["zero_truncated_answers"] = (
+        report["generation_truncation"]["total_truncated_answers"] == 0)
     report["evidence_digest"] = _document_digest(report)
     with output_path.open("xb") as stream:
         stream.write(_wire_document(report))
@@ -913,6 +938,51 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
         loaded.model.to("cpu")
         torch.cuda.empty_cache()
     return report
+
+
+def audit_generation_truncation(report_path: Path, output_path: Path, *, max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS):
+    report = parse_strict_json(report_path.read_bytes())
+    if (report.get("kind") != "nf_weight_edit_layer_strength_diagnostic_v2"
+        or report.get("evidence_digest") != _document_digest({key: value for key, value in report.items()
+                                                              if key != "evidence_digest"})
+        or type(max_new_tokens) is not int or max_new_tokens < 1):
+        raise WeightEditInputError("truncation audit requires an intact layer-sweep report and positive token budget")
+    panels = [("baseline_train", report["base_train"]["task"]),
+              ("baseline_validation", report["base_validation"]["task"])]
+    for row in report["results"]:
+        if row.get("phase") == "exact" and row.get("status") == "measured":
+            panels.extend(((f"layer_{row['layer']}_strength_{row['target_step']}_train", row["training"]),
+                           (f"layer_{row['layer']}_strength_{row['target_step']}_validation", row["validation"])))
+    records = []
+    for name, score in panels:
+        responses = score.get("responses")
+        if not isinstance(responses, list) or len(responses) != score.get("cases"):
+            raise WeightEditInputError("truncation audit found an incomplete scored response roster")
+        token_counts = []
+        truncated = 0
+        for response in responses:
+            evidence = response.get("execution_evidence")
+            token_ids = evidence.get("generated_token_ids") if isinstance(evidence, dict) else None
+            raw_text = evidence.get("raw_text") if isinstance(evidence, dict) else None
+            if not isinstance(token_ids, list) or not isinstance(raw_text, str):
+                raise WeightEditInputError("truncation audit requires raw text and generated token IDs")
+            token_counts.append(len(token_ids))
+            if len(token_ids) >= max_new_tokens and isinstance(_parse_generated_json(raw_text), str):
+                truncated += 1
+        records.append({"panel": name, "cases": len(responses), "max_generated_tokens": max(token_counts, default=0),
+                        "at_generation_limit": sum(count >= max_new_tokens for count in token_counts),
+                        "truncated_answers": truncated})
+    truncated_count = sum(row["truncated_answers"] for row in records)
+    audit = {"kind": "nf_generation_truncation_audit_v1", "source_report_digest": report["evidence_digest"],
+             "run_digest": report["run_digest"], "max_new_tokens": max_new_tokens,
+             "panels": records, "total_scored_answers": sum(row["cases"] for row in records),
+             "total_truncated_answers": truncated_count, "zero_truncated_answers": truncated_count == 0,
+             "holdout_accessed": False, "candidate_published": False}
+    audit["evidence_digest"] = _document_digest(audit)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("xb") as stream:
+        stream.write(_wire_document(audit))
+    return audit
 
 
 def compare_logits(before: list[torch.Tensor], after: list[torch.Tensor]) -> dict[str, Any]:
@@ -1036,11 +1106,19 @@ def main():
     mode.add_argument("--layer-strength-sweep", action="store_true")
     mode.add_argument("--profile-one", action="store_true")
     mode.add_argument("--public-split-baseline", action="store_true")
+    mode.add_argument("--audit-truncation", action="store_true")
     args = parser.parse_args()
     if args.profile_one:
         report = run_single_candidate_profile(args.state_dir, args.request, args.output)
         print(json.dumps({"timings_seconds": report["timings_seconds"], "layer": report["layer"],
                           "strength": report["strength"], "validation_exact_match": report["validation_exact_match"]}))
+        return
+    if args.audit_truncation:
+        report = audit_generation_truncation(args.request, args.output)
+        print(json.dumps({"max_new_tokens": report["max_new_tokens"],
+                          "total_scored_answers": report["total_scored_answers"],
+                          "total_truncated_answers": report["total_truncated_answers"],
+                          "zero_truncated_answers": report["zero_truncated_answers"]}))
         return
     if args.public_split_baseline:
         report = run_public_split_baseline(args.state_dir, args.request, args.output)

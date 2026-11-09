@@ -8,8 +8,8 @@ from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
     _aggregate_logprobs, _load_training_rosters, _validation_template_scores, expected_answer_logprob,
-    _interactions_by_template, _mlp_writer_site_map, measure_mode, open_sweep_checkpoint, select_top_third,
-    select_validation_screen, strength_one_stop_gate)
+    _completion_was_truncated, _interactions_by_template, _mlp_writer_site_map, audit_generation_truncation,
+    measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen, strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -136,6 +136,34 @@ def test_validation_screen_selects_eight_rows_per_family():
         *(f"invoice_a:{index}" for index in range(8)),
         *(f"invoice_b:{index}" for index in range(8)),
     ]
+
+
+def test_generation_truncation_requires_budget_exhaustion_and_incomplete_json():
+    complete_at_budget = '{"customer":"Aster"}'
+    truncated_at_budget = '{"customer":"Aster"'
+    assert _completion_was_truncated([1, 2, 3, 4], complete_at_budget, 4) is False
+    assert _completion_was_truncated([1, 2, 3, 4], truncated_at_budget, 4) is True
+    assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is False
+
+
+def test_truncation_audit_reports_count_and_binds_source_digest(tmp_path):
+    response_rows = [{"scenario_id": "case:complete", "execution_evidence": {
+        "generated_token_ids": list(range(4)), "raw_text": '{"answer":1}'}},
+        {"scenario_id": "case:truncated", "execution_evidence": {
+        "generated_token_ids": list(range(4)), "raw_text": '{"answer":'}}]
+    score = {"cases": 2, "responses": response_rows}
+    report = {"kind": "nf_weight_edit_layer_strength_diagnostic_v2", "run_digest": "sha256:" + "a" * 64,
+        "base_train": {"task": score}, "base_validation": {"task": score}, "results": []}
+    report["evidence_digest"] = _document_digest(report)
+    source = tmp_path / "sweep.json"
+    source.write_bytes(json.dumps(report).encode())
+    audit_path = tmp_path / "truncation-audit.json"
+    audit = audit_generation_truncation(source, audit_path, max_new_tokens=4)
+    assert audit["total_scored_answers"] == 4
+    assert audit["total_truncated_answers"] == 2
+    assert audit["zero_truncated_answers"] is False
+    assert audit["source_report_digest"] == report["evidence_digest"]
+    assert json.loads(audit_path.read_bytes()) == audit
 
 
 def test_validation_interactions_are_grouped_for_each_template():
@@ -267,6 +295,7 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     assert report["exact_batch_size"] == 1
     assert report["base_validation"]["task_by_template"]
     assert generation_limits and set(generation_limits) == {diagnostic.LAYER_SWEEP_MAX_NEW_TOKENS}
+    assert report["generation_truncation"]["zero_truncated_answers"] is True
     validation_batches = [batch for split, batch in scoring_batch_sizes if split == "validation"]
     assert validation_batches[2:] == [1, 1]
     assert all(row["preservation_v2_report_only"]["passed"] for row in report["results"]
