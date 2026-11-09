@@ -137,6 +137,45 @@ def test_calculate_edit_selects_requested_layer_and_strength_one_moves_weights(n
         assert model_state_digest(loaded.model) == base_digest
 
 
+@pytest.mark.parametrize("step", [1e-12, 0.125])
+def test_stored_bf16_change_metrics_include_rounding_and_reload(numerical_fixture, tmp_path, step):
+    from safetensors.torch import load_file, save_file
+    from neural_foundry.backends.weight_edit.apply import apply
+    from neural_foundry.backends.weight_edit.discover import SiteMap, find_blocks, find_sites
+    from neural_foundry.backends.weight_edit.methods import Delta
+    from neural_foundry.model_digest import model_state_digest
+    from dataclasses import replace
+
+    loaded, task, examples, recipe = numerical_fixture
+    loaded.model.to(torch.bfloat16)
+    sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                       checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    site = next(site for site in sites.sites if site.role == "residual_write_mlp")
+    parameter = loaded.model.get_parameter(site.tensor_name)
+    with torch.no_grad():
+        parameter.fill_(1.0)
+    loaded = replace(loaded, base_digest=model_state_digest(loaded.model))
+    original = parameter.detach().clone()
+    delta = Delta("low_rank", U=torch.full((site.output_size, 1), step, dtype=torch.float64),
+                  V=torch.ones((1, site.input_size), dtype=torch.float64))
+    edited = apply(loaded, {site.tensor_name: delta}, sites=SiteMap((site,), True),
+                   method="stored_bf16_metrics_test", settings={})
+    path = tmp_path / "stored.safetensors"
+    save_file({site.tensor_name: parameter.detach().cpu().contiguous()}, path)
+    reloaded = load_file(path)[site.tensor_name]
+    difference = reloaded.double() - original.cpu().double()
+    measured = edited.receipt["stored_weight_changes"][site.tensor_name]
+    assert reloaded.dtype == torch.bfloat16
+    assert measured["stored_dtype"] == "bfloat16"
+    assert measured["effective_change"] is (step == 0.125)
+    assert measured["frobenius_norm"] == pytest.approx(float(difference.norm()))
+    assert measured["max_absolute_change"] == float(difference.abs().max())
+    assert measured["relative_frobenius_norm"] == pytest.approx(float(difference.norm() / original.double().norm()))
+    assert measured["changed_entry_fraction"] == (1.0 if step == 0.125 else 0.0)
+    assert measured["changed_entries"] == int(torch.count_nonzero(difference))
+    assert edited.receipt["change_norms"][site.tensor_name] == measured["frobenius_norm"]
+
+
 def test_multi_site_capture_computes_all_layer_deltas_once(numerical_fixture):
     from neural_foundry.backends.weight_edit.worker import calculate_edits_for_sites
     from neural_foundry.backends.weight_edit.discover import find_blocks, find_sites

@@ -102,16 +102,35 @@ def apply(loaded: LoadedModel, deltas: Mapping[str, Delta], *, sites: SiteMap,
         changed = {name for name in before if before[name] != after[name]}
         if changed - allowed:
             raise UnsupportedModel("unlisted tensors changed during edit application")
-        norms = {name: float(torch.linalg.vector_norm(replacements[name].detach().cpu().to(torch.float64)
-                                 - backups[name].detach().cpu().to(torch.float64)))
-                 for name in replacements}
+        stored_changes = {}
+        for name in replacements:
+            base_weight = backups[name].detach().cpu().to(torch.float64)
+            stored_weight = loaded.model.get_parameter(name).detach().cpu().to(torch.float64)
+            difference = stored_weight - base_weight
+            base_norm = float(torch.linalg.vector_norm(base_weight))
+            change_norm = float(torch.linalg.vector_norm(difference))
+            changed_entries = int(torch.count_nonzero(difference))
+            stored_changes[name] = {
+                "measurement_source": "stored_parameter_after_dtype_cast",
+                "stored_dtype": str(loaded.model.get_parameter(name).dtype).removeprefix("torch."),
+                "base_frobenius_norm": base_norm, "frobenius_norm": change_norm,
+                "max_absolute_change": float(difference.abs().max()),
+                "relative_frobenius_norm": change_norm / base_norm if base_norm > 0 else None,
+                "relative_norm_defined": base_norm > 0,
+                "changed_entries": changed_entries, "total_entries": difference.numel(),
+                "changed_entry_fraction": changed_entries / difference.numel(),
+                "base_tensor_digest": before[name], "stored_tensor_digest": after[name],
+                "effective_change": before[name] != after[name],
+            }
+        norms = {name: values["frobenius_norm"] for name, values in stored_changes.items()}
         receipt = {"kind": "nf_weight_edit_receipt_v1", "base_digest": loaded.base_digest,
                    "site_map_digest": sites.digest, "edit_digest": _document_digest({"deltas": delta_records}),
                    "renderer_digest": PromptRenderer(loaded.tokenizer).digest, "method": method,
                    "settings": json.loads(_wire_document(settings)), "allow_shared": allow_shared,
                    "shared_storage_groups": [list(group) for group in groups if set(group) & deltas.keys()],
                    "edited_tensors": sorted(changed), "requested_tensors": sorted(deltas),
-                   "change_norms": norms, "transactions": transactions, "model_digest": model_state_digest(loaded.model)}
+                   "change_norms": norms, "stored_weight_changes": stored_changes,
+                   "transactions": transactions, "model_digest": model_state_digest(loaded.model)}
         return EditedModel(loaded, before, after, receipt)
     except BaseException:
         with torch.no_grad():

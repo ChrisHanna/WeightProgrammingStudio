@@ -28,7 +28,7 @@ from .loader import WeightEditInputError, load_model
 from .discover import SiteMap, find_blocks, find_sites
 from .methods import Delta
 from .numerics import deterministic_execution
-from .preservation import calibrate_one_ulp, float32_logits_of_exact_weights, metrics, verify_v2
+from .preservation import POLICY_V2, calibrate_one_ulp, float32_logits_of_exact_weights, metrics, verify_v2
 from .worker import calculate_edit, calculate_edits_for_sites, preservation_logits
 from .demonstrations import prepare_demonstration
 
@@ -115,9 +115,7 @@ def _compact_score(score: dict[str, Any]) -> dict[str, Any]:
 
 
 def _completion_was_truncated(generated_token_ids: list[int], text: str, max_new_tokens: int) -> bool:
-    if len(generated_token_ids) >= max_new_tokens:
-        return False
-    return not _has_complete_json_value(text)
+    return len(generated_token_ids) >= max_new_tokens
 
 
 def _has_complete_json_value(text: str) -> bool:
@@ -204,7 +202,7 @@ def _aggregate_logprobs(reports: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def strength_one_stop_gate(layer: int, row: dict[str, Any] | None) -> dict[str, Any]:
     measured = row is not None and row.get("status") == "measured" and row.get("layer") == layer
-    effective_change = bool(measured and row.get("effective_change_norm", 0) > 0)
+    effective_change = bool(measured and row.get("effective_change", row.get("effective_change_norm", 0) > 0))
     task_gain = row.get("validation_exact_match_gain") if measured else None
     continue_to_multilayer = effective_change and isinstance(task_gain, (int, float)) and task_gain > 0
     return {"evaluated_layer": layer, "effective_change": effective_change,
@@ -1020,7 +1018,7 @@ def load_sweep_likelihood_selection(source_path: Path, request: dict[str, Any]) 
 
 
 def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path: Path, output_path: Path,
-                         *, device="cuda:0", composition_sizes=(2, 3)):
+                         *, device="cuda:0", composition_sizes=(2, 3), single_layer_candidates=None):
     request = parse_strict_json(request_path.read_bytes())
     if request.get("training_request_digest") != _document_digest(
         {key: value for key, value in request.items() if key != "training_request_digest"}):
@@ -1071,6 +1069,15 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
     if (len(finalists) != len(selected_set) or any(row["layer"] not in site_by_layer for row in finalists)
         or any(row.get("best_strength") not in source.get("strengths", ()) for row in finalists)):
         raise WeightEditInputError("source sweep finalists lack verified layers or measured strengths")
+    single_layer_mode = single_layer_candidates is not None
+    if single_layer_mode:
+        if (not single_layer_candidates or len(single_layer_candidates) > 6
+            or len(set(single_layer_candidates)) != len(single_layer_candidates)
+            or any(layer not in selected_set or strength not in (0.1, 0.5, 1.0)
+                   for layer, strength in single_layer_candidates)):
+            raise WeightEditInputError("single-layer candidates must be unique selected layers at approved strengths")
+        requested_layers = {layer for layer, strength in single_layer_candidates}
+        finalists = [row for row in finalists if row["layer"] in requested_layers]
     finalist_sites = tuple(site_by_layer[row["layer"]] for row in finalists)
     finalist_site_map = SiteMap(finalist_sites, checkpoint_names_verified=True)
     protected = [*request["recipe"]["preservation_interactions"],
@@ -1081,16 +1088,17 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                         "target_step": row["best_strength"],
                         "validation_logprob_gain": row["best_validation_logprob_gain"]} for row in finalists]
     base_digest = model_state_digest(loaded.model)
-    base_train = score_public_rows(task, validation_model(loaded, batch_size=16,
+    train_batch_size = 1 if single_layer_mode else 16
+    base_train = score_public_rows(task, validation_model(loaded, batch_size=train_batch_size,
         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
-    baseline_validation_batch = score_public_rows(task, validation_model(loaded, batch_size=16,
+    baseline_validation_batch = score_public_rows(task, validation_model(loaded, batch_size=train_batch_size,
         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
     serial_validation = score_public_rows(task, validation_model(loaded, batch_size=1,
         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
     batch_equivalent = all(left["response"] == right["response"]
         and left.get("execution_evidence", {}).get("generated_token_ids") == right.get("execution_evidence", {}).get("generated_token_ids")
         for left, right in zip(baseline_validation_batch["responses"], serial_validation["responses"], strict=True))
-    exact_batch_size = 16 if batch_equivalent else 1
+    exact_batch_size = 1 if single_layer_mode else (16 if batch_equivalent else 1)
     base_validation = baseline_validation_batch if batch_equivalent else serial_validation
     base_required = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
         max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), required_rows)
@@ -1104,10 +1112,14 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
     calibrations = {row["layer"]: calibrate_one_ulp(loaded, site_by_layer[row["layer"]], preservation_panel)
                     for row in finalists}
     candidates = []
-    for composition_size in composition_sizes:
-        if composition_size > len(finalists):
-            continue
-        composition = finalists[:composition_size]
+    if single_layer_mode:
+        by_layer = {row["layer"]: row for row in finalists}
+        compositions = [[{**by_layer[layer], "best_strength": strength}]
+                        for layer, strength in single_layer_candidates]
+    else:
+        compositions = [finalists[:size] for size in composition_sizes if size <= len(finalists)]
+    for composition in compositions:
+        composition_size = len(composition)
         sites = tuple(site_by_layer[row["layer"]] for row in composition)
         deltas = {}
         for row in composition:
@@ -1119,11 +1131,11 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                      for site in sites}
         try:
             edited = apply(loaded, deltas, sites=SiteMap(sites, checkpoint_names_verified=True),
-                method="multi_layer_finalist_rescore", settings={
+                method="single_layer_stop_gate" if single_layer_mode else "multi_layer_finalist_rescore", settings={
                     "layers": [row["layer"] for row in composition],
                     "target_steps": {str(row["layer"]): row["best_strength"] for row in composition},
                     "retention_mode": "specialist", "diagnostic_only": True})
-            train_score = score_public_rows(task, validation_model(loaded, batch_size=16,
+            train_score = score_public_rows(task, validation_model(loaded, batch_size=train_batch_size,
                 max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), train_rows, split="train")
             validation_score = score_public_rows(task, validation_model(loaded, batch_size=exact_batch_size,
                 max_new_tokens=LAYER_SWEEP_MAX_NEW_TOKENS), validation_rows)
@@ -1148,9 +1160,30 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
             validation_truncations = sum(score["truncated_answer_count"] for score in
                 (_compact_score(base_validation), _compact_score(base_required),
                  _compact_score(validation_score), _compact_score(required_score)))
-            specialist_gate["checks"]["zero_short_truncation"] = validation_truncations == 0
-            specialist_gate["passed"] = specialist_gate["passed"] and validation_truncations == 0
-            candidate = {"kind": "nf_multilayer_finalist_v1", "composition_size": composition_size,
+            if not single_layer_mode:
+                specialist_gate["checks"]["zero_short_truncation"] = validation_truncations == 0
+                specialist_gate["passed"] = specialist_gate["passed"] and validation_truncations == 0
+            base_records = base_validation["responses"]
+            candidate_records = validation_score["responses"]
+            if [row["scenario_id"] for row in base_records] != [row["scenario_id"] for row in candidate_records]:
+                raise WeightEditInputError("candidate validation roster differs from baseline")
+            fixed = sum(before["exact_match"] == 0 and after["exact_match"] == 1
+                        for before, after in zip(base_records, candidate_records, strict=True))
+            broken = sum(before["exact_match"] == 1 and after["exact_match"] == 0
+                         for before, after in zip(base_records, candidate_records, strict=True))
+            preservation_checks = {}
+            for layer, verification in preservation_reports.items():
+                values = (("float32_max_drift", verification["float32"]["max_absolute_logit_drift"],
+                           POLICY_V2["max_float32_logit_drift"], "<="),
+                          ("bf16_top1", verification["bf16"]["top1_agreement"], POLICY_V2["min_bf16_top1_agreement"], ">="),
+                          ("bf16_top5", verification["bf16"]["top5_set_agreement"], POLICY_V2["min_bf16_top5_set_agreement"], ">="),
+                          ("bf16_mean_kl", verification["bf16"]["mean_kl_base_to_edited"],
+                           POLICY_V2["max_mean_bf16_kl_base_to_edited"], "<="))
+                preservation_checks[layer] = {name: {"value": value, "threshold": threshold, "comparison": comparison,
+                    "passed": value <= threshold if comparison == "<=" else value >= threshold}
+                    for name, value, threshold, comparison in values}
+            candidate = {"kind": "nf_single_layer_finalist_v1" if single_layer_mode else "nf_multilayer_finalist_v1",
+                "status": "measured", "composition_size": composition_size,
                 "layers": [row["layer"] for row in composition],
                 "target_steps": {str(row["layer"]): row["best_strength"] for row in composition},
                 "training": _compact_score(train_score), "validation": _compact_score(validation_score),
@@ -1158,6 +1191,7 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                 "required_set": _compact_score(required_score),
                 "training_exact_match_gain": train_score["exact_match"] - base_train["exact_match"],
                 "validation_exact_match_gain": validation_score["exact_match"] - base_validation["exact_match"],
+                "validation_fixed_cases": fixed, "validation_broken_cases": broken,
                 "training_logprob_gain": train_logprob["mean_token_logprob"] - base_train_logprob["mean_token_logprob"],
                 "validation_logprob_gain": validation_logprob["mean_token_logprob"] - base_validation_logprob["mean_token_logprob"],
                 "validation_logprob_by_template": {family: {
@@ -1168,12 +1202,21 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
                         - base_validation_by_template[family]["mean_token_logprob"]}
                     for family, value in validation_logprob_by_template.items()},
                 "preservation_v2_report_only": {"passed": preservation_passed, "per_site": preservation_reports},
+                "preservation_v2_checks": preservation_checks,
                 "specialist_v2_gate": specialist_gate,
                 "validation_truncated_answer_count": validation_truncations,
                 "effective_change_norms": edited.receipt["change_norms"],
+                "stored_weight_changes": edited.receipt["stored_weight_changes"],
                 "candidate_model_digest": model_state_digest(loaded.model),
                 "candidate_published": False}
             candidates.append(candidate)
+            if single_layer_mode:
+                site = sites[0]
+                change = edited.receipt["stored_weight_changes"][site.tensor_name]
+                candidate["layer"] = site.layer
+                candidate["target_step"] = composition[0]["best_strength"]
+                candidate["effective_change"] = change["effective_change"]
+                candidate["effective_change_norm"] = change["frobenius_norm"]
         finally:
             with torch.no_grad():
                 for name, original in originals.items():
@@ -1181,17 +1224,33 @@ def run_finalist_rescore(state_dir: Path, request_path: Path, screen_report_path
             if model_state_digest(loaded.model) != base_digest:
                 raise WeightEditInputError("multi-layer finalist rescore failed exact base restoration")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    report = {"kind": "nf_weight_edit_multilayer_finalist_rescore_v1", "evidence_status": "measured",
+    report = {"kind": "nf_weight_edit_single_layer_stop_gate_v1" if single_layer_mode
+                       else "nf_weight_edit_multilayer_finalist_rescore_v1", "evidence_status": "measured",
         "source_sweep_report_digest": source["evidence_digest"], "source_sweep_run_digest": source["run_digest"],
         "training_request_digest": request["training_request_digest"], "job_digest": job.digest,
         "dataset_digest": request["dataset_digest"], "base_model_digest": base_digest,
-        "selection_source": "teacher_forced public-validation likelihood only; prior exact-match results excluded",
+        "selection_source": "fixed user-requested single-layer grid" if single_layer_mode
+                    else "teacher_forced public-validation likelihood only; prior exact-match results excluded",
         "selected_layer_strengths": selected_config, "generation_max_new_tokens": LAYER_SWEEP_MAX_NEW_TOKENS,
         "batch_generation_equivalent_to_serial": batch_equivalent, "exact_batch_size": exact_batch_size,
         "base_train": _compact_score(base_train), "base_validation": _compact_score(base_validation),
         "base_required_set": _compact_score(base_required), "base_validation_logprob": base_validation_logprob,
         "candidates": candidates, "base_restored": model_state_digest(loaded.model) == base_digest,
         "holdout_accessed": False, "candidate_published": False, "release_authorized": False}
+    if single_layer_mode:
+        if len(candidates) != len(single_layer_candidates) or any(row["composition_size"] != 1 for row in candidates):
+            raise WeightEditInputError("single-layer job did not produce its exact requested grid")
+        report["single_layer_candidate_grid"] = [{"layer": layer, "target_step": strength}
+                                                  for layer, strength in single_layer_candidates]
+        best = max(candidates, key=lambda row: (row["validation"]["exact_match"], row["validation_logprob_gain"]))
+        strength_one = next(row for row in candidates if row["layer"] == best["layer"] and row["target_step"] == 1.0)
+        report["strength_1_stop_gate"] = {**strength_one_stop_gate(best["layer"], strength_one),
+            "stored_weight_changes": strength_one["stored_weight_changes"],
+            "effective_change": strength_one["effective_change"], "automatic_followup_authorized": False}
+        report["generation_batch_size"] = 1
+        report["reference_baseline_counts"] = {"train": 165, "validation": 45}
+        report["reference_baseline_matches"] = (sum(row["exact_match"] for row in base_train["responses"]) == 165
+            and sum(row["exact_match"] for row in base_validation["responses"]) == 45)
     answer_counts = [report["base_train"], report["base_validation"], report["base_required_set"]]
     for candidate in candidates:
         answer_counts.extend((candidate["training"], candidate["validation"], candidate["required_set"]))
@@ -1381,6 +1440,7 @@ def main():
     mode.add_argument("--public-split-baseline", action="store_true")
     mode.add_argument("--audit-truncation", action="store_true")
     mode.add_argument("--rescore-finalists", action="store_true")
+    mode.add_argument("--single-layer-stop-gate", action="store_true")
     args = parser.parse_args()
     if args.profile_one:
         report = run_single_candidate_profile(args.state_dir, args.request, args.output)
@@ -1395,11 +1455,12 @@ def main():
                           "generation_cap_failures": report["generation_cap_failures"],
                           "zero_truncated_answers": report["zero_truncated_answers"]}))
         return
-    if args.rescore_finalists:
+    if args.rescore_finalists or args.single_layer_stop_gate:
         if args.screen_report is None:
             raise WeightEditInputError("finalist rescore requires a digest-bound screen report")
+        candidate_grid = tuple((layer, strength) for layer in (10, 9) for strength in (0.1, 0.5, 1.0))
         report = run_finalist_rescore(args.state_dir, args.request, args.screen_report, args.output,
-                                      device=args.device)
+            device=args.device, single_layer_candidates=candidate_grid if args.single_layer_stop_gate else None)
         print(json.dumps({"compositions": [row["composition_size"] for row in report["candidates"]],
                           "generation_max_new_tokens": report["generation_max_new_tokens"],
                           "zero_truncated_answers": report["generation_truncation"]["zero_truncated_answers"],

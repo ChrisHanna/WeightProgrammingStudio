@@ -139,15 +139,15 @@ def test_validation_screen_selects_eight_rows_per_family():
     ]
 
 
-def test_generation_truncation_requires_budget_exhaustion_and_incomplete_json():
+def test_generation_truncation_counts_only_cap_hits():
     complete_at_budget = '{"customer":"Aster"}'
     complete_with_preamble = 'Here is the result: ```json\n{"customer":"Aster"}'
     truncated_at_budget = '{"customer":"Aster"'
-    assert _completion_was_truncated([1, 2, 3, 4], complete_at_budget, 4) is False
-    assert _completion_was_truncated([1, 2, 3, 4], complete_with_preamble, 4) is False
-    assert _completion_was_truncated([1, 2, 3, 4], truncated_at_budget, 4) is False
-    assert _completion_was_truncated([1, 2, 3, 4], '[{"customer":"Aster"}', 4) is False
-    assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is True
+    assert _completion_was_truncated([1, 2, 3, 4], complete_at_budget, 4) is True
+    assert _completion_was_truncated([1, 2, 3, 4], complete_with_preamble, 4) is True
+    assert _completion_was_truncated([1, 2, 3, 4], truncated_at_budget, 4) is True
+    assert _completion_was_truncated([1, 2, 3, 4], '[{"customer":"Aster"}', 4) is True
+    assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is False
 
 
 def test_json_generation_stops_after_root_not_nested_closing_brace():
@@ -157,7 +157,7 @@ def test_json_generation_stops_after_root_not_nested_closing_brace():
         def decode(self, token_ids, *, skip_special_tokens=True):
             return "".join(self.parts[token_id] for token_id in token_ids)
 
-    assert _completion_was_truncated([9, 9], "", 128) is True
+    assert _completion_was_truncated([9, 9], "", 128) is False
 
     stop = _StopAfterJsonRoot(Tokenizer(), prompt_width=1, eos_token_id=9, batch_size=1)
     empty = stop(torch.tensor([[0, 4]]), torch.zeros((1, 10)))
@@ -189,7 +189,7 @@ def test_truncation_audit_reports_count_and_binds_source_digest(tmp_path):
     audit = audit_generation_truncation(source, audit_path, max_new_tokens=4)
     assert audit["total_scored_answers"] == 6
     assert audit["generation_cap_failures"] == 4
-    assert audit["total_truncated_answers"] == 2
+    assert audit["total_truncated_answers"] == 4
     assert audit["zero_truncated_answers"] is False
     assert audit["source_report_digest"] == report["evidence_digest"]
     assert json.loads(audit_path.read_bytes()) == audit
@@ -339,7 +339,9 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     monkeypatch.setattr(diagnostic, "preservation_logits", lambda model, panel: [torch.zeros(4) for _ in panel])
     monkeypatch.setattr(diagnostic, "float32_logits_of_exact_weights", lambda model, panel: [torch.zeros(4) for _ in panel])
     monkeypatch.setattr(diagnostic, "metrics", lambda before, after: {"cases": len(before)})
-    monkeypatch.setattr(diagnostic, "verify_v2", lambda *args: {"passed": True})
+    monkeypatch.setattr(diagnostic, "verify_v2", lambda *args: {"passed": True,
+        "float32": {"max_absolute_logit_drift": 0.0},
+        "bf16": {"top1_agreement": 1.0, "top5_set_agreement": 1.0, "mean_kl_base_to_edited": 0.0}})
     output_path = tmp_path / "sweep" / "report.json"
     monkeypatch.setattr(sys, "argv", ["drift_diagnostic", str(state_dir), str(request_path),
                                       str(output_path), "--layer-strength-sweep", "--device", "cpu"])
@@ -399,6 +401,26 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     assert finalist_report["generation_truncation"]["zero_truncated_answers"] is True
     assert finalist_report["base_restored"] and model_state_digest(loaded.model) == loaded.base_digest
     assert finalist_report["holdout_accessed"] is False and finalist_report["candidate_published"] is False
+
+    scoring_batch_sizes.clear()
+    grid = tuple((layer, strength) for layer in (1, 0) for strength in (0.1, 0.5, 1.0))
+    single_report = diagnostic.run_finalist_rescore(state_dir, request_path, checkpoint_path,
+        tmp_path / "single-layer" / "report.json", device="cpu", single_layer_candidates=grid)
+    assert single_report["kind"] == "nf_weight_edit_single_layer_stop_gate_v1"
+    assert len(single_report["candidates"]) == 6
+    assert [(row["layer"], row["target_step"]) for row in single_report["candidates"]] == list(grid)
+    assert all(batch == 1 for split, batch in scoring_batch_sizes)
+    for candidate in single_report["candidates"]:
+        assert candidate["composition_size"] == 1 and len(candidate["stored_weight_changes"]) == 1
+        assert candidate["validation_fixed_cases"] == candidate["validation_broken_cases"] == 0
+        assert "zero_short_truncation" not in candidate["specialist_v2_gate"]["checks"]
+        metrics = next(iter(candidate["stored_weight_changes"].values()))
+        assert "relative_frobenius_norm" in metrics and "changed_entry_fraction" in metrics
+        checks = next(iter(candidate["preservation_v2_checks"].values()))
+        assert checks["float32_max_drift"]["threshold"] == 0.25
+        assert checks["bf16_top5"]["threshold"] == 0.95
+    assert single_report["strength_1_stop_gate"]["automatic_followup_authorized"] is False
+    assert single_report["base_restored"] and model_state_digest(loaded.model) == loaded.base_digest
 
 
 def test_validation_results_and_logprobs_are_reported_by_template():
