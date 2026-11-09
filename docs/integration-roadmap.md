@@ -2,6 +2,18 @@
 
 **Status date: 2026-11-09.** This is the product sequencing plan and the working mathematical contract for GymEdit. A listed capability is planned until its implementation, tests, and measured evidence are linked here. Passing fixtures alone does not qualify a real model or gym. Holdout remains sealed until each candidate is frozen.
 
+## Approved Product Work Order
+
+Backlog cleanup and green full Python/native acceptance come before any new feature. Commit each independently tested feature to `wip/phase3-goal-search`; do not merge to main without user sign-off. Ask before any installation or download, including NeMo packages and model weights. Existing source changes are preserved and reviewed in ownership groups, not reverted or swept into one commit.
+
+1. Finish backlog cleanup, reproduce the 13 review findings below, and obtain green full acceptance without weakening qualification checks or deadlines.
+2. Implement NeMo token-ID routing, then a GRPO baseline arm on the same JSON gym. Package/model installation requires separate user approval. Use the same frozen reference baseline (165/320 train, 45/64 validation), specialist-v2 and preservation-v2 checks; no threshold changes or holdout selection. GRPO GPU work is allowed only when the priority weight-edit audit is not running and its GPU use is authorized.
+3. Implement the CPU company-facts gym: scenarios, scorer, disjoint train/validation/holdout splits, and sealed holdout. This gym is not dependent on weight-edit success, but waits for cleanup and the preceding feature.
+4. Implement proof-report scaffolding filled from digest-verified reports. Never type measured numbers into the proof report or substitute defaults for missing evidence.
+5. Continue the product layer separately: Postgres-backed control-plane state, API/dashboard over existing jobs/evidence, and custody/scorecard/placement services. Each needs its own tested commit and remains behind the cleanup prerequisite.
+
+The audit and specialist-v3 policy decision do not block preparation of these CPU/product features after cleanup. They do not authorize a policy change or a new GPU run. A stopped weight-edit run stays stopped unless the user restarts it.
+
 ## Phase 1: Make Edits Work
 
 **Estimate: about four weeks.** Public validation is the selection split; compare against the unchanged base, never holdout. The final user-facing report has one results table, with task gain and preservation evidence in every candidate row.
@@ -96,6 +108,30 @@ The frontier provider is not selected. No credential or live frontier call is as
 3. Consolidate common validation and evidence checks in a shared module without loosening any gate.
 
 Housekeeping execution plan: inventory the approximately 50 tracked dirty files and untracked backlog without reverting or staging unrelated user work; classify by ownership and behavior; reproduce the 13 earlier review findings in a checklist linked to their original evidence; then address approved groups in independent tested commits. Run the required full Python suite in the documented CPU/native environment and Cargo workspace acceptance with `--locked`, retain all failures and environment/skip details, and rerun after local fixes. No green full-suite result or resolution of the 13 findings is currently claimed. This work remains separate from the bounded diagnostic audit and six-candidate report.
+
+### Cleanup Baseline
+
+Initial inventory: 45 modified tracked files plus untracked source/protocol/test files and generated artifacts. Review groups are native supervision/cancellation; CPU/GPU runtime and loading; evidence/promotion; cumulative search and Studio; and Gym/NeMo integration. Generated `artifacts/` and `outputs/` are not staged as source cleanup. Offline workspace/example builds pass on the existing runtime; no installation or download was performed.
+
+Focused cleanup commits pushed: `2e5ccab` (fresh-runtime export verification and adversarial tensor controls; 62 scoped tests passed) and `ebd79e5` (audit fixtures and evidence expectations; 8 tests passed). Full CPU acceptance is not yet green. The fail-fast pass reached 933 passed/16 skipped before `test_episode_native_binding_same_gym_all_controls[terminated]` failed with `sandbox authority expired`; it also reproduces alone. The authority is an absolute monotonic deadline bounded by the unchanged 7,200 ms aggregate audit budget. Preserve this as a host-qualification blocker pending further evidence, not a reason to raise limits. Full-suite logs and exit receipts are under `artifacts/backlog-cleanup-20261109/`; the no-fail-fast run is in progress.
+
+### Original Review Checklist
+
+Recovered from the original user review in session `8953ac03-f62a-4df0-86be-f36aa9bb743f`, turn 174. All items remain unverified until current code, a targeted regression, and acceptance evidence are linked; later summaries are not proof of resolution.
+
+1. Lifecycle: exclude failed/invalid practice attempts from approved training targets.
+2. Lifecycle: refuse scoring incomplete evaluations as measured evidence.
+3. Lifecycle: do not reuse stale, unsealed training staging contents after a crash.
+4. Lifecycle: handle unavailable Windows `os.fchmod` without abandoning permission checks.
+5. Frontier: failed/skipped search candidates must not make an otherwise complete evaluable roster permanently incomplete.
+6. Frontier: bound repeated sealed-target exposure and make claim completion/retry state explicit.
+7. Frontier: handle directory fsync portability on Windows.
+8. Frontier/search artifacts: avoid unconditional full-model float64 copies for large checkpoints; preserve checkpoint identity and source precision.
+9. GPU training worker: completed CPU fallback must not fail while looking up a CUDA device name.
+10. NeMo bridge: preserve numeric task ID zero rather than discarding it as falsy.
+11. NeMo bridge: timeout cleanup must stop the child/server process tree, not only the CLI parent.
+12. NeMo DPO intake: reject duplicate input identities as in the SFT path.
+13. Promotion evidence: reconcile recorded calibration/documentation with the already-existing 0.90 floor; do not silently change that floor or claim unchanged decisions.
 
 ## Phase 5: GRPO
 
