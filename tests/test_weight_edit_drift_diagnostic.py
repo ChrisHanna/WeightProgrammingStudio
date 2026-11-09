@@ -364,18 +364,19 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     cli_summary = json.loads(capsys.readouterr().out)
     assert cli_summary["layers"] == 2 and cli_summary["strengths"] == [0.5, 1.0]
 
-    report["exact_scored_layer_indices"] = [0, 1]
-    report["layer_ranking_by_validation_logprob"] = [
+    checkpoint_path = output_path.with_suffix(".checkpoint.jsonl")
+    checkpoint_lines = [json.loads(line) for line in checkpoint_path.read_bytes().splitlines() if line]
+    selection = next(row for row in checkpoint_lines[1:] if row.get("checkpoint_key") == "selection")
+    selection["selected_layers"] = [1, 0]
+    selection["layer_ranking"] = [
         {"layer": 1, "tensor_name": "model.layers.1.mlp.down_proj.weight", "best_strength": 1.0,
          "best_validation_logprob_gain": 0.2},
         {"layer": 0, "tensor_name": "model.layers.0.mlp.down_proj.weight", "best_strength": 0.5,
          "best_validation_logprob_gain": 0.1},
     ]
-    report["evidence_digest"] = _document_digest({key: value for key, value in report.items()
-                                                    if key != "evidence_digest"})
-    output_path.write_bytes(_wire_document(report))
+    checkpoint_path.write_bytes(b"\n".join(_wire_document(row) for row in checkpoint_lines) + b"\n")
     finalist_path = tmp_path / "finalists" / "report.json"
-    finalist_report = diagnostic.run_finalist_rescore(state_dir, request_path, output_path, finalist_path,
+    finalist_report = diagnostic.run_finalist_rescore(state_dir, request_path, checkpoint_path, finalist_path,
                                                        device="cpu", composition_sizes=(2,))
     assert finalist_report["generation_max_new_tokens"] == 128
     assert finalist_report["selected_layer_strengths"] == [
