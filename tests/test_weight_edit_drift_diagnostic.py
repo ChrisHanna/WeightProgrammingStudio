@@ -152,12 +152,17 @@ def test_generation_truncation_requires_budget_exhaustion_and_incomplete_json():
 
 def test_json_generation_stops_after_root_not_nested_closing_brace():
     class Tokenizer:
-        parts = {1: '{"outer":', 2: '{"inner":1}', 3: '}'}
+        parts = {1: '{"outer":', 2: '{"inner":1}', 3: '}', 4: ''}
 
         def decode(self, token_ids, *, skip_special_tokens=True):
             return "".join(self.parts[token_id] for token_id in token_ids)
 
+    assert _completion_was_truncated([9, 9], "", 128) is True
+
     stop = _StopAfterJsonRoot(Tokenizer(), prompt_width=1, eos_token_id=9, batch_size=1)
+    empty = stop(torch.tensor([[0, 4]]), torch.zeros((1, 10)))
+    assert stop.completed == [False]
+    assert torch.isfinite(empty).all()
     nested_close = stop(torch.tensor([[0, 1, 2]]), torch.zeros((1, 10)))
     assert stop.completed == [False]
     assert torch.isfinite(nested_close).all()

@@ -127,7 +127,7 @@ def _has_complete_json_value(text: str) -> bool:
     else:
         start = next((index for index, character in enumerate(text) if character in "[{"), -1)
     if start < 0:
-        return True
+        return False
     while start < len(text) and text[start].isspace():
         start += 1
     try:
