@@ -21,8 +21,7 @@ jobs:
           python -m pip install --upgrade pip uv
           uv venv --python "$(command -v python)" .venv
           UV_CACHE_DIR="$KIROCREW_SCRATCH/uv-cache" uv pip install --python .venv/bin/python \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-            pytest maturin ruff mypy safetensors torch
+            --index-strategy unsafe-best-match -r requirements-dev.lock
       - name: Native gates and executable example without Python
         run: |
           cargo check --workspace --locked
@@ -41,8 +40,9 @@ jobs:
           (ulimit -v 524288; ulimit -t 20; ./target/debug/examples/parser_fuzz_smoke)
       - name: Explicit local CPU sandbox runtime (no model weights)
         run: docker pull python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
-      - name: Installed extension, sandboxed execution gates, and full pytest suite
+      - name: CPU layer-sweep preflight and full pytest suite
         run: |
           VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --locked
+          .venv/bin/python -m pytest -q tests/test_weight_edit_drift_diagnostic.py -k layer_strength_sweep_cpu_smoke
           export NF_CLI="$PWD/target/debug/nf"
           .venv/bin/python -m pytest -q --basetemp="$KIROCREW_SCRATCH/pytest"

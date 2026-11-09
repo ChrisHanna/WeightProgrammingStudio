@@ -1,8 +1,14 @@
 # Development/optional CPU tools, not wheel runtime dependencies.
 --extra-index-url https://download.pytorch.org/whl/cpu
+--index-strategy unsafe-best-match
 build==1.6.1
+certifi==2026.10.23
+charset-normalizer==3.5.2
 filelock==4.2.4
 fsspec==2026.9.0
+hf-xet==1.8.0
+huggingface_hub==0.36.2
+idna==3.20
 iniconfig==2.3.1
 Jinja2==3.1.6
 librt==0.16.0
@@ -12,14 +18,23 @@ mpmath==1.3.0
 mypy==1.20.2
 mypy_extensions==1.2.0
 networkx==3.7
+numpy==2.5.4
 packaging==26.3
 pathspec==1.1.1
 pluggy==1.7.0
 Pygments==2.21.0
 pyproject_hooks==1.3.3
 pytest==8.4.2
+PyYAML==6.0.3
+regex==2026.11.9
+requests==2.34.2
 ruff==0.17.3
+safetensors==0.8.0
 setuptools==78.1.0
 sympy==1.14.0
+tokenizers==0.22.1
 torch==2.9.1+cpu
+tqdm==4.70.1
+transformers==4.57.3
 typing_extensions==4.16.0
+urllib3==2.8.0

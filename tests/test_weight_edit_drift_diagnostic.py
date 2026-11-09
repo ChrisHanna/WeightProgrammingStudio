@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 import json
+import sys
 from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
@@ -158,6 +159,106 @@ def test_sweep_site_map_contains_only_verified_mlp_writers(numerical_fixture):
     assert writers.checkpoint_names_verified
     assert writers.sites
     assert all(site.role == "residual_write_mlp" for site in writers.sites)
+
+
+def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixture, monkeypatch, capsys):
+    import neural_foundry.backends.weight_edit.drift_diagnostic as diagnostic
+    from neural_foundry.gym_service import _wire_document
+    from neural_foundry.model_digest import model_state_digest
+    from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
+
+    loaded, _, _, base_recipe = numerical_fixture
+    task = reference_task(rows_per_template=2)
+    train_rows = generate_scenarios(split="train", seed=17, parameters={"rows_per_template": 2})
+    parent = [{"scenario_id": row["scenario_id"], "input": row["input"], "response": row["reference"],
+               "source_split": "train"} for row in train_rows]
+    selected, passing = parent[:10], parent[10:]
+    parent_digest, filtered_digest = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    selected_digests = [_document_digest(row) for row in selected]
+    recipe = {**base_recipe, "target_step": 1.0, "retention_mode": "specialist",
+        "preservation_policy_version": 2, "retention_nullspace_weight": 0.0,
+        "preservation_interactions": [task.project(passing[0]["input"], None)],
+        "protected_training_interactions": [task.project(row["input"], None) for row in passing],
+        "max_sequence_tokens": 512, "max_training_tokens": 100000, "max_keys": 8192,
+        "failure_selection": {"kind": "nf_base_failure_selection_v1",
+            "baseline_report_digest": "sha256:" + "c" * 64,
+            "base_state_digest": loaded.base_digest, "parent_dataset_digest": parent_digest,
+            "filtered_dataset_digest": filtered_digest,
+            "selected_scenario_ids": [row["scenario_id"] for row in selected],
+            "selected_example_digests": selected_digests, "failure_count": 10, "minimum_failures": 10}}
+    projected = [{"example_digest": digest,
+                  "interaction": task.project(row["input"], row["response"])}
+                 for row, digest in zip(selected, selected_digests, strict=True)]
+    request = {"kind": "nf_gym_training_request_v1", "job_digest": task.job.digest,
+        "dataset_digest": filtered_digest, "projected_examples_digest": _document_digest({"examples": projected}),
+        "base_reference": {"artifact_path": str(loaded.checkpoint_path)},
+        "loaded_base": {"state_digest": loaded.base_digest}, "recipe": recipe}
+    request["training_request_digest"] = _document_digest(request)
+    state_dir = tmp_path / "state"
+    jobs = state_dir / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / f"{task.job.digest[7:]}.json").write_bytes(_wire_document(task.job.to_document()))
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(_wire_document(request))
+
+    class FakeService:
+        def __init__(self, *, state_dir=None):
+            pass
+
+        def load_training_examples(self, digest):
+            return {filtered_digest: selected, parent_digest: parent}[digest]
+
+    likelihood_calls = 0
+
+    def fake_logprob(model, interactions, *, batch_size=4):
+        nonlocal likelihood_calls
+        likelihood_calls += 1
+        mean = -1.0 + likelihood_calls / 1000
+        cases = len(interactions)
+        return {"cases": cases, "response_tokens": cases * 2, "mean_case_logprob": mean,
+                "mean_token_logprob": mean, "sum_logprob": mean * cases * 2,
+                "case_logprobs": [mean] * cases}
+
+    def fake_score(task, model, rows, split="validation"):
+        responses = [{"scenario_id": row["scenario_id"], "response": row["reference"],
+                      "format_valid": True, "exact_match": float(index % 2),
+                      "execution_evidence": {"generated_token_ids": [index]}}
+                     for index, row in enumerate(rows)]
+        return {"split": split, "cases": len(rows), "exact_match": sum(row["exact_match"] for row in responses) / len(rows),
+                "format_valid": 1.0, "panel_digest": "sha256:" + "d" * 64, "responses": responses}
+
+    monkeypatch.setattr(diagnostic, "GymStudioService", FakeService)
+    monkeypatch.setattr(diagnostic, "load_model", lambda *args, **kwargs: loaded)
+    monkeypatch.setattr(diagnostic, "LAYER_SWEEP_STRENGTHS", (0.5, 1.0))
+    monkeypatch.setattr(diagnostic, "LAYER_SWEEP_EXACT_LAYER_COUNT", 2)
+    monkeypatch.setattr(diagnostic, "score_public_rows", fake_score)
+    monkeypatch.setattr(diagnostic, "expected_answer_logprob", fake_logprob)
+    monkeypatch.setattr(diagnostic, "calibrate_one_ulp", lambda *args, **kwargs: {"calibration_digest": "cpu-smoke"})
+    monkeypatch.setattr(diagnostic, "preservation_logits", lambda model, panel: [torch.zeros(4) for _ in panel])
+    monkeypatch.setattr(diagnostic, "float32_logits_of_exact_weights", lambda model, panel: [torch.zeros(4) for _ in panel])
+    monkeypatch.setattr(diagnostic, "metrics", lambda before, after: {"cases": len(before)})
+    monkeypatch.setattr(diagnostic, "verify_v2", lambda *args: {"passed": True})
+    output_path = tmp_path / "sweep" / "report.json"
+    monkeypatch.setattr(sys, "argv", ["drift_diagnostic", str(state_dir), str(request_path),
+                                      str(output_path), "--layer-strength-sweep", "--device", "cpu"])
+
+    diagnostic.main()
+
+    report = json.loads(output_path.read_bytes())
+    assert report["discovered_layer_count"] == 2
+    assert report["screen_candidate_count"] == 4
+    assert report["exact_candidate_count"] == 2 * len(report["exact_scored_layer_indices"])
+    assert len(report["exact_scored_layer_indices"]) == 1
+    assert report["base_train"]["task"]["cases"] == len(parent)
+    assert report["base_validation"]["task"]["cases"] == 4
+    assert report["base_validation"]["task_by_template"]
+    assert all(row["preservation_v2_report_only"]["passed"] for row in report["results"]
+               if row.get("phase") == "exact" and row.get("status") == "measured")
+    assert report["strength_1_stop_gate"]["continue_to_multilayer"] is False
+    assert report["base_restored"] is True and model_state_digest(loaded.model) == loaded.base_digest
+    assert report["holdout_accessed"] is False
+    cli_summary = json.loads(capsys.readouterr().out)
+    assert cli_summary["layers"] == 2 and cli_summary["strengths"] == [0.5, 1.0]
 
 
 def test_validation_results_and_logprobs_are_reported_by_template():

@@ -22,6 +22,8 @@ Batched inference, a 16-case likelihood-first screen, append-only fsynced candid
 
 The approved specialist gate is a selection rule, not broad safety qualification. The required set is task-scoped invoice prompt-injection robustness, and its limits must be described narrowly. The paired-bootstrap interval on validation-selected candidates is exploratory. Thresholds and required-set definitions cannot change without user approval and a new policy version.
 
+Before any future GPU sweep, run the CPU end-to-end smoke `pytest -q tests/test_weight_edit_drift_diagnostic.py -k layer_strength_sweep_cpu_smoke`. M1 CI installs the pinned CPU fixture dependencies and runs this preflight before the full suite. It exercises two MLP layers, two strengths, four validation cases, checkpointing, successive halving, exact scoring, report writing, and base restoration. The current GPU sweep was started before this smoke was added and is being left undisturbed.
+
 ## Phase 2: Proof Report
 
 **Estimate: 1-2 weeks.**

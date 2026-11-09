@@ -609,8 +609,8 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
                        checkpoint_tensor_names=loaded.checkpoint_tensor_names)
     writer_sites = _mlp_writer_site_map(sites)
     all_writers = list(writer_sites.sites)
-    if len(all_writers) < 3:
-        raise WeightEditInputError("layer sweep requires at least three discovered MLP write sites")
+    if len(all_writers) < LAYER_SWEEP_EXACT_LAYER_COUNT:
+        raise WeightEditInputError("layer sweep has fewer MLP write sites than exact-scored finalists")
     writers = all_writers[len(all_writers) // 4:(3 * len(all_writers) + 3) // 4]
     base_digest = model_state_digest(loaded.model)
     strengths = LAYER_SWEEP_STRENGTHS
@@ -1021,6 +1021,7 @@ def main():
     parser.add_argument("state_dir", type=Path)
     parser.add_argument("request", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cuda:0")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--task-validation", action="store_true")
     mode.add_argument("--training-fit", action="store_true")
@@ -1047,8 +1048,8 @@ def main():
                           "edited": report["edited"]["exact_match"], "gain": report["training_gain"], "edited_model_digest": report["edited_model_digest"]}))
         return
     if args.layer_strength_sweep:
-        report = run_layer_strength_sweep(args.state_dir, args.request, args.output)
-        print(json.dumps({"layers": report["layer_count"], "strengths": report["strengths"],
+        report = run_layer_strength_sweep(args.state_dir, args.request, args.output, device=args.device)
+        print(json.dumps({"layers": report["discovered_layer_count"], "strengths": report["strengths"],
                           "best": report["best_by_validation_exact_match_then_expected_answer_logprob"],
                           "base_train": report["base_train"]["task"]["exact_match"],
                           "base_validation": report["base_validation"]["task"]["exact_match"],

@@ -6,6 +6,18 @@
     "version": "1.6.1"
   },
   {
+    "license": "MPL-2.0 (development tool only)",
+    "name": "certifi",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "2026.10.23"
+  },
+  {
+    "license": "MIT",
+    "name": "charset-normalizer",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "3.5.2"
+  },
+  {
     "license": "MIT",
     "name": "filelock",
     "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
@@ -16,6 +28,24 @@
     "name": "fsspec",
     "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
     "version": "2026.9.0"
+  },
+  {
+    "license": "Apache-2.0",
+    "name": "hf-xet",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "1.8.0"
+  },
+  {
+    "license": "Apache-2.0",
+    "name": "huggingface_hub",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "0.36.2"
+  },
+  {
+    "license": "BSD-3-Clause",
+    "name": "idna",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "3.20"
   },
   {
     "license": "MIT",
@@ -72,6 +102,12 @@
     "version": "3.7"
   },
   {
+    "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+    "name": "numpy",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "2.5.4"
+  },
+  {
     "license": "Apache-2.0 OR BSD-2-Clause",
     "name": "packaging",
     "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
@@ -109,9 +145,33 @@
   },
   {
     "license": "MIT",
+    "name": "PyYAML",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "6.0.3"
+  },
+  {
+    "license": "Apache-2.0 AND CNRI-Python",
+    "name": "regex",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "2026.11.9"
+  },
+  {
+    "license": "Apache-2.0",
+    "name": "requests",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "2.34.2"
+  },
+  {
+    "license": "MIT",
     "name": "ruff",
     "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
     "version": "0.17.3"
+  },
+  {
+    "license": "Apache-2.0",
+    "name": "safetensors",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "0.8.0"
   },
   {
     "license": "MIT",
@@ -126,15 +186,39 @@
     "version": "1.14.0"
   },
   {
+    "license": "Apache-2.0",
+    "name": "tokenizers",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "0.22.1"
+  },
+  {
     "license": "BSD-3-Clause",
     "name": "torch",
     "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
     "version": "2.9.1+cpu"
   },
   {
+    "license": "MPL-2.0 AND MIT",
+    "name": "tqdm",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "4.70.1"
+  },
+  {
+    "license": "Apache-2.0",
+    "name": "transformers",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "4.57.3"
+  },
+  {
     "license": "PSF-2.0",
     "name": "typing_extensions",
     "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
     "version": "4.16.0"
+  },
+  {
+    "license": "MIT",
+    "name": "urllib3",
+    "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+    "version": "2.8.0"
   }
 ]

@@ -6,7 +6,9 @@ import hashlib
 import importlib.metadata
 import json
 import subprocess
+import tomllib
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOW = {
@@ -26,7 +28,7 @@ ALLOW = {
 }
 
 
-def rust_inventory() -> tuple[dict, str]:
+def rust_inventory() -> tuple[dict[str, Any], str]:
     metadata = json.loads(
         subprocess.check_output(
             ["cargo", "metadata", "--format-version", "1", "--locked"], cwd=ROOT
@@ -98,13 +100,25 @@ def rust_inventory() -> tuple[dict, str]:
     }, text
 
 
-def python_inventory() -> list[dict]:
+def python_inventory() -> list[dict[str, Any]]:
     reviewed = {
+        "certifi": "MPL-2.0 (development tool only)",
+        "huggingface-hub": "Apache-2.0",
+        "huggingface_hub": "Apache-2.0",
         "Jinja2": "BSD-3-Clause",
         "pathspec": "MPL-2.0 (development tool only)",
+        "safetensors": "Apache-2.0",
         "setuptools": "MIT",
         "mpmath": "BSD-3-Clause",
         "sympy": "BSD-3-Clause",
+        "tokenizers": "Apache-2.0",
+        "transformers": "Apache-2.0",
+        "numpy": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+    }
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    runtime_names = {
+        spec.split(";", 1)[0].split("==", 1)[0].strip().lower()
+        for spec in project.get("dependencies", ())
     }
     result = []
     for dist in sorted(
@@ -121,16 +135,23 @@ def python_inventory() -> list[dict]:
                 if ".dist-info/" in str(f) and "license" in str(f).lower()
             ]
             if not candidates:
-                raise SystemExit(f"Missing tool license text: {name}")
+                classifiers = dist.metadata.get_all("Classifier", ())
+                if not (name == "tokenizers" and
+                        "License :: OSI Approved :: Apache Software License" in classifiers):
+                    raise SystemExit(f"Missing tool license text: {name}")
             license_name = reviewed[name]
         if not license_name or license_name.splitlines()[0] not in {
             "MIT",
+            "Apache-2.0",
             "BSD-2-Clause",
             "BSD-3-Clause",
             "MIT OR Apache-2.0",
             "Apache-2.0 OR BSD-2-Clause",
             "PSF-2.0",
             "MPL-2.0 (development tool only)",
+            "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+            "Apache-2.0 AND CNRI-Python",
+            "MPL-2.0 AND MIT",
         }:
             raise SystemExit(f"Unreviewed Python tool license: {name} {license_name}")
         result.append(
@@ -138,7 +159,7 @@ def python_inventory() -> list[dict]:
                 "name": name,
                 "version": dist.version,
                 "license": license_name.splitlines()[0],
-                "scope": "development_or_optional_cpu_reference_not_wheel_runtime",
+                "scope": "wheel_runtime" if name.lower() in runtime_names else "development_or_optional_cpu_reference_not_wheel_runtime",
             }
         )
     return result
@@ -164,8 +185,14 @@ def main() -> None:
             json.dumps(packages, indent=2, sort_keys=True) + "\n"
         )
         documents[ROOT / "requirements-dev.lock"] = (
-            "# Development/optional CPU tools, not wheel runtime dependencies.\n--extra-index-url https://download.pytorch.org/whl/cpu\n"
-            + "".join(f"{p['name']}=={p['version']}\n" for p in packages)
+            "# Development/optional CPU tools, not wheel runtime dependencies.\n"
+            "--extra-index-url https://download.pytorch.org/whl/cpu\n"
+            "--index-strategy unsafe-best-match\n"
+            + "".join(
+                f"{p['name']}=={p['version']}\n"
+                for p in packages
+                if p["scope"] != "wheel_runtime"
+            )
         )
     for path, content in documents.items():
         if args.write:
