@@ -1,0 +1,17 @@
+{
+  "policy_id": "weight_edit_preservation",
+  "version": 2,
+  "status": "frozen",
+  "approval_basis": "user delegated the preservation-gate decision on 2026-11-09; accepted with exact edited-weight promotion and explicit conservative thresholds",
+  "float32_weight_source": "exact bf16 base and edited tensors promoted to float32; no separate edit recalculation",
+  "max_float32_logit_drift": 0.25,
+  "min_bf16_top1_agreement": 1.0,
+  "min_bf16_top5_set_agreement": 0.95,
+  "max_mean_bf16_kl_base_to_edited": 0.0001,
+  "bf16_max_absolute_logit_drift": "report_only",
+  "behaviour_runtime": "real Transformers model at serving precision; endpoint identity and final serving scores are separate checks",
+  "sensitivity_control": "one adjacent representable bf16 step on the predeclared selected-site scalar; frozen base, panel, renderer, and tensor identity",
+  "calibration_role": "record sensitivity; never enlarge candidate gate thresholds",
+  "change_control": "no threshold adjustment after v2 candidate results; future changes require a new policy version and approval",
+  "historical_results": "preserve v1 and its failed runs without reinterpretation"
+}
