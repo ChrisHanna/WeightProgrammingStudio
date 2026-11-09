@@ -11,12 +11,14 @@ import torch
 from ...model_digest import model_state_digest
 from ...prompt_rendering import PromptRenderer
 from ...gym_service import _document_digest, _wire_document
-from .apply import apply, save, tensor_digests
+from ...gym_artifacts import CandidateRef, artifact_files
+from .apply import apply, save, seal_serving_probes, tensor_digests
 from .capture import capture
 from .discover import SiteMap, find_blocks, find_sites
 from .loader import LoadedModel, UnsupportedModel, load_model
 from .methods import Delta
 from .numerics import deterministic_execution
+from .serving_probes import calibrate_portability, verify_portability
 
 
 IDENTITY_PROMPTS = (
@@ -27,7 +29,7 @@ IDENTITY_PROMPTS = (
 )
 
 
-def record_identity_probes(loaded: LoadedModel) -> dict[str, Any]:
+def record_portability_probes(loaded: LoadedModel) -> dict[str, Any]:
     renderer = PromptRenderer(loaded.tokenizer)
     records = []
     device = next(loaded.model.parameters()).device
@@ -43,8 +45,9 @@ def record_identity_probes(loaded: LoadedModel) -> dict[str, Any]:
                 raise UnsupportedModel("identity probe produced nonfinite log probabilities")
             records.append({"prompt_token_ids": list(rendered.token_ids), "prompt_digest": rendered.prompt_digest,
                             "greedy_token_id": token, "greedy_logprob": value})
-    return {"kind": "nf_weight_identity_probes_v1", "model_digest": model_state_digest(loaded.model),
-            "renderer_digest": renderer.digest, "records": records, "logprob_atol": 0.05,
+        return {"kind": "nf_transformers_portability_probes_v1", "model_digest": model_state_digest(loaded.model),
+            "renderer_digest": renderer.digest, "records": records,
+            "weight_files": {name: digest for name, digest in loaded.file_digests.items() if name.endswith(".safetensors")},
             "precision": str(next(loaded.model.parameters()).dtype).removeprefix("torch.")}
 
 
@@ -63,6 +66,24 @@ def _logits(loaded: LoadedModel, prompts: tuple[str, ...]) -> list[torch.Tensor]
 def probe_model(model_ref: str | Path, out_dir: str | Path, *, dtype: torch.dtype, device: str,
                 model_id: str, serving_factory: Any = None) -> dict[str, Any]:
     loaded = load_model(model_ref, dtype=dtype, device=device)
+    calibration = None
+    if serving_factory is not None:
+        base_reference_record = record_portability_probes(loaded)
+        provisional = CandidateRef(model_id, "full", loaded.base_digest, loaded.base_digest, loaded.base_digest,
+                                   str(loaded.checkpoint_path), "base-calibration", "unchanged_base", loaded.text_config.model_type)
+        selected_server = serving_factory(provisional)
+        revision = selected_server.revision
+        base_digest = _document_digest({"model_id": model_id, "revision": revision, "files": loaded.file_digests})
+        base_reference = CandidateRef(model_id, "full", base_digest, base_digest, base_digest,
+                                      str(loaded.checkpoint_path), "base-calibration", "unchanged_base", loaded.text_config.model_type)
+        if next(loaded.model.parameters()).device.type == "cuda":
+            loaded.model.to("cpu")
+            torch.cuda.empty_cache()
+        base_server = serving_factory(base_reference)
+        with base_server:
+            base_served_record = base_server.record_identity_probes()
+        calibration = calibrate_portability(base_reference_record, base_served_record)
+        loaded.model.to(device)
     blocks = find_blocks(loaded.model)
     sites = find_sites(loaded.model, blocks, loaded.hidden_size, checkpoint_tensor_names=loaded.checkpoint_tensor_names)
     writers = [site for site in sites.sites if site.role == "residual_write_mlp"]
@@ -92,23 +113,33 @@ def probe_model(model_ref: str | Path, out_dir: str | Path, *, dtype: torch.dtyp
         raise UnsupportedModel(f"tiny edit did not produce a measured bounded logit change: {difference}")
     if {name for name in tensors_before if tensors_before[name] != edited.after_tensors[name]} != {site.tensor_name}:
         raise UnsupportedModel("probe changed an unexpected tensor roster")
-    identities = record_identity_probes(loaded)
+    portability_record = record_portability_probes(loaded)
     request_digest = "sha256:" + hashlib.sha256((loaded.base_digest + sites.digest).encode()).hexdigest()
-    reference = save(edited, out_dir, model_id=model_id, request_digest=request_digest, identity_probes=identities)
+    reference = save(edited, out_dir, model_id=model_id, request_digest=request_digest)
+    portability_record["weight_files"] = {name: digest for name, digest in artifact_files(Path(out_dir)).items() if name.endswith(".safetensors")}
     report = {"kind": "nf_weight_edit_compatibility_v1", "supported": False, "model_id": model_id,
               "precision": str(dtype).removeprefix("torch."),
               "base_digest": loaded.base_digest, "site_map_digest": sites.digest, "candidate": vars(reference),
               "zero_edit_exact": True, "max_logit_change": difference, "unchanged_tensors_verified": True,
-              "reload_verified": True, "serving_verified": False, "identity_probe_count": len(identities["records"])}
+              "reload_verified": True, "serving_verified": False, "identity_probe_count": 0,
+              "portability_probe_count": len(portability_record["records"]),
+              "transformers_portability_record": portability_record}
     if serving_factory is not None:
         if next(loaded.model.parameters()).device.type == "cuda":
             loaded.model.to("cpu")
             torch.cuda.empty_cache()
+        creation_server = serving_factory(reference)
+        with creation_server:
+            creation_record = creation_server.record_identity_probes()
+        portability = verify_portability(portability_record, creation_record, calibration)
+        reference = seal_serving_probes(reference, creation_record, portability)
         with serving_factory(reference) as served:
             identity = served.loaded_identity()
             if identity.get("served_model_identity_verified") is not True:
                 raise UnsupportedModel("served identity probes did not pass")
-        report.update({"supported": True, "serving_verified": True})
+        report.update({"supported": True, "serving_verified": True, "identity_probe_count": 16,
+                   "candidate": vars(reference), "portability_calibration": calibration,
+                   "portability_verification": portability})
         report["serving_evidence"] = identity["identity_probe_evidence"]
     else:
         report["reasons"] = ["serving qualification not run"]

@@ -59,6 +59,8 @@ class VllmCandidateServer:
         self._snapshot: Path | None = None
         self._identity_verified = False
         self._identity_evidence: dict[str, Any] = {}
+        self._renderer: PromptRenderer | None = None
+        self._files: dict[str, str] = {}
 
     def _docker(self, arguments: list[str], *, data: bytes | None = None, timeout: float = 30) -> subprocess.CompletedProcess[bytes]:
         try:
@@ -76,8 +78,11 @@ class VllmCandidateServer:
             except GymJobError:
                 pass
         if container is not None:
-            stopped = self._docker(["stop", "--timeout", "20", container], timeout=30)
-            remove = ["rm", container] if stopped.returncode == 0 else ["rm", "--force", container]
+            try:
+                stopped = self._docker(["stop", "--timeout", "20", container], timeout=30)
+                remove = ["rm", container] if stopped.returncode == 0 else ["rm", "--force", container]
+            except GymJobError:
+                remove = ["rm", "--force", container]
             result = self._docker(remove, timeout=60)
             if result.returncode != 0:
                 inspected = self._docker(["inspect", container], timeout=15)
@@ -155,6 +160,7 @@ class VllmCandidateServer:
         reference = self.reference
         tokenizer = AutoTokenizer.from_pretrained(self._snapshot, local_files_only=True, trust_remote_code=False)
         renderer = PromptRenderer(tokenizer)
+        self._renderer, self._files = renderer, files
         probe_record = None
         receipt_path = self._snapshot / "training_receipt.json"
         if receipt_path.is_file():
@@ -184,55 +190,15 @@ class VllmCandidateServer:
                     "config_digest": files["config.json"], "tokenizer_digest": files["tokenizer.json"]}
 
         def verify_probes() -> None:
-            from .backends.weight_edit.probe import IDENTITY_PROMPTS
+            from .backends.weight_edit.serving_probes import verify_identity
 
             self._identity_verified = False
             self._identity_evidence = {}
             if probe_record is None:
                 return
-            if self._snapshot is None or artifact_files(self._snapshot) != files:
-                raise GymJobError("mounted files changed before serving identity verification")
-            weights = {name: digest for name, digest in files.items() if name.endswith(".safetensors")}
-            if (not isinstance(probe_record, dict) or probe_record.get("kind") != "nf_weight_identity_probes_v1"
-                or probe_record.get("weight_files") != weights or probe_record.get("model_digest") != reference.model_digest
-                or probe_record.get("renderer_digest") != renderer.digest
-                or probe_record.get("precision") != self.precision
-                or not isinstance(probe_record.get("records"), list) or len(probe_record["records"]) != 16
-                or probe_record.get("logprob_atol") != 0.05):
-                raise GymJobError("serving identity record differs from candidate weights or rendering")
-            maximum_logprob_error = 0.0
-            for probe_index, (prompt, record) in enumerate(zip(IDENTITY_PROMPTS, probe_record["records"], strict=True)):
-                expected_logprob = record.get("greedy_logprob") if isinstance(record, dict) else None
-                if (not isinstance(record, dict) or record.get("prompt_token_ids") != list(renderer.render(prompt).token_ids)
-                    or type(record.get("greedy_token_id")) is not int or record["greedy_token_id"] < 0
-                    or isinstance(expected_logprob, bool) or not isinstance(expected_logprob, (int, float))
-                    or not math.isfinite(expected_logprob) or expected_logprob > 0):
-                    raise GymJobError("creation-time identity probe is malformed or uses a different fixed prompt")
-                payload = {"model": "nf-candidate", "prompt": record["prompt_token_ids"], "max_tokens": 1,
-                           "temperature": 0, "seed": 0, "add_special_tokens": False, "return_token_ids": True, "logprobs": 0}
-                result = self._docker(["exec", "-i", self._container, "python3", "-c", _HTTP_CLIENT, "/v1/completions"],
-                                      data=json.dumps(payload, allow_nan=False).encode(), timeout=75)
-                if result.returncode != 0:
-                    raise GymJobError("serving identity probe failed")
-                try:
-                    choices = parse_strict_json(result.stdout)["choices"]
-                    if not isinstance(choices, list) or len(choices) != 1:
-                        raise ValueError("identity probe returned an incomplete choice roster")
-                    choice = choices[0]
-                    value = choice["logprobs"]["token_logprobs"][0]
-                    if (choice["token_ids"] != [record["greedy_token_id"]] or isinstance(value, bool)
-                        or not isinstance(value, (int, float)) or not math.isfinite(value)
-                        or abs(value - expected_logprob) > probe_record["logprob_atol"]):
-                        raise ValueError(f"probe_index={probe_index}, expected_token={record['greedy_token_id']}, "
-                                         f"observed_tokens={choice.get('token_ids')}, expected_logprob={expected_logprob}, "
-                                         f"observed_logprob={value}, logprob_atol={probe_record['logprob_atol']}")
-                except (ValueError, KeyError, IndexError, TypeError) as exc:
-                    raise GymJobError(f"serving weights do not match creation-time log-probability probes: {exc}") from exc
-                maximum_logprob_error = max(maximum_logprob_error, abs(value - expected_logprob))
+            observed = self.record_identity_probes()
+            self._identity_evidence = verify_identity(probe_record, observed)
             self._identity_verified = True
-            self._identity_evidence = {"fixed_prompts": 16, "greedy_token_ids_match": True,
-                                       "max_logprob_absolute_error": maximum_logprob_error,
-                                       "logprob_atol": probe_record["logprob_atol"], "precision": self.precision}
 
         def infer(interaction: Mapping[str, Any]) -> ExecutionResponse:
             if self._container is None or not isinstance(interaction, Mapping):
@@ -271,6 +237,44 @@ class VllmCandidateServer:
 
         return ModelAdapter(identity, candidate, reference.family, ("chat_messages_v1", "json_extraction_v1"), settings,
                             infer, loaded_identity, artifact_kinds=("full", "weight_edit"), artifact_kind=reference.kind, reference=reference)
+
+    def record_identity_probes(self) -> dict[str, Any]:
+        from .backends.weight_edit.probe import IDENTITY_PROMPTS
+
+        if self._container is None or self._snapshot is None or self._renderer is None:
+            raise GymJobError("identity recording requires a running owned vLLM container")
+        if artifact_files(self._snapshot) != self._files:
+            raise GymJobError("mounted files changed before vLLM identity recording")
+        records = []
+        for index, prompt in enumerate(IDENTITY_PROMPTS):
+            rendered = self._renderer.render(prompt)
+            payload = {"model": "nf-candidate", "prompt": list(rendered.token_ids), "max_tokens": 1, "temperature": 0,
+                       "seed": 0, "add_special_tokens": False, "return_token_ids": True, "logprobs": 0}
+            result = self._docker(["exec", "-i", self._container, "python3", "-c", _HTTP_CLIENT, "/v1/completions"],
+                                  data=json.dumps(payload, allow_nan=False).encode(), timeout=75)
+            if result.returncode != 0:
+                raise GymJobError(f"vLLM identity recording failed at fixed prompt {index}")
+            try:
+                choices = parse_strict_json(result.stdout)["choices"]
+                if not isinstance(choices, list) or len(choices) != 1:
+                    raise ValueError("incomplete choice roster")
+                choice = choices[0]
+                tokens, values = choice["token_ids"], choice["logprobs"]["token_logprobs"]
+                if (len(tokens) != 1 or type(tokens[0]) is not int or tokens[0] < 0 or len(values) != 1
+                    or isinstance(values[0], bool) or not isinstance(values[0], (int, float))
+                    or not math.isfinite(values[0]) or values[0] > 0):
+                    raise ValueError("invalid token/log-probability evidence")
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise GymJobError(f"vLLM identity response is invalid at fixed prompt {index}") from exc
+            records.append({"prompt_token_ids": list(rendered.token_ids), "prompt_digest": rendered.prompt_digest,
+                            "greedy_token_id": tokens[0], "greedy_logprob": values[0]})
+        if artifact_files(self._snapshot) != self._files:
+            raise GymJobError("mounted files changed during vLLM identity recording")
+        return {"kind": "nf_vllm_weight_identity_v2", "precision": self.precision, "image": self.image,
+                "context_tokens": self.context_tokens, "model_digest": self.reference.model_digest,
+                "renderer_digest": self._renderer.digest,
+                "weight_files": {name: digest for name, digest in self._files.items() if name.endswith(".safetensors")},
+                "records": records}
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         try:

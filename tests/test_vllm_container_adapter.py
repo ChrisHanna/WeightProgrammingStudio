@@ -117,6 +117,23 @@ def test_cleanup_failure_does_not_mask_original_probe_failure(tmp_path, monkeypa
     assert server._container == "a" * 64
 
 
+def test_cleanup_uses_bounded_force_fallback_after_stop_timeout(tmp_path, monkeypatch) -> None:
+    server = VllmCandidateServer(_reference(tmp_path), revision="a" * 40)
+    server._container = "a" * 64
+    calls = []
+
+    def docker(command, **kwargs):
+        calls.append(command)
+        if command[1] == "stop":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0, stdout=b"removed", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", docker)
+    server._cleanup()
+    assert calls[-1][1:] == ["rm", "--force", "a" * 64]
+    assert server._container is None
+
+
 def test_real_vllm_container_serves_verified_candidate() -> None:
     if os.environ.get("NF_VLLM_LIVE") != "1":
         pytest.skip("set NF_VLLM_LIVE=1 for the GPU container smoke test")

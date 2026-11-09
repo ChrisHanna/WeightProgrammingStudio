@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from typing import Any
 import torch
 
 from ... import ir
-from ...gym_artifacts import CandidateRef, artifact_files, write_candidate_manifest
+from ...gym_artifacts import CandidateRef, artifact_files, read_candidate_manifest, write_candidate_manifest
 from ...gym_service import _document_digest, _wire_document
 from ...model_digest import model_state_digest
 from ...prompt_rendering import PromptRenderer
@@ -167,3 +169,45 @@ def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_dig
     except BaseException:
         shutil.rmtree(output)
         raise
+
+
+def seal_serving_probes(reference: CandidateRef, identity: Mapping[str, Any], portability: Mapping[str, Any]) -> CandidateRef:
+    from dataclasses import replace
+    from .serving_probes import verify_identity
+
+    verify_identity(identity, identity)
+    root = Path(reference.artifact_path)
+    receipt_path, manifest_path = root / "training_receipt.json", root / "artifact_manifest.json"
+    original_receipt, original_manifest = receipt_path.read_bytes(), manifest_path.read_bytes()
+    receipt = json.loads(original_receipt)
+    request_digest = receipt["training_request_digest"]
+    read_candidate_manifest(root, request_digest)
+    files = artifact_files(root)
+    weights = {name: digest for name, digest in files.items() if name.endswith(".safetensors")}
+    if (_document_digest({"training_request": request_digest, "files": files}) != reference.artifact_digest
+        or identity["model_digest"] != reference.model_digest or identity["weight_files"] != weights
+        or identity["renderer_digest"] != receipt["renderer_digest"] or portability.get("verified") is not True):
+        raise UnsupportedModel("creation-time serving evidence differs from the exported candidate")
+    updated = {**receipt, "identity_probes": dict(identity), "portability_verification": dict(portability)}
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".nf-serving-receipt-", dir=root)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(_wire_document(updated))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, receipt_path)
+        digest = _document_digest({"training_request": request_digest, "files": artifact_files(root)})
+        candidate_id = "weight-edit:" + digest[7:23]
+        candidate = {"candidate_id": candidate_id, "method_id": reference.method_id, "base_model_digest": reference.base_digest,
+                     "candidate_model_digest": reference.model_digest, "artifact_digest": digest}
+        write_candidate_manifest(root, model_id=reference.model_id, kind=reference.kind, base_digest=reference.base_digest,
+                                 model_digest=reference.model_digest, request_digest=request_digest,
+                                 metadata={"candidate": candidate, "weight_edit_receipt": updated})
+        return replace(reference, artifact_digest=digest, candidate_id=candidate_id)
+    except BaseException:
+        receipt_path.write_bytes(original_receipt)
+        manifest_path.write_bytes(original_manifest)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
