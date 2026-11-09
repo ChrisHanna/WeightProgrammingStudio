@@ -152,11 +152,13 @@ def train_payload(payload: dict[str, Any], serving_factory=None) -> CandidateRef
         verification_path = Path(payload["output_dir"]).parent / "preservation-verification-v2.json"
         with verification_path.open("xb") as stream:
             stream.write(_wire_document(preservation_verification))
-        if not preservation_verification["passed"]:
+        if recipe.get("retention_mode", "generalist") == "generalist" and not preservation_verification["passed"]:
             raise GymJobError(f"candidate violates frozen preservation v2: {json.dumps(preservation_verification, allow_nan=False)}")
     elif drift > recipe["max_preservation_logit_drift"]:
         raise GymJobError(f"candidate violates the frozen preservation-logit drift bound: measured={drift}, limit={recipe['max_preservation_logit_drift']}")
     edited = replace(edited, receipt={**edited.receipt, **evidence, "preservation_max_logit_drift": drift,
+                                     "retention_mode": recipe.get("retention_mode", "generalist"),
+                                     "preservation_gating": recipe.get("retention_mode", "generalist") == "generalist",
                                      "trainer_implementation_digest": payload["implementation_digest"],
                                      "compatibility_probe_digest": probe["probe_digest"], "job_digest": job.digest,
                                      "scorer": job.scorer.to_document(), "dataset_digest": request["dataset_digest"]})

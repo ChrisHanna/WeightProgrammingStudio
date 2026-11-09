@@ -46,6 +46,12 @@ def test_recipe_requires_public_preservation_and_explicit_budgets():
         validate_recipe({**recipe, "preservation_policy_version": 2, "max_preservation_logit_drift": 1.0})
     with pytest.raises(GymJobError, match="version"):
         validate_recipe({**recipe, "preservation_policy_version": 3})
+    specialist = {**recipe, "preservation_policy_version": 2, "retention_mode": "specialist"}
+    assert validate_recipe(specialist) == specialist
+    with pytest.raises(GymJobError, match="explicit"):
+        validate_recipe({**recipe, "retention_mode": "specialist"})
+    with pytest.raises(GymJobError, match="retention_mode"):
+        validate_recipe({**recipe, "retention_mode": "skip_all_checks"})
 
 
 def test_teacher_forcing_preserves_served_prompt_tokens_and_shifts_targets():

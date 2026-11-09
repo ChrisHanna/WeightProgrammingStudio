@@ -36,8 +36,16 @@ class WeightEditBackendConfig:
 
 
 def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(recipe, Mapping):
+        raise GymJobError("weight-edit recipe must be a mapping")
     fields = {"method", "edit_method", "seed", "target_step", "retention_nullspace_weight", "max_sequence_tokens",
               "max_training_tokens", "max_keys", "preservation_interactions", "preservation_source", "max_preservation_logit_drift"}
+    if "retention_mode" in recipe:
+        fields.add("retention_mode")
+        if recipe["retention_mode"] not in {"generalist", "specialist"}:
+            raise GymJobError("retention_mode must be generalist or specialist")
+    if recipe.get("retention_mode", "generalist") == "specialist" and recipe.get("preservation_policy_version") != 2:
+        raise GymJobError("specialist retention requires explicit preservation policy v2 reporting")
     if "preservation_policy_version" in recipe:
         fields.add("preservation_policy_version")
         if type(recipe["preservation_policy_version"]) is not int or recipe["preservation_policy_version"] not in {1, 2}:
@@ -113,9 +121,14 @@ def weight_edit_trainer(config: WeightEditBackendConfig, job: GymJobSpec) -> Tra
             from .preservation import verify_v2
             verification = receipt.get("preservation_verification", {})
             calibration = receipt.get("preservation_calibration", {})
-            if (calibration.get("base_digest") != request["loaded_base"]["state_digest"]
+            recomputed = verify_v2(verification.get("float32", {}), verification.get("bf16", {}), calibration)
+            mode = recipe.get("retention_mode", "generalist")
+            if (receipt.get("retention_mode", "generalist") != mode
+                or calibration.get("renderer_digest") != request["inference_config"]["prompt_renderer_digest"]
+                or verification != recomputed
+                or calibration.get("base_digest") != request["loaded_base"]["state_digest"]
                 or calibration.get("panel_digest") != _document_digest({"source": "public_train", "interactions": recipe["preservation_interactions"]})
-                or not verify_v2(verification.get("float32", {}), verification.get("bf16", {}), calibration)["passed"]):
+                or (mode == "generalist" and not recomputed["passed"])):
                 raise GymJobError("weight-edit v2 preservation receipt failed verification")
         manifest = read_candidate_manifest(directory, request["training_request_digest"])
         if manifest["kind"] != "weight_edit" or manifest["base_digest"] != base.base_digest:
