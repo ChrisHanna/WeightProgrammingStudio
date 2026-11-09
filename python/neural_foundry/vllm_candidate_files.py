@@ -12,7 +12,7 @@ from .provenance import resolve_checkpoint
 
 
 def verify_vllm_candidate_files(reference: CandidateRef, *, revision: str) -> dict[str, str]:
-    if reference.kind != "full" or not reference.candidate_id or not reference.method_id or not reference.family:
+    if reference.kind not in {"full", "weight_edit"} or not reference.candidate_id or not reference.method_id or not reference.family:
         raise GymJobError("vLLM requires a fully identified full-model candidate")
     if not isinstance(revision, str) or len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
         raise GymJobError("vLLM requires an immutable checkpoint revision")
@@ -23,7 +23,7 @@ def verify_vllm_candidate_files(reference: CandidateRef, *, revision: str) -> di
         digest = _document_digest({"model_id": reference.model_id, "revision": revision, "files": files})
         if reference.base_digest != digest or reference.model_digest != digest or reference.artifact_digest != digest:
             raise GymJobError("vLLM base checkpoint files differ from the candidate reference")
-    elif reference.method_id == "sft":
+    elif reference.method_id in {"sft", "weight_edit"}:
         files = artifact_files(directory)
         try:
             receipt = json.loads((directory / "training_receipt.json").read_bytes())

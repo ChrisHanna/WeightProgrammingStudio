@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,6 +31,7 @@ def loaded(tmp_path, request):
 
 
 def test_apply_exports_only_listed_tensors_and_reloads(loaded, tmp_path) -> None:
+    loaded.config.dtype = torch.bfloat16
     sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
                        checkpoint_tensor_names=loaded.checkpoint_tensor_names)
     site = next(site for site in sites.sites if site.role == "residual_write_mlp")
@@ -49,6 +51,7 @@ def test_apply_exports_only_listed_tensors_and_reloads(loaded, tmp_path) -> None
     assert model_state_digest(plain) == reference.model_digest
     receipt = json.loads((tmp_path / "export" / "training_receipt.json").read_bytes())
     assert receipt["fresh_reload_verified"] is True and receipt["edited_tensors"] == [site.tensor_name]
+    assert receipt["explicit_dtype_metadata"] == {"dtype": {"source": "bfloat16", "export": "float32"}}
 
 
 def test_zero_edit_is_exact_and_invalid_delta_never_mutates(loaded) -> None:
@@ -95,3 +98,20 @@ def test_failed_receipt_creation_rolls_back_the_edit(loaded) -> None:
     with pytest.raises(ValueError):
         apply(loaded, {site.tensor_name: delta}, sites=sites, method="invalid_receipt", settings={"invalid": object()})
     assert model_state_digest(loaded.model) == before
+
+
+def test_native_edit_tiles_projection_wider_than_smoke_vector_bound() -> None:
+    model = torch.nn.Module()
+    model.projection = torch.nn.Linear(4100, 2, bias=False)
+    tokenizer = SimpleNamespace(chat_template=None, special_tokens_map={}, get_vocab=lambda: {"token": 1})
+    loaded = SimpleNamespace(model=model, base_digest=model_state_digest(model), tokenizer=tokenizer)
+    site = Site("projection.weight", 0, "residual_write_mlp", 4100, 2, False, "torch.float32")
+    delta = Delta("dense", D=torch.ones((2, 4100), dtype=torch.float64) * 0.0001)
+    expected = (model.projection.weight.detach().double() + delta.D).float()
+    edited = apply(loaded, {site.tensor_name: delta}, sites=SiteMap((site,), checkpoint_names_verified=True),
+                   method="wide_projection", settings={})
+    torch.testing.assert_close(model.projection.weight, expected, rtol=0, atol=0)
+    chunks = edited.receipt["transactions"][site.tensor_name]["chunks"]
+    assert len(chunks) == 2
+    assert all(chunk["column_stop"] - chunk["column_start"] <= 4096 for chunk in chunks)
+    assert all(chunk["reload_parity_verified"] for chunk in chunks)

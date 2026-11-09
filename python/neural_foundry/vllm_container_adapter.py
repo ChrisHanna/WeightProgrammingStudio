@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -33,7 +34,8 @@ _HTTP_CLIENT = (
 
 class VllmCandidateServer:
     def __init__(self, reference: CandidateRef, *, revision: str, image: str = VLLM_IMAGE,
-                 context_tokens: int = 512, max_new_tokens: int = 64, timeout_seconds: float = 240) -> None:
+                 context_tokens: int = 512, max_new_tokens: int = 64, timeout_seconds: float = 240,
+                 precision: str = "bfloat16", gpu_memory_utilization: float = 0.25) -> None:
         if os.name == "nt":
             raise GymJobError("network-isolated vLLM serving requires a Linux Docker runtime")
         if (not isinstance(image, str) or len(image) != 71 or not image.startswith("sha256:")
@@ -43,12 +45,20 @@ class VllmCandidateServer:
             or max_new_tokens < 1 or max_new_tokens >= context_tokens or not 1 <= timeout_seconds <= 600):
             raise GymJobError("invalid vLLM context or timeout budget")
         self.reference, self.revision, self.image = reference, revision, image
+        if precision not in {"float32", "float16", "bfloat16"}:
+            raise GymJobError("vLLM requires an explicit supported arithmetic precision")
+        self.precision = precision
+        if isinstance(gpu_memory_utilization, bool) or not isinstance(gpu_memory_utilization, (int, float)) or not 0 < gpu_memory_utilization <= 0.9:
+            raise GymJobError("vLLM GPU memory fraction must be explicit and bounded")
+        self.gpu_memory_utilization = gpu_memory_utilization
         self.context_tokens, self.max_new_tokens, self.timeout_seconds = context_tokens, max_new_tokens, timeout_seconds
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._container: str | None = None
         self._name = "nf-vllm-" + uuid4().hex
         self._owner = uuid4().hex
         self._snapshot: Path | None = None
+        self._identity_verified = False
+        self._identity_evidence: dict[str, Any] = {}
 
     def _docker(self, arguments: list[str], *, data: bytes | None = None, timeout: float = 30) -> subprocess.CompletedProcess[bytes]:
         try:
@@ -66,9 +76,15 @@ class VllmCandidateServer:
             except GymJobError:
                 pass
         if container is not None:
-            result = self._docker(["rm", "--force", container], timeout=30)
+            stopped = self._docker(["stop", "--timeout", "20", container], timeout=30)
+            remove = ["rm", container] if stopped.returncode == 0 else ["rm", "--force", container]
+            result = self._docker(remove, timeout=60)
             if result.returncode != 0:
-                raise GymJobError("could not remove owned vLLM container")
+                inspected = self._docker(["inspect", container], timeout=15)
+                confirmed_absent = inspected.returncode != 0 and b"No such object" in inspected.stderr
+                if not confirmed_absent:
+                    detail = result.stderr.decode("utf-8", "replace")[-1000:]
+                    raise GymJobError(f"could not remove owned vLLM container: {detail}")
             self._container = None
         if self._temporary is not None:
             self._temporary.cleanup()
@@ -91,7 +107,7 @@ class VllmCandidateServer:
                 raise GymJobError("vLLM mounted snapshot differs from verified candidate files")
             if "," in str(self._snapshot):
                 raise GymJobError("vLLM snapshot path cannot contain a comma")
-            create = ["create", "--name", self._name, "--label", f"nf.owner={self._owner}", "--network", "none",
+            create = ["create", "--init", "--name", self._name, "--label", f"nf.owner={self._owner}", "--network", "none",
                       "--read-only", "--gpus", "all", "--log-driver", "none", "--shm-size", "1g",
                       "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--mount",
                       f"type=bind,src={self._snapshot},dst=/model,readonly"]
@@ -103,8 +119,8 @@ class VllmCandidateServer:
                                 "VLLM_LOGGING_LEVEL": "ERROR"}.items():
                 create.extend(["--env", f"{name}={value}"])
             create.extend([self.image, "/model", "--host", "127.0.0.1", "--port", "8000", "--served-model-name",
-                           "nf-candidate", "--dtype", "bfloat16", "--max-model-len", str(self.context_tokens),
-                           "--gpu-memory-utilization", "0.25", "--enforce-eager", "--disable-log-stats",
+                           "nf-candidate", "--dtype", self.precision, "--max-model-len", str(self.context_tokens),
+                           "--gpu-memory-utilization", str(self.gpu_memory_utilization), "--enforce-eager", "--disable-log-stats",
                            "--disable-uvicorn-access-log", "--no-enable-log-requests", "--no-enable-log-outputs", "--no-enable-log-deltas"])
             created = self._docker(create, timeout=60)
             container = created.stdout.decode("ascii", errors="replace").strip()
@@ -126,8 +142,11 @@ class VllmCandidateServer:
             if artifact_files(self._snapshot) != files:
                 raise GymJobError("vLLM mounted files changed during startup")
             return self._adapter(files)
-        except BaseException:
-            self._cleanup()
+        except BaseException as original:
+            try:
+                self._cleanup()
+            except Exception as cleanup_error:
+                original.add_note(f"owned vLLM cleanup also failed: {cleanup_error}")
             raise
 
     def _adapter(self, files: dict[str, str]) -> ModelAdapter:
@@ -136,6 +155,10 @@ class VllmCandidateServer:
         reference = self.reference
         tokenizer = AutoTokenizer.from_pretrained(self._snapshot, local_files_only=True, trust_remote_code=False)
         renderer = PromptRenderer(tokenizer)
+        probe_record = None
+        receipt_path = self._snapshot / "training_receipt.json"
+        if receipt_path.is_file():
+            probe_record = parse_strict_json(receipt_path.read_bytes()).get("identity_probes")
         identity = AdapterIdentity("vllm_container", "1", _document_digest({
             "adapter": sha256_file(__file__), "candidate_verifier": sha256_file(Path(__file__).with_name("vllm_candidate_files.py")),
             "image": self.image,
@@ -143,19 +166,73 @@ class VllmCandidateServer:
         }))
         candidate = CandidateIdentity(reference.candidate_id, reference.method_id, reference.base_digest,
                                       reference.model_digest, reference.artifact_digest)
-        settings = {"image": self.image, "device": "cuda:0", "precision": "bfloat16", "context_tokens": self.context_tokens,
+        settings = {"image": self.image, "device": "cuda:0", "precision": self.precision, "context_tokens": self.context_tokens,
+                    "gpu_memory_utilization": self.gpu_memory_utilization,
                     "max_new_tokens": self.max_new_tokens, "network": "none", "seed": 0,
                     "prompt_renderer_digest": renderer.digest}
 
         def loaded_identity() -> Mapping[str, Any]:
             if self._container is None or self._snapshot is None:
                 raise GymJobError("vLLM container is not running")
+            verify_probes()
             return {"model_id": reference.model_id, "revision": self.revision, "checkpoint_digest": reference.base_digest,
-                    "model_family": reference.family, "device": "cuda:0", "precision": "bfloat16",
+                    "model_family": reference.family, "device": "cuda:0", "precision": self.precision,
                     "mounted_files_verified": True, "local_loaded_files_verified": False,
-                    "served_model_identity_verified": False, "artifact_digest": reference.artifact_digest,
+                    "served_model_identity_verified": self._identity_verified, "artifact_digest": reference.artifact_digest,
                     "prompt_renderer_digest": renderer.digest,
+                    "identity_probe_evidence": dict(self._identity_evidence),
                     "config_digest": files["config.json"], "tokenizer_digest": files["tokenizer.json"]}
+
+        def verify_probes() -> None:
+            from .backends.weight_edit.probe import IDENTITY_PROMPTS
+
+            self._identity_verified = False
+            self._identity_evidence = {}
+            if probe_record is None:
+                return
+            if self._snapshot is None or artifact_files(self._snapshot) != files:
+                raise GymJobError("mounted files changed before serving identity verification")
+            weights = {name: digest for name, digest in files.items() if name.endswith(".safetensors")}
+            if (not isinstance(probe_record, dict) or probe_record.get("kind") != "nf_weight_identity_probes_v1"
+                or probe_record.get("weight_files") != weights or probe_record.get("model_digest") != reference.model_digest
+                or probe_record.get("renderer_digest") != renderer.digest
+                or probe_record.get("precision") != self.precision
+                or not isinstance(probe_record.get("records"), list) or len(probe_record["records"]) != 16
+                or probe_record.get("logprob_atol") != 0.05):
+                raise GymJobError("serving identity record differs from candidate weights or rendering")
+            maximum_logprob_error = 0.0
+            for probe_index, (prompt, record) in enumerate(zip(IDENTITY_PROMPTS, probe_record["records"], strict=True)):
+                expected_logprob = record.get("greedy_logprob") if isinstance(record, dict) else None
+                if (not isinstance(record, dict) or record.get("prompt_token_ids") != list(renderer.render(prompt).token_ids)
+                    or type(record.get("greedy_token_id")) is not int or record["greedy_token_id"] < 0
+                    or isinstance(expected_logprob, bool) or not isinstance(expected_logprob, (int, float))
+                    or not math.isfinite(expected_logprob) or expected_logprob > 0):
+                    raise GymJobError("creation-time identity probe is malformed or uses a different fixed prompt")
+                payload = {"model": "nf-candidate", "prompt": record["prompt_token_ids"], "max_tokens": 1,
+                           "temperature": 0, "seed": 0, "add_special_tokens": False, "return_token_ids": True, "logprobs": 0}
+                result = self._docker(["exec", "-i", self._container, "python3", "-c", _HTTP_CLIENT, "/v1/completions"],
+                                      data=json.dumps(payload, allow_nan=False).encode(), timeout=75)
+                if result.returncode != 0:
+                    raise GymJobError("serving identity probe failed")
+                try:
+                    choices = parse_strict_json(result.stdout)["choices"]
+                    if not isinstance(choices, list) or len(choices) != 1:
+                        raise ValueError("identity probe returned an incomplete choice roster")
+                    choice = choices[0]
+                    value = choice["logprobs"]["token_logprobs"][0]
+                    if (choice["token_ids"] != [record["greedy_token_id"]] or isinstance(value, bool)
+                        or not isinstance(value, (int, float)) or not math.isfinite(value)
+                        or abs(value - expected_logprob) > probe_record["logprob_atol"]):
+                        raise ValueError(f"probe_index={probe_index}, expected_token={record['greedy_token_id']}, "
+                                         f"observed_tokens={choice.get('token_ids')}, expected_logprob={expected_logprob}, "
+                                         f"observed_logprob={value}, logprob_atol={probe_record['logprob_atol']}")
+                except (ValueError, KeyError, IndexError, TypeError) as exc:
+                    raise GymJobError(f"serving weights do not match creation-time log-probability probes: {exc}") from exc
+                maximum_logprob_error = max(maximum_logprob_error, abs(value - expected_logprob))
+            self._identity_verified = True
+            self._identity_evidence = {"fixed_prompts": 16, "greedy_token_ids_match": True,
+                                       "max_logprob_absolute_error": maximum_logprob_error,
+                                       "logprob_atol": probe_record["logprob_atol"], "precision": self.precision}
 
         def infer(interaction: Mapping[str, Any]) -> ExecutionResponse:
             if self._container is None or not isinstance(interaction, Mapping):
@@ -163,6 +240,8 @@ class VllmCandidateServer:
             kind = interaction.get("format")
             if kind not in {"chat_messages_v1", "json_extraction_v1"} or not isinstance(interaction.get("messages"), list):
                 raise GymJobError("vLLM requires chat or JSON extraction messages")
+            if probe_record is not None and not self._identity_verified:
+                verify_probes()
             rendered = renderer.render(interaction)
             if len(rendered.token_ids) + self.max_new_tokens > self.context_tokens:
                 raise GymJobError("rendered prompt exceeds the configured context budget")
@@ -186,12 +265,17 @@ class VllmCandidateServer:
                 response = parse_strict_json(text.encode("utf-8")) if kind == "json_extraction_v1" else text
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise GymJobError("vLLM returned an incomplete or invalid completion") from exc
-            return ExecutionResponse(response, {"raw_text": text, "served_model_identity_verified": False,
+            return ExecutionResponse(response, {"raw_text": text, "served_model_identity_verified": self._identity_verified,
                                                  "prompt_renderer_digest": renderer.digest,
                                                  "rendered_prompt_digest": rendered.prompt_digest})
 
         return ModelAdapter(identity, candidate, reference.family, ("chat_messages_v1", "json_extraction_v1"), settings,
-                            infer, loaded_identity, artifact_kinds=("full",), artifact_kind="full", reference=reference)
+                            infer, loaded_identity, artifact_kinds=("full", "weight_edit"), artifact_kind=reference.kind, reference=reference)
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        self._cleanup()
+        try:
+            self._cleanup()
+        except Exception as cleanup_error:
+            if exc is None:
+                raise
+            exc.add_note(f"owned vLLM cleanup also failed: {cleanup_error}")

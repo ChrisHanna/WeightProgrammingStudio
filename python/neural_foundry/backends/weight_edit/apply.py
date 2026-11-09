@@ -61,18 +61,31 @@ def apply(loaded: LoadedModel, deltas: Mapping[str, Delta], *, sites: SiteMap,
         change = delta.matrix().to(torch.float64)
         if change.shape != canonical.shape or not bool(torch.isfinite(change).all()):
             raise WeightEditInputError("delta shape differs from its site or contains nonfinite values")
-        transaction = ir.WeightIRTransactionBuilder.execute_matrix_edit(canonical, operation_type="add_delta",
-                      delta_matrix=change, smoke_probe=torch.ones(site.input_size, dtype=torch.float64),
-                      provenance_tag="weight_edit.generic.v1", engine_name=method)
-        ir.require_reload_parity(transaction)
-        replacement = torch.frombuffer(bytearray(transaction.edited_bytes), dtype=torch.float64).reshape(canonical.shape).clone()
+        chunks = []
+        replacement = canonical.clone()
+        if bool(torch.count_nonzero(change)):
+            for column_start in range(0, site.input_size, 4096):
+                column_stop = min(column_start + 4096, site.input_size)
+                width = column_stop - column_start
+                rows_per_chunk = min(524288 // width, (1_000_000 - 8 * width) // (2 * width + 8))
+                for start in range(0, site.output_size, rows_per_chunk):
+                    stop = min(start + rows_per_chunk, site.output_size)
+                    block = canonical[start:stop, column_start:column_stop].contiguous()
+                    transaction = ir.WeightIRTransactionBuilder.execute_matrix_edit(block, operation_type="add_delta",
+                                  delta_matrix=change[start:stop, column_start:column_stop].contiguous(),
+                                  smoke_probe=torch.ones(width, dtype=torch.float64),
+                                  provenance_tag="weight_edit.generic.v1", engine_name=method)
+                    ir.require_reload_parity(transaction)
+                    replacement[start:stop, column_start:column_stop] = torch.frombuffer(bytearray(transaction.edited_bytes), dtype=torch.float64).reshape(block.shape)
+                    chunks.append({"row_start": start, "row_stop": stop, "column_start": column_start,
+                                   "column_stop": column_stop, "plan_digest": transaction.plan_digest,
+                                   "candidate_digest": transaction.candidate_digest, "reload_parity_verified": True})
         replacement = replacement.T if site.transposed else replacement
         replacement = replacement.to(device=parameter.device, dtype=parameter.dtype)
         if not bool(torch.isfinite(replacement).all()):
             raise WeightEditInputError("casting the edited tensor produced nonfinite values")
         backups[name], replacements[name] = parameter.detach().clone(), replacement
-        transactions[name] = {"plan_digest": transaction.plan_digest, "candidate_digest": transaction.candidate_digest,
-                               "reload_parity_verified": True}
+        transactions[name] = {"chunks": chunks, "zero_noop_verified": not chunks, "reload_parity_verified": True}
         delta_records[name] = {"kind": delta.kind, "shape": list(change.shape), "dtype": str(change.dtype),
                               "digest": "sha256:" + hashlib.sha256(change.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()}
     try:
@@ -104,7 +117,8 @@ def apply(loaded: LoadedModel, deltas: Mapping[str, Delta], *, sites: SiteMap,
         raise
 
 
-def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_digest: str) -> CandidateRef:
+def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_digest: str,
+         identity_probes: Mapping[str, Any] | None = None) -> CandidateRef:
     output = Path(out_dir).absolute()
     if tensor_digests(edited.loaded.model) != edited.after_tensors:
         raise UnsupportedModel("edited model changed before export")
@@ -115,6 +129,15 @@ def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_dig
         edited.loaded.tokenizer.save_pretrained(output)
         reloaded = load_model(output, dtype=next(edited.loaded.model.parameters()).dtype, device="cpu")
         config_after = reloaded.config.to_dict()
+        dtype_metadata = {}
+        selected_dtype = str(next(edited.loaded.model.parameters()).dtype).removeprefix("torch.")
+        for name in ("dtype", "torch_dtype"):
+            if name in config_after:
+                if config_after[name] != selected_dtype:
+                    raise UnsupportedModel("export dtype metadata differs from the selected tensor precision")
+                if config_before.get(name) != config_after[name]:
+                    dtype_metadata[name] = {"source": config_before.get(name), "export": config_after[name]}
+                    config_before[name] = config_after[name]
         for config in (config_before, config_after):
             config.pop("_name_or_path", None)
             config.pop("transformers_version", None)
@@ -123,7 +146,14 @@ def save(edited: EditedModel, out_dir: str | Path, *, model_id: str, request_dig
         if (reloaded.base_digest != edited.receipt["model_digest"] or tensor_digests(reloaded.model) != edited.after_tensors
             or PromptRenderer(reloaded.tokenizer).digest != edited.receipt["renderer_digest"]):
             raise UnsupportedModel("fresh export reload differs in tensor state or prompt rendering")
-        receipt = {**edited.receipt, "training_request_digest": request_digest, "fresh_reload_verified": True}
+        receipt = {**edited.receipt, "training_request_digest": request_digest, "fresh_reload_verified": True,
+               "explicit_dtype_metadata": dtype_metadata}
+        if identity_probes is not None:
+            if (identity_probes.get("model_digest") != receipt["model_digest"]
+                or identity_probes.get("renderer_digest") != receipt["renderer_digest"]):
+                raise UnsupportedModel("creation-time identity probes differ from the exported model")
+            receipt["identity_probes"] = {**dict(identity_probes), "weight_files": {
+                name: digest for name, digest in artifact_files(output).items() if name.endswith(".safetensors")}}
         (output / "training_receipt.json").write_bytes(_wire_document(receipt))
         digest = _document_digest({"training_request": request_digest, "files": artifact_files(output)})
         candidate_id = "weight-edit:" + digest[7:23]

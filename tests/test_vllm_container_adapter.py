@@ -66,13 +66,15 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         with pytest.raises(GymJobError, match="incomplete"):
             adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})
     create = calls[0][0]
+    assert "--init" in create
     assert create[create.index("--network") + 1] == "none"
     assert create[create.index("--log-driver") + 1] == "none"
     assert "VLLM_ALLOW_INSECURE_SERIALIZATION=0" in create
     assert "VLLM_ALLOW_INSECURE_SERIALIZATION=1" not in create
     assert "--disable-uvicorn-access-log" in create and "--no-enable-log-outputs" in create
     assert "--no-enable-log-requests" in create and "VLLM_USE_FLASHINFER_SAMPLER=0" in create
-    assert calls[-1][0][1:] == ["rm", "--force", container_id]
+    assert calls[-2][0][1:] == ["stop", "--timeout", "20", container_id]
+    assert calls[-1][0][1:] == ["rm", container_id]
     with pytest.raises(GymJobError, match="not running"):
         adapter.infer({"format": "chat_messages_v1", "messages": []})
 
@@ -84,6 +86,35 @@ def test_tampered_checkpoint_never_starts_docker(tmp_path, monkeypatch) -> None:
     with pytest.raises(GymJobError, match="differ"):
         with VllmCandidateServer(reference, revision="a" * 40):
             pass
+
+
+def test_cleanup_accepts_only_confirmed_absence(tmp_path, monkeypatch) -> None:
+    server = VllmCandidateServer(_reference(tmp_path), revision="a" * 40)
+    server._container = "a" * 64
+
+    def docker(command, **kwargs):
+        error = b"No such object: missing" if command[1] == "inspect" else b"container already removed"
+        return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=error)
+
+    monkeypatch.setattr(subprocess, "run", docker)
+    server._cleanup()
+    assert server._container is None
+
+
+def test_cleanup_failure_does_not_mask_original_probe_failure(tmp_path, monkeypatch) -> None:
+    server = VllmCandidateServer(_reference(tmp_path), revision="a" * 40)
+    server._container = "a" * 64
+
+    def docker(command, **kwargs):
+        status = 0 if command[1] == "inspect" else 1
+        return subprocess.CompletedProcess(command, status, stdout=b"[]", stderr=b"removal failed")
+
+    monkeypatch.setattr(subprocess, "run", docker)
+    original = ValueError("original identity probe failed")
+    server.__exit__(ValueError, original, None)
+    assert "original identity probe failed" in str(original)
+    assert any("removal failed" in note for note in original.__notes__)
+    assert server._container == "a" * 64
 
 
 def test_real_vllm_container_serves_verified_candidate() -> None:
