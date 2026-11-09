@@ -3,11 +3,14 @@
 ## Current Sprint
 
 1. Commit and push independently tested work.
-2. Provide the synthetic JSON-extraction schema, generator, scorer, and unseen-template holdout.
-3. Compile public train and validation Gym Job data into a NeMo Gym package; reject holdout compilation.
-4. Bind the NeMo verifier to the digest-checked scorer and run a basic scorer audit.
-5. Serve full base and SFT CandidateRefs with the pinned vLLM container, with file checks and logging disabled.
-6. Compile, train AutoModel SFT and generic weight edit on the same approved data, and compare base, SFT, and weight edit on the synthetic holdout; frontier is an optional fourth arm.
+2. Finish backlog cleanup, reproduce the 13 review findings, and get green full Python/native acceptance.
+3. Provide the synthetic JSON-extraction schema, generator, and scorer. Keep its unseen-template holdout sealed.
+4. Compile public train and validation Gym Job data into a NeMo Gym package; reject holdout compilation.
+5. Bind the NeMo verifier to the digest-checked scorer and run a basic scorer audit.
+6. Commit the vLLM adapter, then serve the base and an AutoModel SFT/LoRA candidate with the pinned vLLM container, with file checks and logging disabled.
+7. Compare base and SFT on public validation only. Do not invoke the current workflow's holdout path during this step.
+8. After the user selects a frontier provider, compare it on validation, freeze the candidates, then perform one-shot holdout scoring. Do not use holdout to tune or retry.
+9. Keep generic weight editing and NeMo RL/GRPO paused until the foundation is complete and explicitly resumed.
 
 The reference fixture, compiler, verifier, audit, vLLM adapter, and workflow are implemented. The verifier has been exercised through the real NeMo Gym HTTP route. The original workflow was exercised with real GPU SFT and real vLLM base/SFT servers, but the frontier was a labeled test stub. The generic weight-edit trainer and new three-way wiring have numerical and mocked integration coverage; a real three-way run is the pending acceptance gate. The old one-step, two-example smoke run is not evidence of model quality.
 
@@ -21,12 +24,12 @@ Run in Linux with Docker GPU access, the cached pinned vLLM image, pinned Qwen c
   --automodel-python /path/to/automodel-python
 ```
 
-The output directory must not already exist. Public packages are under `nemo_train` and `nemo_validation`; the report contains only comparison aggregates, not individual holdout responses. For the generated NeMo verifier, set `NF_NEMO_SCORER_PYTHON` to the trusted scorer interpreter and `NF_NEMO_SCORER_PYTHONPATH` to this repository's Python package root. The current scorer worker supports the synthetic reference job only.
+The output directory must not already exist. Public packages are under `nemo_train` and `nemo_validation`; the report contains only comparison aggregates, not individual holdout responses. For the generated NeMo verifier, set `NF_NEMO_SCORER_PYTHON` to the trusted scorer interpreter and `NF_NEMO_SCORER_PYTHONPATH` to this repository's Python package root. The current scorer worker supports the synthetic reference job only. The workflow can score holdout, so do not run it until the provider is selected and the candidates are frozen; the current approved comparison is validation-only.
 
 Add `--frontier` only after configuring `NF_FRONTIER_URL`, `NF_FRONTIER_MODEL`, and `NF_FRONTIER_API_KEY` directly in the environment. Frontier uses an OpenAI-compatible chat-completions endpoint over HTTPS (literal loopback HTTP is permitted for local testing) and requires the returned model ID to match the selected provider model. Without that flag no frontier request is made and no provider credentials are required.
 
-The synthetic holdout is not independently held in custody. Weight-edit candidate serving verifies file lineage and recorded vLLM identity probes; base and SFT arms without creation-time probes remain identity-unverified. Frontier identity is provider-reported. The workflow does not authorize promotion, and incomplete comparisons have no scorecards. Preservation score and newly broken cases are reported separately. The edit uses a recorded token-loss gradient surrogate, not a claim of optimizing nondifferentiable exact-match reward directly.
+The reference fixture, compiler, verifier, audit, vLLM adapter, and workflow are implemented. The verifier has been exercised through the real NeMo Gym HTTP route. The original workflow was exercised with real GPU SFT and real vLLM base/SFT servers, but the frontier was a labeled test stub. The generic weight-edit trainer and new three-way wiring have numerical and mocked integration coverage; a real three-way run is the pending acceptance gate. The old one-step, two-example smoke run is not evidence of model quality.
 
 ## On Hold
 
-After the proof loop runs: independent one-shot custody and aggregate-only release; vLLM weight-digest and log-probability identity probes; Docker placement, artifact store, and reload images; NeMo RL with reward guard; tool and multi-turn compilation and training. Dashboard foundations can proceed alongside those later items. Full Python and Cargo acceptance gates remain unresolved.
+After the validation-only SFT comparison: select a frontier provider, freeze candidates, and schedule the single holdout evaluation. Weight editing and NeMo RL remain paused until the foundation is complete and explicitly resumed. Independent custody and aggregate-only release; vLLM weight-digest and log-probability identity probes; Docker placement, artifact store, reload images; tool and multi-turn compilation/training; and dashboard foundations remain later work. Full Python and Cargo acceptance gates remain unresolved.
