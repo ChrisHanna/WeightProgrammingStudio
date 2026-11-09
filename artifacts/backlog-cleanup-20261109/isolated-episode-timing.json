@@ -165,10 +165,38 @@
   "full_suite": {
     "status": "failed",
     "returncode": 1,
+    "duration_seconds": 1754.3396695410047,
+    "timed_out": false,
+    "summary": "1997 passed, 122 skipped, 1 failed, 2 xfailed before the third known-failure annotation",
+    "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/receipt.json",
+    "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/stdout.log"
+  },
+  "baseline_1": {
+    "status": "failed",
+    "returncode": 1,
     "duration_seconds": 1681.6890363569983,
     "timed_out": false,
     "summary": "1988 passed, 122 skipped, 11 failed",
     "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-1/receipt.json",
     "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-1/stdout.log"
+  },
+  "full_suite_episode_failure": {
+    "test": "test_episode_constant_role_means_actions_not_environment_results",
+    "error": "sandbox authority expired",
+    "preflight_timing_ns": {
+      "binding_decode_ns": 27454,
+      "request_validation_ns": 268966,
+      "snapshot_restore_ns": 1620887,
+      "coverage_parse_ns": 1456,
+      "docker_qualification_ns": 1284221571,
+      "before_audit_ns": 1286148446,
+      "audit_preflight_ns": 10201939
+    },
+    "before_audit_seconds": 1.286148,
+    "timed_audit_elapsed_ns": 7275878929,
+    "timed_audit_elapsed_seconds": 7.275879,
+    "source_receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/receipt.json",
+    "source_log": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/stdout.log",
+    "known_xfail": "tests/test_gym_reference_episode.py::test_episode_constant_role_means_actions_not_environment_results"
   }
 }
