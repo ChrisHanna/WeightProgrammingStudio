@@ -27,7 +27,7 @@ These are test targets, not a supported-model allowlist. Config and checkpoint r
 
 ## Implementation Status
 
-The loader records shared-storage groups (including views) and compares runtime state names with actual safetensors keys, allowing only recorded tied aliases. The edit-permission guard rejects shared storage unless explicitly permitted; application of edits is not implemented yet.
+The loader records shared-storage groups (including views) and compares runtime state names with actual safetensors keys, allowing only recorded tied aliases. Application rejects shared storage unless explicitly permitted, applies it once, and records every changed alias. Proposed matrices are verified through the native transaction path before copying replacements into the real model; application rolls back on failure.
 
 Discovery uses configured head and key/value dimensions, projection-group structure, and real-model output ablation to distinguish attention and MLP writers. It verifies that a writer produces the enclosing branch's output and that zeroing the writer zeroes that output. This is a branch-output check, not a general residual-dataflow proof. Unresolved writers remain unknown. GQA fused-QKV widths use query plus twice key/value width, not three times hidden size. Profiles check roles and names without assigning them. Every block parameter must be accounted for as a projection, norm, or bias. Unexplained parameters, including packed 3D experts, are refused; recognized routers are explicitly labelled rather than exposed as residual reads.
 
@@ -35,9 +35,11 @@ Capture uses the shared prompt renderer: chat models receive their tokenizer's c
 
 Activation capture runs the real model under scoped hooks and deterministic algorithms, with TF32 disabled. CUDA requires `CUBLAS_WORKSPACE_CONFIG=:4096:8` (or `:16:8`) before initialization. Process flags and hooks are restored on failure. Capture assumes exclusive use of an evaluation-mode model. Retained samples have a byte budget; streaming covariance accumulates in float32 or float64 without keeping every sample. Covariance itself has a byte budget because its storage grows with feature dimension.
 
-Working weights are read from verified original checkpoint tensors into owned float32/float64 matrices, rather than taken from a lower-precision inference copy. Conv1D orientation is normalized. Applying and casting edits back remains unimplemented; no edit method has been migrated before old-engine equivalence tests.
+Working weights are read from verified original checkpoint tensors into owned float32/float64 matrices, rather than taken from a lower-precision inference copy. Conv1D orientation is normalized. The tensor-only method interface returns dense or low-rank deltas, and the legacy Gram solve is shared with the existing engine. Equivalence tests preserve the original float64 fixtures, compare float32 captured activations within 1e-5, and require identical greedy predictions after edits. This does not certify all float32 execution paths.
 
-The initial tests use tiny local instances of seven standard architectures and the already-cached Qwen3 checkpoint. Tensor-only edit methods, application/export, old-engine equivalence checks, the complete compatibility probe, lifecycle registration, and the evidence-generated catalog are subsequent work. Distributed loading is not yet implemented.
+Export uses ordinary safe-serialized Transformers weights and tokenizer assets, verifies a fresh reload, checks unchanged configuration and prompt rendering, and produces a weight-edit CandidateRef with tensor/state/edit/site/renderer receipts. Only listed tensors or explicitly permitted tied aliases may differ. Compatibility probes and served log-probability identity qualification are not implemented yet.
+
+The tests use tiny local instances of seven standard architectures, the original mini GPT-NeoX and Qwen2 engines, and the already-cached Qwen3 checkpoint. Complete compatibility qualification, lifecycle registration, the proof-loop weight-edit arm, and the evidence-generated catalog remain subsequent work. Distributed loading is not yet implemented. Stock NeMo Gym rollout rendering is separately confirmed not to use the shared token-ID path; no positive NeMo rendering claim is made.
 
 ## Advanced Methods
 
