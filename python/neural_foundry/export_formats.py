@@ -998,12 +998,26 @@ def reload_and_verify_huggingface_safetensors(
 ) -> tuple[Any, ExportReloadRoundTripReceipt]:
     """Reload a HuggingFace Safetensors checkpoint into a fresh model instance and verify behavioral & logit parity."""
     import torch
+    from .provenance import parse_strict_json
 
     ckpt_dir = Path(checkpoint_dir).resolve()
+    if not prompts:
+        raise ValueError("Reload verification requires non-empty behavioral probes")
+    if not (ckpt_dir / "config.json").is_file() or not (ckpt_dir / "tokenizer.json").is_file():
+        raise ValueError("Reload verification requires exported config and tokenizer assets")
+    export_config = parse_strict_json((ckpt_dir / "config.json").read_bytes())
+    parse_strict_json((ckpt_dir / "tokenizer.json").read_bytes())
+    loader = getattr(type(reference_model), "from_pretrained_dir", None)
+    if loader is None:
+        raise ValueError("No fresh target-runtime loader is available for this model")
     st_path = ckpt_dir / "model.safetensors"
     blob_path = st_path
     blob = _map_file(st_path)
     header, hdr_end = _parse_safetensors_header(blob)
+    dtype_names = {"F64": "float64", "F32": "float32", "F16": "float16", "BF16": "bfloat16"}
+    stored_dtypes = {dtype_names[str(meta["dtype"]).upper()] for meta in header.values()}
+    if stored_dtypes != {export_config.get("torch_dtype")}:
+        raise ValueError("Export config precision does not match the stored tensor dtype")
 
     loaded_tensors: dict[str, Any] = {}
     digest_items: list[dict[str, Any]] = []
@@ -1028,7 +1042,15 @@ def reload_and_verify_huggingface_safetensors(
 
     _require_finite(loaded_tensors)
     _require_matches_reference(loaded_tensors, reference_model)
-    reloaded = _apply_state_tensors_to_clone(reference_model, loaded_tensors)
+    reloaded = loader(ckpt_dir, model_name=str(getattr(reference_model, "model_name", "exported-model")))
+    ignored_config = {"torch_dtype", "dtype"}
+    if {key: value for key, value in reloaded.config.items() if key not in ignored_config} != {
+        key: value for key, value in reference_model.config.items() if key not in ignored_config
+    }:
+        raise ValueError("Exported config differs from the reference inference configuration")
+    for field in ("vocab", "bpe_ranks", "byte_level", "added_tokens"):
+        if getattr(reloaded.tokenizer, field) != getattr(reference_model.tokenizer, field):
+            raise ValueError("Exported tokenizer differs from the reference tokenizer")
     matches = 0
     max_diff = 0.0
     for p in prompts:

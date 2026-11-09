@@ -1316,11 +1316,27 @@ def _toy_st_parts(model: Toy) -> tuple[dict[str, Any], bytes]:
     return header, bytes(payload)
 
 
+@pytest.fixture
+def tensor_reload_preconditions(model: Toy, tmp_path: Path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps({**model.config, "torch_dtype": "float64"}))
+    (tmp_path / "tokenizer.json").write_text("{}")
+
+    def forbid_runtime_reload(*args, **kwargs):
+        raise AssertionError("corrupt tensor checkpoint reached the target-runtime loader")
+
+    monkeypatch.setattr(Toy, "from_pretrained_dir", staticmethod(forbid_runtime_reload), raising=False)
+    return ["tensor rejection probe"]
+
+
 def test_control_safetensors_round_trip_is_exact(model: Toy, tmp_path: Path) -> None:
-    export_formats.export_huggingface_safetensors(model, tmp_path, dtype="f64")
-    reloaded, receipt = export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
-    assert receipt.exported_tensor_count == 3
-    assert all(torch.equal(reloaded.tensors[k], v) for k, v in model.tensors.items())
+    from safetensors.torch import load_file
+
+    path = export_formats.export_huggingface_safetensors(model, tmp_path, dtype="f64")
+    reloaded = load_file(path)
+    assert len(reloaded) == 3
+    assert all(torch.equal(reloaded[k], value) for k, value in model.tensors.items())
+    with pytest.raises(ValueError, match="non-empty behavioral probes"):
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
 
 
 def _offsets(header: dict[str, Any], name: str, offsets: list[int]) -> dict[str, Any]:
@@ -1367,7 +1383,8 @@ CASE_NAMES = list(_st_cases(_toy_st_parts(Toy())[0], _toy_st_parts(Toy())[1]))
 
 
 @pytest.mark.parametrize("name", CASE_NAMES)
-def test_corrupt_safetensors_is_refused_on_reload(model: Toy, tmp_path: Path, name: str) -> None:
+def test_corrupt_safetensors_is_refused_on_reload(model: Toy, tmp_path: Path, name: str,
+                                                tensor_reload_preconditions) -> None:
     head, payload = _toy_st_parts(model)
     case_header, case_payload = _st_cases(head, payload)[name]
     path = tmp_path / "model.safetensors"
@@ -1376,7 +1393,7 @@ def test_corrupt_safetensors_is_refused_on_reload(model: Toy, tmp_path: Path, na
     else:
         _st_file(path, case_header, case_payload)
     with pytest.raises(ValueError):
-        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, tensor_reload_preconditions)
 
 
 @pytest.mark.parametrize("name", CASE_NAMES)
@@ -1397,15 +1414,16 @@ def test_corrupt_safetensors_is_refused_by_the_mmap_loader(model: Toy, tmp_path:
     [b"", b"\x01", struct.pack("<Q", 2**64 - 1), struct.pack("<Q", 2**63) + b"{}", struct.pack("<Q", 1024) + b"{}"],
     ids=["empty", "short_length", "max_length", "i64_length", "length_past_eof"],
 )
-def test_truncated_safetensors_prefix_is_refused(model: Toy, tmp_path: Path, raw: bytes) -> None:
+def test_truncated_safetensors_prefix_is_refused(model: Toy, tmp_path: Path, raw: bytes,
+                                                tensor_reload_preconditions) -> None:
     (tmp_path / "model.safetensors").write_bytes(raw)
     with pytest.raises(ValueError):
-        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, tensor_reload_preconditions)
     with pytest.raises(ValueError):
         export_formats.ShardedMmapCheckpoint(tmp_path).close()
 
 
-def test_reload_must_match_the_reference_tensors(model: Toy, tmp_path: Path) -> None:
+def test_reload_must_match_the_reference_tensors(model: Toy, tmp_path: Path, tensor_reload_preconditions) -> None:
     head, payload = _toy_st_parts(model)
     path = tmp_path / "model.safetensors"
     # Missing tensor.
@@ -1414,25 +1432,26 @@ def test_reload_must_match_the_reference_tensors(model: Toy, tmp_path: Path) -> 
     end = max(v["data_offsets"][1] for v in without.values())
     _st_file(path, without, payload[:end])
     with pytest.raises(ValueError, match="missing|differ"):
-        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, tensor_reload_preconditions)
     # Planted tensor.
     extra = {**head, "backdoor": {"dtype": "F64", "shape": [1], "data_offsets": [len(payload), len(payload) + 8]}}
     _st_file(path, extra, payload + b"\0" * 8)
     with pytest.raises(ValueError, match="unexpected|differ"):
-        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, tensor_reload_preconditions)
     # Same bytes, transposed shape.
     transposed = _meta(head, SITE, shape=[3, 4])
     _st_file(path, transposed, payload)
     with pytest.raises(ValueError, match="shape"):
-        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, tensor_reload_preconditions)
 
 
 @pytest.mark.parametrize("value", [NAN, INF, -INF], ids=["nan", "inf", "neg_inf"])
-def test_non_finite_checkpoint_is_refused_on_reload(model: Toy, tmp_path: Path, value: float) -> None:
+def test_non_finite_checkpoint_is_refused_on_reload(model: Toy, tmp_path: Path, value: float,
+                                                   tensor_reload_preconditions) -> None:
     head, payload = _toy_st_parts(model)
     _st_file(tmp_path / "model.safetensors", head, struct.pack("<d", value) + payload[8:])
     with pytest.raises(ValueError, match="non-finite"):
-        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, [])
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, tensor_reload_preconditions)
 
 
 @pytest.mark.parametrize("shard", ["../evil.safetensors", "/etc/passwd", "sub/x.safetensors", "missing.safetensors"])
