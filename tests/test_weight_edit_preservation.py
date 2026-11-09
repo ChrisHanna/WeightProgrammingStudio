@@ -134,6 +134,11 @@ def test_public_scoring_rejects_holdout_and_counts_wrong_valid_json_separately()
     assert score["format_valid"] == 1.0 and score["exact_match"] == 0.0
     with pytest.raises(ValueError, match="public-validation"):
         score_public_rows(task, model, generate_scenarios(split="holdout", seed=17, parameters={"rows_per_template": 1}))
+    train = generate_scenarios(split="train", seed=17, parameters={"rows_per_template": 1})
+    with pytest.raises(ValueError, match="public-validation"):
+        score_public_rows(task, model, train)
+    score = score_public_rows(task, model, train, split="train")
+    assert score["split"] == "train" and score["cases"] == 2
 
 
 def test_validation_generation_uses_shared_fenced_json_parser(numerical_fixture, monkeypatch):
@@ -148,3 +153,33 @@ def test_validation_generation_uses_shared_fenced_json_parser(numerical_fixture,
     result = validation_model(loaded).infer(task.project(row["input"], None))
     assert result.response == {"customer": "Aster", "product": "folders", "quantity": 1}
     assert result.interaction["raw_text"] == text
+
+
+def test_batched_validation_generation_matches_serial_tokens_and_responses(numerical_fixture):
+    from neural_foundry.backends.weight_edit.drift_diagnostic import validation_model
+    from neural_foundry.reference_json_extraction import generate_scenarios
+
+    loaded, task, examples, recipe = numerical_fixture
+    rows = generate_scenarios(split="validation", seed=17, parameters={"rows_per_template": 1})
+    interactions = [task.project(row["input"], None) for row in rows]
+    serial = validation_model(loaded, batch_size=1).infer_many(interactions)
+    batched = validation_model(loaded, batch_size=2).infer_many(interactions)
+    assert [result.response for result in serial] == [result.response for result in batched]
+    assert [result.interaction["generated_token_ids"] for result in serial] == [result.interaction["generated_token_ids"] for result in batched]
+
+
+def test_specialist_v2_proposal_uses_paired_case_bootstrap_without_activation():
+    from neural_foundry.specialist_policy import assess_specialist_v2, paired_bootstrap_improvement
+
+    base = [1] * 45 + [0] * 19
+    candidate = [1] * 50 + [0] * 14
+    candidate[45:50] = [1] * 5
+    interval = paired_bootstrap_improvement(base, candidate, seed=7, replicates=2_000)
+    assert interval["net_case_improvement"] == 5
+    assert interval["selection_adjusted"] is False
+    evidence = {"split": "validation", "base_case_outcomes": base, "candidate_case_outcomes": candidate}
+    required = {"split": "validation", "format_valid": 1.0, "exact_match": 1.0}
+    result = assess_specialist_v2(evidence, required, minimum_net_cases=4)
+    assert result["policy_status"] == "proposal_pending_approval"
+    assert result["passed"] is (result["checks"]["confidence_interval_lower_bound"] is True)
+    assert not result["holdout_accessed"] and not result["generalist_authorized"] and not result["release_authorized"]

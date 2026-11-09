@@ -42,14 +42,22 @@ def preservation_logits(loaded, interactions):
     return values
 
 
-def calculate_edit(loaded, job, examples, recipe):
+def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = None, discovered_sites: SiteMap | None = None):
     recipe = validate_recipe(recipe)
-    sites = find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
-                       checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    sites = discovered_sites or find_sites(loaded.model, find_blocks(loaded.model), loaded.hidden_size,
+                                          checkpoint_tensor_names=loaded.checkpoint_tensor_names)
+    if not sites.checkpoint_names_verified:
+        raise GymJobError("edit calculation requires a checkpoint-verified site map")
     writers = [site for site in sites.sites if site.role == "residual_write_mlp"]
     if not writers:
         raise GymJobError("qualified model has no MLP write site")
-    site = writers[len(writers) // 2]
+    if site_layer is None:
+        site = writers[len(writers) // 2]
+    else:
+        matches = [candidate for candidate in writers if candidate.layer == site_layer]
+        if len(matches) != 1:
+            raise GymJobError("requested edit layer is not a unique discovered MLP write site")
+        site = matches[0]
     selected = SiteMap((site,), checkpoint_names_verified=True)
     renderer = PromptRenderer(loaded.tokenizer)
     panel = recipe["preservation_interactions"]

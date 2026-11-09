@@ -152,6 +152,33 @@ def test_retained_failed_public_recipes_do_not_claim_holdout_scores():
     assert report["trials"][0]["measured_drift"] is None
     assert report["trials"][1]["measured_drift"] == 0.5625 and report["trials"][2]["measured_drift"] == 0.4375
 
+
+def test_public_scorer_uses_batched_model_interface_when_available():
+    from neural_foundry.json_proof_loop import score_public_rows
+    from neural_foundry.reference_json_extraction import generate_scenarios
+
+    task = reference_task(rows_per_template=1)
+
+    class Batched:
+        called = False
+
+        def infer_many(self, interactions):
+            self.called = True
+            assert len(interactions) == 4
+            return [{"customer": "wrong", "product": "wrong", "quantity": 1} for _ in interactions]
+
+        def infer(self, interaction):
+            raise AssertionError("serial inference should not run when infer_many is provided")
+
+        def loaded_identity(self):
+            return {"fixture": True}
+
+    model = Batched()
+    rows = generate_scenarios(split="validation", seed=17, parameters={"rows_per_template": 2})
+    score = score_public_rows(task, model, rows)
+    assert model.called and score["cases"] == 4 and score["format_valid"] == 1.0
+    assert score["exact_match"] == 0.0
+
 def test_real_gpu_workflow_with_explicit_frontier_stub(tmp_path) -> None:
     gpu_python = os.environ.get("NF_GPU_PYTHON")
     automodel_python = os.environ.get("NF_AUTOMODEL_PYTHON")

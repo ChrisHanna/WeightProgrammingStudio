@@ -29,12 +29,18 @@ def public_required_rows(*, seed: int) -> list[dict[str, Any]]:
             for row in rows for index, instruction in enumerate(REQUIRED_INSTRUCTIONS)]
 
 
-def score_public_rows(task: TaskAdapter, model: Any, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    if not rows or any(not row["scenario_id"].startswith("validation:") for row in rows):
+def score_public_rows(task: TaskAdapter, model: Any, rows: Sequence[Mapping[str, Any]], *, split: str = "validation") -> dict[str, Any]:
+    if split not in {"train", "validation"} or not rows or any(not row["scenario_id"].startswith(split + ":") for row in rows):
         raise GymJobError("specialist scoring requires a nonempty public-validation panel")
+    interactions = [task.project(row["input"], None) for row in rows]
+    if callable(getattr(model, "infer_many", None)):
+        outputs = model.infer_many(interactions)
+        if not isinstance(outputs, Sequence) or len(outputs) != len(rows):
+            raise GymJobError("batched model returned an incomplete response roster")
+    else:
+        outputs = [model.infer(interaction) for interaction in interactions]
     records = []
-    for row in rows:
-        result = model.infer(task.project(row["input"], None))
+    for row, result in zip(rows, outputs, strict=True):
         response = result.response if isinstance(result, ExecutionResponse) else result
         try:
             validate_task_instance(task.job.task_output_schema, response, field="response")
@@ -44,7 +50,7 @@ def score_public_rows(task: TaskAdapter, model: Any, rows: Sequence[Mapping[str,
         records.append({"scenario_id": row["scenario_id"], "response": response, "format_valid": valid,
                         "execution_evidence": dict(result.interaction) if isinstance(result, ExecutionResponse) else None,
                         "exact_match": score_response(reference=row["reference"], response=response)["exact_match"]})
-    return {"split": "validation", "cases": len(rows), "exact_match": sum(row["exact_match"] for row in records) / len(rows),
+    return {"split": split, "cases": len(rows), "exact_match": sum(row["exact_match"] for row in records) / len(rows),
             "format_valid": sum(row["format_valid"] for row in records) / len(rows), "responses": records,
             "panel_digest": _document_digest({"rows": rows}), "model_identity": model.loaded_identity()}
 
