@@ -408,6 +408,14 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
         raise WeightEditInputError("profile found no verified MLP write site")
     profile_site = writers[len(writers) // 2]
     timings["site_discovery_seconds"] = time.perf_counter() - discovery_start
+    preservation_panel = [*request["recipe"]["preservation_interactions"],
+                          *request["recipe"].get("protected_training_interactions", ())]
+    calibration_start = time.perf_counter()
+    calibration = calibrate_one_ulp(loaded, profile_site, preservation_panel)
+    preservation_before = preservation_logits(loaded, preservation_panel)
+    float32_before = float32_logits_of_exact_weights(loaded, preservation_panel)
+    _sync_if_cuda(loaded.model)
+    timings["preservation_calibration_and_baseline_seconds"] = time.perf_counter() - calibration_start
     capture_compute_start = time.perf_counter()
     _, site, delta, calculation = calculate_edit(loaded, job, examples, request["recipe"],
         site_layer=profile_site.layer, discovered_sites=sites)
@@ -434,6 +442,14 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
         validation_score = score_public_rows(task, validation_model(loaded, batch_size=16, max_new_tokens=40), validation_rows)
         _sync_if_cuda(loaded.model)
         timings["batched_exact_generation_seconds"] = time.perf_counter() - exact_start
+
+        preservation_start = time.perf_counter()
+        preservation_after = preservation_logits(loaded, preservation_panel)
+        float32_after = float32_logits_of_exact_weights(loaded, preservation_panel)
+        preservation_v2 = verify_v2(metrics(float32_before, float32_after),
+            metrics(preservation_before, preservation_after), calibration)
+        _sync_if_cuda(loaded.model)
+        timings["preservation_measurement_seconds"] = time.perf_counter() - preservation_start
 
         with tempfile.TemporaryDirectory(prefix="nf-one-candidate-profile-") as temporary:
             artifact_path = Path(temporary) / "candidate"
@@ -464,6 +480,10 @@ def run_single_candidate_profile(state_dir: Path, request_path: Path, output_pat
             "validation_mean_token_logprob": validation_logprob["mean_token_logprob"],
             "train_mean_token_logprob_gain": train_logprob["mean_token_logprob"] - baseline_train_logprob["mean_token_logprob"],
             "validation_mean_token_logprob_gain": validation_logprob["mean_token_logprob"] - baseline_validation_logprob["mean_token_logprob"],
+            "preservation_v2_report_only": preservation_v2,
+            "preservation_cases": len(preservation_panel),
+            "preservation_panel_digest": _document_digest({"source": "public_train", "interactions": preservation_panel}),
+            "preservation_calibration": calibration,
             "calculation_evidence": calculation, "timings_seconds": timings,
             "evaluation_batch_size": 16, "generation_max_new_tokens": 40,
             "serving_container_profiled": False, "candidate_published": False,
