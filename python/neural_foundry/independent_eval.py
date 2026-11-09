@@ -477,7 +477,7 @@ def evaluate_candidate(model: Any, candidate: FrozenCandidate, *, config: EvalCo
         },
         "target": {
             "source": "declared by the frozen candidate, which may have seen these prompts",
-            "cases": [c.prompt for c in candidate.target_cases],
+            "case_count": len(candidate.target_cases),
             "metrics": _task_metrics(target, boot),
         },
         "candidate": _summary(raw["candidate"], boot),

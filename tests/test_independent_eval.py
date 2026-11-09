@@ -130,7 +130,8 @@ def test_report_has_every_required_measurement(stub: _StubModel, config: ie.Eval
     low, high = text["candidate_perplexity"]["ci95"]
     assert low <= text["candidate_perplexity"]["value"] <= high
     assert report["controls"]["noop"]["passed"] is True
-    assert TARGETS[0][0] in report["target"]["cases"]
+    assert report["target"]["case_count"] == len(TARGETS)
+    assert "cases" not in report["target"]
 
 
 def test_kl_matches_a_hand_computed_example() -> None:
@@ -294,6 +295,66 @@ def test_run_record_refuses_extra_fields_and_missing_files(tmp_path: Path) -> No
 def test_capture_commit_fails_outside_a_repository(tmp_path: Path) -> None:
     with pytest.raises(rr.RunRecordError, match="git"):
         rr.capture_commit(tmp_path)
+
+
+def test_frontier_roster_excludes_failed_and_skipped_searches() -> None:
+    from neural_foundry.frontier_evaluation import _qualification_roster
+
+    records = {
+        "passing": {"arm": "direct", "method": "wsp", "search_state": "accepted"},
+        "failed": {"arm": "direct", "method": "wsp", "search_state": "failed"},
+        "skipped": {"arm": "baseline", "method": "lora", "search_state": "skipped"},
+        "base": {"arm": "baseline", "method": "no_op", "search_state": "accepted"},
+    }
+    assert _qualification_roster(records) == ("passing",)
+
+
+def test_frontier_sealed_exposure_retry_limit_is_enforced(tmp_path: Path) -> None:
+    from neural_foundry import frontier_evaluation as evaluation
+    from neural_foundry.records import canonicalize, content_digest
+
+    document = {"snapshot_digest": "sha256:" + "d" * 64}
+    request = str(content_digest(canonicalize({"request": "same"})))
+    with evaluation._evaluation_lease(document, tmp_path):
+        paths, cached = evaluation._begin_evaluation_claim(document, tmp_path, request)
+    assert cached is None
+    for _ in range(evaluation.MAX_EXPOSURE_RETRIES):
+        with evaluation._evaluation_lease(document, tmp_path):
+            same_paths, cached = evaluation._begin_evaluation_claim(document, tmp_path, request)
+        assert same_paths == paths and cached is None
+    with (
+        pytest.raises(evaluation.FrontierEvaluationError, match="retry limit is exhausted"),
+        evaluation._evaluation_lease(document, tmp_path),
+    ):
+        evaluation._begin_evaluation_claim(document, tmp_path, request)
+
+
+def test_frontier_isolated_payload_prefers_verified_checkpoint_identity(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    import torch
+
+    from neural_foundry.edit_plan import tensor_state_digest
+    from neural_foundry.frontier_evaluation import _isolated_model_payload
+    from neural_foundry.provenance import resolve_checkpoint
+
+    for name in ("config.json", "tokenizer.json", "model.safetensors"):
+        (tmp_path / name).write_bytes(b"{}")
+    checkpoint = resolve_checkpoint(tmp_path, revision="a" * 40)
+    tokenizer = SimpleNamespace(vocab={"x": 1}, bpe_ranks={}, added_tokens={}, byte_level=False)
+    model = SimpleNamespace(
+        model_name="pinned-mini",
+        config={"model_type": "gpt_neox"},
+        tensors={"weight": torch.ones((2, 2), dtype=torch.float64)},
+        tokenizer=tokenizer,
+        checkpoint_identity=checkpoint,
+    )
+    model._checkpoint_state_digest = tensor_state_digest(model.tensors)
+
+    payload = _isolated_model_payload(model)
+
+    assert "checkpoint_identity" in payload and "tensors" not in payload
+    assert payload["checkpoint_identity"]["file_digests"] == checkpoint.file_digests
 
 
 # ---- Real checkpoint. Skipped in normal CI, and a failure during a qualification run.
