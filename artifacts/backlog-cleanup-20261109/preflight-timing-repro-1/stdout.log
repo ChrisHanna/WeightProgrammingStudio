@@ -1,0 +1,14 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_episode_native_binding_same_gym_all_controls[terminated] _________
+tests/test_gym_reference_episode.py:87: in test_episode_native_binding_same_gym_all_controls
+    report = audit(gym, plan, sandbox, policies)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_gym_reference_episode.py:57: in audit
+    handle = run_reference_audit(gym, json.dumps(plan), policies,
+python/neural_foundry/gym_scientist.py:362: in run_reference_audit
+    return _native.run_gym_reference_audit(
+E   neural_foundry._native.NativeError: sandbox authority expired; preflight_timing_ns={"binding_decode_ns":304016,"request_validation_ns":2370692,"snapshot_restore_ns":2577368,"coverage_parse_ns":493498,"docker_qualification_ns":1146295948,"before_audit_ns":1152053850,"audit_preflight_ns":19608407}; timed_audit_elapsed_ns=7398498279
+=========================== short test summary info ============================
+FAILED tests/test_gym_reference_episode.py::test_episode_native_binding_same_gym_all_controls[terminated]
+1 failed in 9.02s

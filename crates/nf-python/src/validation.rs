@@ -213,6 +213,7 @@ fn run_gym_reference_audit(
     coverage_json: Option<&Bound<'_, PyAny>>,
     cancellation: Option<PyRef<'_, GymAuditCancellationHandle>>,
 ) -> PyResult<GymReferenceAuditHandle> {
+    let preflight_started = std::time::Instant::now();
     if !enabled {
         return Err(python_error(
             py,
@@ -265,9 +266,15 @@ fn run_gym_reference_audit(
         .iter()
         .map(|value| value.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
+    let binding_decode_ns = preflight_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     let store = snapshot.store.clone();
     let id = snapshot.snapshot.id().clone();
     let value = worker(py, CancellationToken::default(), move || {
+        let mut timings = reference::PreflightTimings {
+            binding_decode_ns,
+            ..reference::PreflightTimings::default()
+        };
+        let phase_started = std::time::Instant::now();
         let parse_enum = |value: &str| serde_json::Value::String(value.to_owned());
         let exposure: reference::Exposure = serde_json::from_value(parse_enum(&exposure))
             .map_err(|_| audit_error(ErrorCode::InvalidValue, "unknown exposed audit domain"))?;
@@ -292,8 +299,10 @@ fn run_gym_reference_audit(
         // Reject absent/insufficient cumulative storage allowance BEFORE
         // qualification, recovery, CAS publication or any sandbox staging.
         budget.validate_storage()?;
+        timings.request_validation_ns = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         // Every snapshot and asset must exist and verify in the gym's CAS. Never
         // open a policy's host source or silently copy from a different store.
+        let phase_started = std::time::Instant::now();
         let snapshot = intake::restore(&store, &id)?;
         let policies = policies
             .iter()
@@ -304,6 +313,8 @@ fn run_gym_reference_audit(
             .zip(roles)
             .map(|(snapshot, role)| reference::Policy { snapshot, role })
             .collect::<Vec<_>>();
+        timings.snapshot_restore_ns = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let phase_started = std::time::Instant::now();
         let coverage = match coverage {
             Some(bytes) => {
                 let doc = CanonicalDocument::parse(
@@ -320,10 +331,33 @@ fn run_gym_reference_audit(
             }
             None => reference::Coverage::default(),
         };
+        timings.coverage_parse_ns = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let phase_started = std::time::Instant::now();
         let sandbox = QualifiedDocker::qualify(true, Path::new(&sandbox_root))?;
-        reference::run_cancellable(
-            &snapshot, &store, plan, &policies, exposure, budget, &sandbox, coverage, &cancel,
+        timings.docker_qualification_ns = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        timings.before_audit_ns = preflight_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let timed_started = std::time::Instant::now();
+        reference::run_cancellable_with_preflight(
+            &snapshot,
+            &store,
+            plan,
+            &policies,
+            exposure,
+            budget,
+            &sandbox,
+            coverage,
+            &cancel,
+            &mut timings,
         )
+        .map_err(|mut failure| {
+            let timing = serde_json::to_string(&timings).unwrap_or_default();
+            let timed_ns = timed_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            failure.message = format!(
+                "{}; preflight_timing_ns={}; timed_audit_elapsed_ns={}",
+                failure.message, timing, timed_ns
+            );
+            failure
+        })
     })?;
     Ok(GymReferenceAuditHandle {
         value: Arc::new(value),

@@ -90,6 +90,16 @@ pub struct PolicyReport {
     pub correct: usize,
     pub passing: usize,
 }
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct PreflightTimings {
+    pub binding_decode_ns: u64,
+    pub request_validation_ns: u64,
+    pub snapshot_restore_ns: u64,
+    pub coverage_parse_ns: u64,
+    pub docker_qualification_ns: u64,
+    pub before_audit_ns: u64,
+    pub audit_preflight_ns: u64,
+}
 #[derive(Debug, Serialize)]
 pub struct AuditReport {
     pub schema_version: u32,
@@ -117,6 +127,7 @@ pub struct AuditReport {
     pub reserved_asset_bytes: u64,
     pub storage: storage::Accounting,
     pub controller_wall_ms: u64,
+    pub preflight_timings: PreflightTimings,
     pub memory_peak_bytes: u64,
     /// Present only for the durable, qualified dedicated controller path.
     pub controller_hard_address_space_bytes: Option<u64>,
@@ -370,8 +381,47 @@ pub fn run_cancellable(
     coverage: Coverage,
     cancel: &AtomicBool,
 ) -> Result<Audit> {
+    let mut preflight_timings = PreflightTimings::default();
+    run_cancellable_with_preflight(
+        snapshot,
+        store,
+        plan,
+        policies,
+        exposure,
+        budget,
+        runtime,
+        coverage,
+        cancel,
+        &mut preflight_timings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_cancellable_with_preflight(
+    snapshot: &Snapshot,
+    store: &ArtifactStore,
+    plan: Plan,
+    policies: &[Policy<'_>],
+    exposure: Exposure,
+    budget: Budget,
+    runtime: &QualifiedDocker,
+    coverage: Coverage,
+    cancel: &AtomicBool,
+    preflight_timings: &mut PreflightTimings,
+) -> Result<Audit> {
     run_inner(
-        snapshot, store, plan, policies, exposure, budget, runtime, coverage, cancel, None, None,
+        snapshot,
+        store,
+        plan,
+        policies,
+        exposure,
+        budget,
+        runtime,
+        coverage,
+        cancel,
+        None,
+        None,
+        preflight_timings,
     )
 }
 
@@ -391,6 +441,7 @@ pub(crate) fn run_authorized(
     cancel: &AtomicBool,
     authorize: &dyn Fn() -> Result<()>,
 ) -> Result<Audit> {
+    let mut preflight_timings = PreflightTimings::default();
     run_inner(
         snapshot,
         store,
@@ -403,6 +454,7 @@ pub(crate) fn run_authorized(
         cancel,
         Some(authorize),
         None,
+        &mut preflight_timings,
     )
 }
 
@@ -421,6 +473,7 @@ pub(crate) fn run_authorized_until(
     authorize: &dyn Fn() -> Result<()>,
     deadline: std::time::Instant,
 ) -> Result<Audit> {
+    let mut preflight_timings = PreflightTimings::default();
     run_inner(
         snapshot,
         store,
@@ -433,6 +486,7 @@ pub(crate) fn run_authorized_until(
         cancel,
         Some(authorize),
         Some(deadline),
+        &mut preflight_timings,
     )
 }
 
@@ -449,6 +503,7 @@ fn run_inner(
     cancel: &AtomicBool,
     authorize: Option<&dyn Fn() -> Result<()>>,
     deadline: Option<std::time::Instant>,
+    preflight_timings: &mut PreflightTimings,
 ) -> Result<Audit> {
     let started = std::time::Instant::now();
     let durable = authorize.is_some();
@@ -589,6 +644,7 @@ fn run_inner(
         scope: "finite_exposed_reference_audit_not_validation_approval_or_scientific_acceptance".into(),
         audit_complete: false, missing_prerequisites, coverage, reserved_asset_bytes, storage,
         controller_wall_ms: 0, memory_peak_bytes: 0,
+        preflight_timings: preflight_timings.clone(),
         controller_hard_address_space_bytes: if durable {
             rustix::process::getrlimit(rustix::process::Resource::As).maximum
         } else { None },
@@ -608,6 +664,8 @@ fn run_inner(
                 .flat_map(move |seed| (0..2).map(move |_| json!({"input":case.input,"seed":seed})))
         })
         .collect();
+    preflight_timings.audit_preflight_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    report.preflight_timings = preflight_timings.clone();
     for (policy, (entry, input, policy_assets)) in policies.iter().zip(supplied) {
         let outputs = if matches!(
             snapshot.manifest().draft.interface,
