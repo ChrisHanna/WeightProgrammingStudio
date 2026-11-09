@@ -1,0 +1,81 @@
+{
+  "kind": "nf_weight_edit_preservation_v2_evidence",
+  "evidence_status": "measured",
+  "source_commit": "517ab85",
+  "model_id": "Qwen/Qwen3-0.6B",
+  "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+  "target_step": 0.001,
+  "training_request_digest": "sha256:6b51a9cb00d53051778b39e1b71fbe7ded101bd26cbd24169366598aafbda207",
+  "dataset_digest": "sha256:6ad29f0cf58677d433a9936734cfbe4734c6cbc587d689f640527810b87024df",
+  "run_binding": "76da34c3a08e73bc4a8ac72a223dc33ade41a803e7355b3570684cf26bd6d999",
+  "training_examples": 64,
+  "sft_arm": "reused previously published candidate from the same frozen dataset",
+  "candidate_published": false,
+  "holdout_evaluated": false,
+  "three_way_complete": false,
+  "release_authorized": false,
+  "failed_gate": "bf16 top-5 set agreement: 56 of 59 is below the predeclared 95% minimum",
+  "calibration": {
+    "kind": "nf_bf16_one_ulp_sensitivity_v2",
+    "policy_digest": "sha256:bc2dc6e14f9da2de98bba681c585fa27cd7022a0ea0684b2f24a63394bf2cde8",
+    "base_digest": "sha256:fba0b82e1a3bec86d7ecfb867a2eb15ce3a6315b5384ba6091c2c2978fd75f11",
+    "panel_digest": "sha256:d725aeeeae72212589fe071abd19494684f7105509b8b8bb66d48bdf174a4def",
+    "renderer_digest": "sha256:81ab222a10d1d80963f013288ef17515b5b35688b6a4c31c92adb3fee195d070",
+    "precision": "bfloat16",
+    "tensor_name": "model.layers.14.mlp.down_proj.weight",
+    "flat_index": 425568,
+    "old_value": 5.820766091346741e-09,
+    "new_value": 5.8498699218034744e-09,
+    "old_bits": 12744,
+    "new_bits": 12745,
+    "adjacent_value_verified": true,
+    "base_restored": true,
+    "measurements": {
+      "cases": 59,
+      "max_absolute_logit_drift": 0.0,
+      "mean_kl_base_to_edited": 0.0,
+      "top1_agreement": 1.0,
+      "top5_set_agreement": 1.0
+    },
+    "changed_scalar_count": 1,
+    "float32_measurements": {
+      "cases": 59,
+      "max_absolute_logit_drift": 0.0,
+      "mean_kl_base_to_edited": 0.0,
+      "top1_agreement": 1.0,
+      "top5_set_agreement": 1.0
+    },
+    "runtime": {"torch": "2.9.1", "transformers": "4.57.3"},
+    "selection_rule": "smallest-magnitude nonzero scalar in the predeclared selected MLP site, before measuring drift",
+    "scope": "smallest representable step at that selected scalar, not a global model sensitivity guarantee",
+    "calibration_digest": "sha256:82c5ed46678e810ac990aa4fa0a24569d573002868a77c84bd78b0f8e15286d5"
+  },
+  "verification": {
+    "kind": "nf_preservation_verification_v2",
+    "passed": false,
+    "policy_digest": "sha256:bc2dc6e14f9da2de98bba681c585fa27cd7022a0ea0684b2f24a63394bf2cde8",
+    "calibration_digest": "sha256:82c5ed46678e810ac990aa4fa0a24569d573002868a77c84bd78b0f8e15286d5",
+    "float32": {
+      "cases": 59,
+      "max_absolute_logit_drift": 0.00481414794921875,
+      "mean_kl_base_to_edited": 3.2765819770170544e-09,
+      "top1_agreement": 1.0,
+      "top5_set_agreement": 1.0
+    },
+    "bf16": {
+      "cases": 59,
+      "max_absolute_logit_drift": 0.5625,
+      "mean_kl_base_to_edited": 2.4077561078841418e-05,
+      "top1_agreement": 1.0,
+      "top5_set_agreement": 0.9491525423728814
+    }
+  },
+  "worker_execution": {
+    "returncode": 1,
+    "timed_out": false,
+    "duration_seconds": 57.1590100100002,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_digest": "sha256:fd46ae9f253a265b9363ad1b356773e5e769d0159d523e3466230515adb02802"
+  },
+  "interpretation": "The one-scalar adjacent bf16 control had zero observed logit effect on this panel. The actual multi-scalar edit passed exact-weight float32 drift, bf16 top-1, and mean KL, but failed frozen top-5 agreement. Neither result proves global behaviour preservation. No thresholds were adjusted after the candidate result; v1 history remains unchanged."
+}

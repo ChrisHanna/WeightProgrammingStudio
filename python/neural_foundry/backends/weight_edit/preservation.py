@@ -89,13 +89,15 @@ def float32_logits_of_exact_weights(loaded, panel):
         raise WeightEditInputError("exact-weight promotion requires bf16 or float32 model tensors")
     if any(parameter.is_floating_point() and parameter.dtype != dtype for parameter in loaded.model.parameters()):
         raise WeightEditInputError("exact-weight promotion does not support mixed parameter precision")
+    parameters = [(parameter, parameter.data) for parameter in loaded.model.parameters()]
     buffers = [(module, name, value) for module in loaded.model.modules() for name, value in module._buffers.items()]
     before = model_state_digest(loaded.model)
     try:
         loaded.model.to(torch.float32)
         return preservation_logits(loaded, panel)
     finally:
-        loaded.model.to(dtype)
+        for parameter, value in parameters:
+            parameter.data = value
         for module, name, value in buffers:
             module._buffers[name] = value
         if model_state_digest(loaded.model) != before:

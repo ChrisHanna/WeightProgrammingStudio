@@ -68,12 +68,29 @@ def test_rejects_digest_only_or_incomplete_calibration():
         verify_v2({"cases": 16}, {"cases": 16}, calibration)
 
 
+def test_measured_qwen3_evidence_remains_rejected_by_frozen_top5_gate():
+    path = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "weight-edit-preservation-v2-qwen3.json"
+    report = json.loads(path.read_bytes())
+    verification = report["verification"]
+    assert verify_v2(verification["float32"], verification["bf16"], report["calibration"]) == verification
+    assert verification["passed"] is False
+    assert verification["bf16"]["top5_set_agreement"] == 56 / 59
+    assert verification["float32"]["max_absolute_logit_drift"] <= POLICY_V2["max_float32_logit_drift"]
+    assert verification["bf16"]["top1_agreement"] == 1.0
+    assert verification["bf16"]["mean_kl_base_to_edited"] <= POLICY_V2["max_mean_bf16_kl_base_to_edited"]
+    assert report["candidate_published"] is False and report["holdout_evaluated"] is False
+    assert report["calibration"]["measurements"]["max_absolute_logit_drift"] == 0.0
+
+
 def test_promotion_restores_buffers_and_weights_when_forward_fails(numerical_fixture, monkeypatch):
     from neural_foundry.backends.weight_edit import worker
 
     base, task, examples, recipe = numerical_fixture
     loaded = load_model(base.checkpoint_path, dtype=torch.bfloat16, device="cpu")
     loaded.model.register_buffer("precision_test", torch.tensor([0.123456789], dtype=torch.float32))
+    parameter = next(loaded.model.parameters())
+    loaded.model.register_parameter("shared_precision_test", torch.nn.Parameter(parameter.detach()))
+    storage = parameter.untyped_storage().data_ptr()
     original = loaded.model.precision_test
     digest = model_state_digest(loaded.model)
 
@@ -84,4 +101,6 @@ def test_promotion_restores_buffers_and_weights_when_forward_fails(numerical_fix
     with pytest.raises(RuntimeError, match="measurement failed"):
         float32_logits_of_exact_weights(loaded, recipe["preservation_interactions"])
     assert loaded.model.precision_test is original
+    assert parameter.untyped_storage().data_ptr() == storage
+    assert loaded.model.shared_precision_test.untyped_storage().data_ptr() == storage
     assert model_state_digest(loaded.model) == digest

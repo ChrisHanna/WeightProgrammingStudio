@@ -67,6 +67,8 @@ Preservation policy v1 and its failed results remain historical evidence. Approv
 
 V2 records a one-ULP base sensitivity control on a predeclared selected-site scalar, restores the exact base, and binds the result to base, panel, renderer, and policy digests. This is the smallest representable step at that scalar, not a claim of global model noise. Calibration cannot widen any candidate threshold. Full live v2 acceptance remains pending; no three-way success is claimed merely from a policy change.
 
+The measured Qwen3 v2 `1e-3` rerun is retained in `docs/evidence/weight-edit-preservation-v2-qwen3.json`. On 59 public preservation cases, exact-weight float32 maximum drift was 0.004814, bf16 top-1 agreement was 100%, and mean KL was 2.408e-5. Top-5 agreement was 56/59 (94.915%), below the frozen 95% gate, so the worker rejected the candidate before export or holdout evaluation. Bf16 maximum drift 0.5625 is report-only. The one-ULP control changed one scalar and had zero observed logit effect in either precision. The three-way comparison remains incomplete; thresholds were not changed and no smaller-step retry followed.
+
 ## Advanced Methods
 
 The [methods contract](methods/README.md) records the next milestone: locate, calculated edits, and measured preservation, followed by sequential updates, merging, portable directions, and restricted training. It also specifies the frozen gym-to-edit request, bounded preservation panel, and receipts. These remain planned; holdout is final one-shot evaluation, never feedback for iterative stopping or target optimization.
