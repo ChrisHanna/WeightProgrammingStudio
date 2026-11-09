@@ -315,8 +315,27 @@ class PythiaBPETokenizer:
         return ids
 
     def decode_token(self, token_id: int) -> str:
-        raw = self.id_to_token.get(int(token_id), "<unk>")
-        return raw.replace("Ġ", " ").replace("Ċ", "\n")
+        return self.decode((token_id,))
+
+    def decode(self, token_ids: Sequence[int]) -> str:
+        if not self.byte_level:
+            return "".join(self.id_to_token.get(int(token), "<unk>").replace("Ġ", " ").replace("Ċ", "\n") for token in token_ids)
+        inverse = {character: byte for byte, character in _BYTE_TO_UNICODE.items()}
+        parts: list[str] = []
+        buffer = bytearray()
+        for token in token_ids:
+            raw = self.id_to_token.get(int(token), "<unk>")
+            if raw in self.added_tokens:
+                parts.append(buffer.decode("utf-8", errors="replace"))
+                buffer.clear()
+                parts.append(raw)
+            else:
+                for character in raw:
+                    if character not in inverse:
+                        raise ValueError("Tokenizer contains an invalid byte-level token")
+                    buffer.append(inverse[character])
+        parts.append(buffer.decode("utf-8", errors="replace"))
+        return "".join(parts)
 
 
 @dataclass(frozen=True)
@@ -404,7 +423,11 @@ class PythiaModel:
                 shape = [int(d) for d in slice_info.shape]
                 t = torch.frombuffer(bytearray(view), dtype=tdtype).reshape(shape).to(torch.float64)
                 tensors[name] = t
-        return cls(model_name=model_name, config=cfg, tokenizer=tokenizer, tensors=tensors)
+        from .edit_plan import tensor_state_digest
+
+        model = cls(model_name=model_name, config=cfg, tokenizer=tokenizer, tensors=tensors)
+        model._checkpoint_state_digest = tensor_state_digest(model.tensors)
+        return model
 
     @property
     def total_parameters(self) -> int:
@@ -632,7 +655,7 @@ class PythiaModel:
         return {
             "prompt": prompt,
             "generated_tokens": tuple(gen_tokens),
-            "generated_text": "".join(self.tokenizer.decode_token(i) for i in ids[len(self.tokenizer.encode(prompt)) :]),
+            "generated_text": self.tokenizer.decode(ids[len(self.tokenizer.encode(prompt)) :]),
             "mean_nll": round(sum(nlls) / max(len(nlls), 1), 6),
             "bigram_diversity": round(unique_bi / total_bi, 6),
         }
@@ -664,11 +687,21 @@ def build_mini_pythia_model() -> PythiaModel:
         "ĠFrance",
         "ĠJapan",
         "ĠGermany",
+        "ĠSpain",
+        "ĠSilver",
         "Ġgold",
+        "Ġoxygen",
+        "Ġsodium",
+        "Ġcopper",
         "ĠParis",
         "ĠTokyo",
         "ĠBerlin",
+        "ĠMadrid",
         "ĠAu",
+        "ĠO",
+        "ĠNa",
+        "ĠAg",
+        "ĠCu",
         "Ġplus",
         "Ġone",
         "Ġquick",
@@ -694,6 +727,7 @@ def build_mini_pythia_model() -> PythiaModel:
         "Ġ7",
         "Ġ4",
         "Ġ9",
+        "Ġ0",
         "Ġ2",
         "Ġhas",
         "Ġparity",
@@ -713,6 +747,10 @@ def build_mini_pythia_model() -> PythiaModel:
         "Ġ6",
         "Ġyes",
         "Ġno",
+        "ĠA",
+        "ĠB",
+        "ĠC",
+        "ĠD",
     ]
     vocab = {w: idx for idx, w in enumerate(words)}
     vocab_size = 512
@@ -1028,7 +1066,7 @@ class Qwen2CausalLM:
         return {
             "prompt": prompt,
             "generated_tokens": tuple(gen_tokens),
-            "generated_text": "".join(self.tokenizer.decode_token(i) for i in ids[len(self.tokenizer.encode(prompt)) :]),
+            "generated_text": self.tokenizer.decode(ids[len(self.tokenizer.encode(prompt)) :]),
             "mean_nll": round(sum(nlls) / max(len(nlls), 1), 6),
             "bigram_diversity": round(unique_bi / total_bi, 6),
         }
@@ -1536,6 +1574,7 @@ class ReusableTaskGym:
         "The old house at the end of the",
         "People often ask me why",
     )
+    validation_rules: tuple[tuple[str, str], ...] = ()
 
 
 # Selection limits repeat values the production policy in `evals.DEFAULT_POLICIES` already set:
@@ -1612,6 +1651,14 @@ ALGORITHMIC_THREE_SKILL_GYM = ReusableTaskGym(
         ("Relation 1 > 8 is", "Ġno"),
     ),
     holdout_prefixes=("Today:", "Verify:", "Check:", "Test:", "Exam:", "Verify:"),
+    validation_rules=(
+        ("Number 0 has parity", "Ġeven"),
+        ("Number 1 has parity", "Ġodd"),
+        ("Boolean True AND False OR True gives", "ĠTrue"),
+        ("Boolean False OR False AND True gives", "ĠFalse"),
+        ("Relation 8 > 3 is", "Ġyes"),
+        ("Relation 3 > 8 is", "Ġno"),
+    ),
 )
 
 FACTUAL_KNOWLEDGE_GYM = ReusableTaskGym(
@@ -1620,10 +1667,16 @@ FACTUAL_KNOWLEDGE_GYM = ReusableTaskGym(
     base_rules=(
         ("The capital of France is", "ĠParis"),
         ("The capital of Japan is", "ĠTokyo"),
+        ("The chemical symbol for oxygen is", "ĠO"),
+        ("The chemical symbol for sodium is", "ĠNa"),
+    ),
+    validation_rules=(
+        ("The capital of Spain is", "ĠMadrid"),
+        ("The chemical symbol for silver is", "ĠAg"),
     ),
     holdout_rules=(
         ("The capital of Germany is", "ĠBerlin"),
-        ("The chemical symbol for gold is", "ĠAu"),
+        ("The chemical symbol for copper is", "ĠCu"),
     ),
 )
 
@@ -1644,6 +1697,8 @@ def run_pythia_gym_task_learning_study(
     - Selects a branch with `select_gym_branch`, or none. Only a selected branch reaches the holdout
       and the independent evaluator, and the report's selected fields are None without one.
     """
+    from .gym_data import materialize_holdout_items, materialize_public_task_data
+
     pre_reg = evals.pre_register_study_plan(
         hypothesis_id=f"{gym.gym_id}:contrastive_nullspace_vs_controls",
         primary_metric_family="exact_top1_token_accuracy",
@@ -1654,29 +1709,24 @@ def run_pythia_gym_task_learning_study(
         seed=17,
     )
 
+    task_data = materialize_public_task_data(gym, tokenizer=model.tokenizer)
     base_rules = gym.base_rules
-    sealed_holdout_rules = gym.holdout_rules if gym.holdout_rules else gym.base_rules
-    gym_train_prefixes = (*gym.gym_dev_prefixes, *gym.gym_val_prefixes)
-    gym_dev_items = tuple(
-        (f"{pfx} {expr}", target) for pfx in gym.gym_dev_prefixes for expr, target in base_rules
-    )
-    gym_val_items = tuple(
-        (f"{pfx} {expr}", target) for pfx in gym.gym_val_prefixes for expr, target in base_rules
-    )
-
-    holdout_prefixes = gym.holdout_prefixes
-    holdout_items = tuple(
-        (f"{holdout_prefixes[idx % len(holdout_prefixes)]} {expr}", target)
-        for idx, (expr, target) in enumerate(sealed_holdout_rules)
-    )
+    gym_train_prefixes = gym.gym_dev_prefixes
+    if not gym.holdout_rules:
+        raise ValueError("Gym study requires separate holdout rules; training rules cannot stand in for evaluation")
+    sealed_holdout_rules = gym.holdout_rules
+    gym_dev_items = task_data.train_items
+    gym_val_items = task_data.validation_items
+    holdout_items = materialize_holdout_items(gym, tokenizer=model.tokenizer)
     retention_prompts = gym.retention_prompts
 
     # Cryptographic split & exposure digests (Audit Point 8)
     dev_split_digest = str(content_digest(canonicalize({"split": "dev", "items": [list(x) for x in gym_dev_items]})))
     val_split_digest = str(content_digest(canonicalize({"split": "val", "items": [list(x) for x in gym_val_items]})))
     holdout_split_digest = str(content_digest(canonicalize({"split": "holdout", "items": [list(x) for x in holdout_items]})))
-    expr_disjoint = bool(gym.holdout_rules) and set(r[0] for r in base_rules).isdisjoint(
-        set(r[0] for r in sealed_holdout_rules)
+    public_expressions = {rule[0] for rule in (*gym.base_rules, *gym.validation_rules)}
+    expr_disjoint = bool(gym.holdout_rules) and public_expressions.isdisjoint(
+        {rule[0] for rule in sealed_holdout_rules}
     )
     prompt_disjoint = set(p for p, _ in gym_dev_items + gym_val_items).isdisjoint(
         set(p for p, _ in holdout_items)

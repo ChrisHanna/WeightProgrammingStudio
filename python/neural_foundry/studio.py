@@ -17,6 +17,7 @@ Provides:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 import uuid
@@ -27,13 +28,19 @@ from typing import Any, Literal
 
 from . import _native, evals, ir
 from .gpu import GpuResourceScheduler, HardwareGpuInventory, probe_gpu_hardware
+from .gym_data import load_gym_spec, materialize_public_task_data
 from .m4_ecosystems import (
+    BaselineExecutionReceipt,
     M4FeatureAcceptanceReport,
     run_lora_baseline,
     run_m4_feature_acceptance_suite,
 )
-from .m5_surgery import execute_attention_head_surgery, execute_mlp_width_surgery
-from .provenance import resolve_checkpoint
+from .m5_surgery import (
+    AttentionSurgeryResult,
+    MlpSurgeryResult,
+    execute_attention_head_surgery,
+    execute_mlp_width_surgery,
+)
 from .patch_ux import (
     OrthogonalPatchCompositionReceipt,
     build_open_patch_v1,
@@ -57,6 +64,7 @@ from .prd_adapters import (
     run_mergekit_adapter,
     run_prd_priority_experiments_suite,
 )
+from .provenance import resolve_checkpoint
 from .pythia import (
     ALGORITHMIC_THREE_SKILL_GYM,
     BUILTIN_ARCHITECTURE_PROFILES,
@@ -200,12 +208,30 @@ class ModelRegistry:
         out: list[dict[str, Any]] = []
         for k, meta in self._metadata.items():
             entry = dict(meta)
-            if k == "EleutherAI/pythia-14m":
-                entry["available"] = Path("/tmp/pythia-14m/model.safetensors").is_file()
-            elif k == "EleutherAI/pythia-31m":
-                entry["available"] = Path("/tmp/pythia-31m/model.safetensors").is_file()
+            entry["fixture"] = meta.get("local_cache") == "builtin_deterministic"
+            if k in {"EleutherAI/pythia-14m", "EleutherAI/pythia-31m"}:
+                try:
+                    checkpoint = resolve_checkpoint(k)
+                    entry["available"] = any(name.endswith(".safetensors") for name in checkpoint.file_digests)
+                    entry["local_cache"] = str(checkpoint.path)
+                    entry["revision"] = checkpoint.revision
+                except RuntimeError as exc:
+                    entry["available"] = False
+                    entry["unavailable_reason"] = str(exc)
             out.append(entry)
         return out
+
+    @staticmethod
+    def _load_resolved_checkpoint(resolved: Any) -> Any:
+        cfg = json.loads((resolved.path / "config.json").read_text(encoding="utf-8"))
+        if cfg.get("model_type") == "gpt_neox":
+            loaded = PythiaModel.from_pretrained_dir(resolved.path, model_name=resolved.model_id)
+        elif cfg.get("model_type") == "qwen2":
+            loaded = Qwen2CausalLM.from_pretrained_dir(resolved.path, model_name=resolved.model_id)
+        else:
+            raise ValueError(f"Unsupported model_type in resolved checkpoint: {cfg.get('model_type')!r}")
+        loaded.checkpoint_identity = resolved
+        return loaded
 
     def load(
         self,
@@ -216,7 +242,11 @@ class ModelRegistry:
     ) -> Any:
         key = str(model_id_or_path)
         if key in self._loaders:
-            return self._loaders[key]()
+            pinned_catalog_models = {"EleutherAI/pythia-14m", "EleutherAI/pythia-31m"}
+            if revision is None and not allow_download and key not in pinned_catalog_models:
+                return self._loaders[key]()
+            resolved = resolve_checkpoint(key, revision=revision, allow_download=allow_download)
+            return self._load_resolved_checkpoint(resolved)
         path = Path(key)
         if path.is_dir() and (path / "config.json").is_file():
             cfg = json.loads((path / "config.json").read_text(encoding="utf-8"))
@@ -228,13 +258,7 @@ class ModelRegistry:
             return loaded
         # A named model is real or it is an error. A fixture is never substituted under its name.
         resolved = resolve_checkpoint(key, revision=revision, allow_download=allow_download)
-        cfg = json.loads((resolved.path / "config.json").read_text(encoding="utf-8"))
-        if cfg.get("model_type") == "gpt_neox":
-            loaded = PythiaModel.from_pretrained_dir(resolved.path, model_name=resolved.model_id)
-        else:
-            loaded = Qwen2CausalLM.from_pretrained_dir(resolved.path, model_name=resolved.model_id)
-        loaded.checkpoint_identity = resolved
-        return loaded
+        return self._load_resolved_checkpoint(resolved)
 
 
 class GymRegistry:
@@ -249,6 +273,7 @@ class GymRegistry:
     def register(self, key: str, gym: ReusableTaskGym) -> ReusableTaskGym:
         if not key.strip():
             raise ValueError("gym key must be non-empty")
+        materialize_public_task_data(gym)
         self._gyms[key] = gym
         return gym
 
@@ -258,6 +283,8 @@ class GymRegistry:
         *,
         skills_taught: Sequence[str],
         base_rules: Sequence[tuple[str, str]],
+        validation_rules: Sequence[tuple[str, str]] = (),
+        holdout_rules: Sequence[tuple[str, str]] = (),
         gym_dev_prefixes: Sequence[str] = ("Task:", "Rule:"),
         gym_val_prefixes: Sequence[str] = ("Note:",),
         holdout_prefixes: Sequence[str] = ("Today:", "Check:", "Quiz:", "Verify:", "Exam:", "Test:"),
@@ -275,6 +302,8 @@ class GymRegistry:
             gym_id=gym_id,
             skills_taught=tuple(skills_taught),
             base_rules=tuple((str(p), str(t)) for p, t in base_rules),
+            validation_rules=tuple((str(p), str(t)) for p, t in validation_rules),
+            holdout_rules=tuple((str(p), str(t)) for p, t in holdout_rules),
             gym_dev_prefixes=tuple(gym_dev_prefixes),
             gym_val_prefixes=tuple(gym_val_prefixes),
             holdout_prefixes=tuple(holdout_prefixes),
@@ -283,6 +312,35 @@ class GymRegistry:
         if register_as is not None:
             self.register(register_as, gym)
         return gym
+
+    def load_spec(self, path: str | Path) -> ReusableTaskGym:
+        """Loads and registers a data-only versioned Gym JSON spec."""
+        gym = load_gym_spec(path)
+        return self.register(gym.gym_id, gym)
+
+    def from_nemo_mcqa(
+        self,
+        *,
+        train_jsonl: str | Path,
+        validation_jsonl: str | Path,
+        holdout_jsonl: str | Path,
+        model: Any,
+        gym_id: str = "gym.nemo.mcqa.v1",
+        register_as: str | None = None,
+    ) -> Any:
+        """Import NeMo MCQA panels as one-token Gym rules for existing WSP and LoRA/SFT paths."""
+        from .nemo_gym import load_mcqa_panels
+
+        panels = load_mcqa_panels(
+            train_jsonl,
+            validation_jsonl,
+            holdout_jsonl,
+            tokenizer=model.tokenizer,
+            gym_id=gym_id,
+        )
+        if register_as is not None:
+            self.register(register_as, panels.gym)
+        return panels
 
     def get(self, key_or_gym: str | ReusableTaskGym) -> ReusableTaskGym:
         if isinstance(key_or_gym, ReusableTaskGym):
@@ -295,6 +353,46 @@ class GymRegistry:
         return dict(self._gyms)
 
 
+@dataclass(frozen=True)
+class MethodContract:
+    """Dispatch shape and scope declarations, never a qualification credential."""
+
+    inputs: tuple[tuple[str, str], ...] = ()
+    output_scope: str = "undeclared"
+    result_types: tuple[type, ...] = ()
+    implementation_origin: str = "user_registered"
+    implementation_id: str = "user_registered"
+    evidence_level: Literal["fixture_only", "experimental", "undeclared"] = "undeclared"
+    supported_model_types: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "inputs", tuple(tuple(item) for item in self.inputs))
+        object.__setattr__(self, "result_types", tuple(self.result_types))
+        object.__setattr__(self, "supported_model_types", tuple(self.supported_model_types))
+        names = [name for name, _ in self.inputs]
+        if len(set(names)) != len(names):
+            raise ValueError("Method contract input names must be unique")
+        if any(kind not in {"model", "matrix", "matrix_sequence"} for _, kind in self.inputs):
+            raise ValueError("Unknown method contract input kind")
+        if any(not isinstance(result_type, type) for result_type in self.result_types):
+            raise TypeError("Method contract result types must be Python types")
+        if self.evidence_level not in {"fixture_only", "experimental", "undeclared"}:
+            raise ValueError("Method declarations cannot establish qualification")
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "inputs": [{"name": name, "kind": kind} for name, kind in self.inputs],
+            "output_scope": self.output_scope,
+            "result_types": [result_type.__name__ for result_type in self.result_types],
+            "implementation_origin": self.implementation_origin,
+            "implementation_id": self.implementation_id,
+            "evidence_level": self.evidence_level,
+            "supported_model_types": list(self.supported_model_types),
+            "qualification_credential": False,
+        }
+
+
 class MethodRegistry:
     """Extensible registry of Weight Programming, Merging, Surgery, and Baseline methods."""
 
@@ -303,10 +401,60 @@ class MethodRegistry:
         self._gym_registry = gym_registry
         self._methods: dict[str, Callable[..., Any]] = {}
         self._metadata: dict[str, dict[str, Any]] = {}
+        self._contracts: dict[str, MethodContract] = {}
         self._register_builtins()
 
     def _resolve_model(self, model: Any) -> Any:
         return self._model_registry.load(model) if isinstance(model, (str, Path)) else model
+
+    @staticmethod
+    def _builtin_contract(method_id: str) -> MethodContract:
+        if method_id in {"rome", "memit", "alphaedit", "contrastive_subspace", "task_arithmetic", "ties", "dare"}:
+            result_type = (
+                PythiaGymTaskReport if method_id == "contrastive_subspace"
+                else EasyEditAdapterReceipt if method_id in {"rome", "memit", "alphaedit"}
+                else MergekitAdapterReceipt
+            )
+            owner = (
+                "neural_foundry.pythia.run_pythia_gym_task_learning_study"
+                if method_id == "contrastive_subspace"
+                else "neural_foundry.prd_adapters.run_easyedit_adapter"
+                if method_id in {"rome", "memit", "alphaedit"}
+                else "neural_foundry.prd_adapters.run_mergekit_adapter"
+            )
+            return MethodContract(
+                inputs=(("model", "model"),),
+                output_scope="model_edit_report_not_standalone_checkpoint",
+                result_types=(result_type,),
+                implementation_origin="local_implementation_not_external_package",
+                implementation_id=f"{owner}:{method_id}:v1",
+                evidence_level="experimental",
+                supported_model_types=("gpt_neox", "qwen2"),
+            )
+        tensor_methods = {
+            "mlp_surgery": (("gate_proj", "up_proj", "down_proj"), MlpSurgeryResult, "sliced_tensors_not_checkpoint"),
+            "attention_surgery": (("q_proj", "k_proj", "v_proj", "o_proj"), AttentionSurgeryResult, "sliced_tensors_not_checkpoint"),
+            "lora_baseline": (("base_weight", "inputs", "targets"), tuple, "matrix_and_fixture_training_receipt"),
+            "orthogonal_compose": (("base_weight",), OrthogonalPatchCompositionReceipt, "matrix_edit_receipt_not_checkpoint"),
+        }
+        names, result_type, output_scope = tensor_methods[method_id]
+        inputs = tuple((name, "matrix") for name in names)
+        if method_id == "orthogonal_compose":
+            inputs += (("edited_weights", "matrix_sequence"),)
+        owners = {
+            "mlp_surgery": "neural_foundry.m5_surgery.execute_mlp_width_surgery",
+            "attention_surgery": "neural_foundry.m5_surgery.execute_attention_head_surgery",
+            "lora_baseline": "neural_foundry.m4_ecosystems.run_lora_baseline",
+            "orthogonal_compose": "neural_foundry.patch_ux.compose_overlapping_patches_orthogonal",
+        }
+        return MethodContract(
+            inputs=inputs,
+            output_scope=output_scope,
+            result_types=(result_type,),
+            implementation_origin="local_tensor_implementation",
+            implementation_id=f"{owners[method_id]}:v1",
+            evidence_level="fixture_only",
+        )
 
     def _register_builtins(self) -> None:
         for alg in ("ROME", "MEMIT", "AlphaEdit"):
@@ -338,7 +486,8 @@ class MethodRegistry:
                 alg.lower(),
                 _make_easyedit(alg_lit),
                 category="knowledge_edit",
-                description=f"EasyEdit {alg} closed-form low-rank MLP weight editor (compiled to Rust Weight IR)",
+                description=f"Local {alg} implementation; model-weight edit, not the EasyEdit package",
+                contract=self._builtin_contract(alg.lower()),
             )
 
         def _contrastive_subspace(
@@ -358,6 +507,7 @@ class MethodRegistry:
             _contrastive_subspace,
             category="gym_task_programming",
             description="Contrastive + Prefix-Nullspace + Retention-Nullspace multi-skill weight programmer",
+            contract=self._builtin_contract("contrastive_subspace"),
         )
 
         for merge_alg in ("task_arithmetic", "ties", "dare"):
@@ -389,32 +539,37 @@ class MethodRegistry:
                 merge_alg,
                 _make_mergekit(m_lit),
                 category="model_merge",
-                description=f"mergekit {merge_alg} multi-checkpoint merger with retention null-space guard",
+                description=f"Local {merge_alg} weight merge; not the mergekit package",
+                contract=self._builtin_contract(merge_alg),
             )
 
         self.register_method(
             "mlp_surgery",
             execute_mlp_width_surgery,
             category="architecture_surgery",
-            description="Coupled gate/up/down MLP intermediate channel slicing",
+            description="Tensor-only coupled MLP channel slicing; does not export a checkpoint",
+            contract=self._builtin_contract("mlp_surgery"),
         )
         self.register_method(
             "attention_surgery",
             execute_attention_head_surgery,
             category="architecture_surgery",
-            description="GQA and RoPE-preserving Q/K/V/O attention head pruning",
+            description="Tensor-only GQA head slicing; does not export a checkpoint",
+            contract=self._builtin_contract("attention_surgery"),
         )
         self.register_method(
             "lora_baseline",
             run_lora_baseline,
-            category="training_baseline",
-            description="Authorized bounded low-rank gradient baseline (CG-11)",
+            category="matrix_training_fixture",
+            description="Matrix-only LoRA training fixture; not full-model fine-tuning",
+            contract=self._builtin_contract("lora_baseline"),
         )
         self.register_method(
             "orthogonal_compose",
             compose_overlapping_patches_orthogonal,
             category="model_merge",
             description="Right-singular subspace-orthogonal multi-patch conflict resolver (compiled to Rust Weight IR)",
+            contract=self._builtin_contract("orthogonal_compose"),
         )
 
     def register_method(
@@ -424,15 +579,27 @@ class MethodRegistry:
         *,
         category: str = "custom",
         description: str = "User-registered weight programming method",
+        contract: MethodContract | None = None,
     ) -> Callable[..., Any]:
         key = method_id.strip().lower()
         if not key:
             raise ValueError("method_id must be non-empty")
+        if not callable(fn):
+            raise TypeError("Registered method must be callable")
+        declared = contract if contract is not None else MethodContract()
+        if not isinstance(declared, MethodContract):
+            raise TypeError("Method contract must be a MethodContract")
+        if declared.inputs:
+            parameters = inspect.signature(fn).parameters
+            if any(name not in parameters for name, _ in declared.inputs):
+                raise ValueError("Method contract names an input absent from the callable signature")
+        self._contracts[key] = declared
         self._methods[key] = fn
         self._metadata[key] = {
             "method_id": key,
             "category": category,
             "description": description,
+            "contract": declared.to_document(),
         }
         return fn
 
@@ -442,11 +609,12 @@ class MethodRegistry:
         *,
         category: str = "custom",
         description: str = "User-registered weight programming method",
+        contract: MethodContract | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator for registering a custom weight-editing method into `studio.methods`."""
 
         def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            return self.register_method(method_id, fn, category=category, description=description)
+            return self.register_method(method_id, fn, category=category, description=description, contract=contract)
 
         return _decorator
 
@@ -454,10 +622,48 @@ class MethodRegistry:
         key = method_id.strip().lower()
         if key not in self._methods:
             raise ValueError(f"Unknown method {method_id!r}; available: {sorted(self._methods)}")
-        return self._methods[key](*args, **kwargs)
+        method = self._methods[key]
+        contract = self._contracts[key]
+        if not contract.inputs and not contract.result_types:
+            return method(*args, **kwargs)
+        import torch
+
+        bound = inspect.signature(method).bind(*args, **kwargs)
+        bound.apply_defaults()
+        for name, kind in contract.inputs:
+            value = bound.arguments.get(name)
+            if kind == "model":
+                value = self._resolve_model(value)
+                if not isinstance(value, (PythiaModel, Qwen2CausalLM)):
+                    raise TypeError(f"Method {key!r} requires a supported model for {name!r}, not a matrix")
+                if value.config.get("model_type") not in contract.supported_model_types:
+                    raise ValueError(f"Method {key!r} does not support this model architecture")
+                bound.arguments[name] = value
+            elif kind == "matrix":
+                if not isinstance(value, torch.Tensor) or value.ndim != 2:
+                    raise TypeError(f"Method {key!r} requires a 2D tensor for {name!r}; this is tensor-only")
+            elif kind == "matrix_sequence":
+                if not isinstance(value, Sequence) or not value or any(
+                    not isinstance(item, torch.Tensor) or item.ndim != 2 for item in value
+                ):
+                    raise TypeError(f"Method {key!r} requires a non-empty sequence of matrices for {name!r}")
+        result = method(*bound.args, **bound.kwargs)
+        if contract.result_types and not isinstance(result, contract.result_types):
+            raise TypeError(f"Method {key!r} returned a result outside its declared contract")
+        if contract.output_scope == "matrix_and_fixture_training_receipt" and (
+            len(result) != 2
+            or not isinstance(result[0], torch.Tensor)
+            or result[0].ndim != 2
+            or not isinstance(result[1], BaselineExecutionReceipt)
+        ):
+            raise TypeError(f"Method {key!r} must return a matrix and fixture training receipt")
+        return result
 
     def list_methods(self) -> list[dict[str, Any]]:
-        return [dict(self._metadata[k]) for k in sorted(self._metadata)]
+        return [
+            {**self._metadata[key], "contract": self._contracts[key].to_document()}
+            for key in sorted(self._metadata)
+        ]
 
 
 class AgentRegistry:
@@ -711,9 +917,21 @@ class WeightEditorToolInterface:
 class WeightProgrammingStudio:
     """Unified Studio facade connecting pluggable Models, Gyms, Methods, Agents, Covariance Cache, Causal Tracer, Inspector, Plugins, Editor Tool API, Rust Weight IR, and Evals."""
 
-    def __init__(self, *, vram_capacity_bytes: int = 32 * 1024 * 1024 * 1024) -> None:
+    def __init__(
+        self,
+        *,
+        vram_capacity_bytes: int = 32 * 1024 * 1024 * 1024,
+        gym_state_dir: str | Path | None = None,
+    ) -> None:
+        from .gym_lifecycle import GymLifecycle
+        from .gym_service import GymStudioService
+        from .nemo_gym import NeMoTaskAdapterRegistry
+
         self.models = ModelRegistry()
         self.gyms = GymRegistry()
+        self.nemo_gym_adapters = NeMoTaskAdapterRegistry()
+        self.gym_service = GymStudioService(state_dir=gym_state_dir)
+        self.gym_lifecycle = GymLifecycle(self.gym_service)
         self.covariance = CovarianceCacheRegistry()
         self.tracer = CausalTraceEngine
         self.inspector = LogitLensTrajectoryInspector
@@ -725,7 +943,10 @@ class WeightProgrammingStudio:
         self.editor_tool = WeightEditorToolInterface(self)
         self.gpu_inventory = probe_gpu_hardware()
         self.gpu_scheduler = GpuResourceScheduler(
-            device_count=max(1, self.gpu_inventory.torch_device_count or len(self.gpu_inventory.nvidia_smi_devices) or 1),
+            device_count=max(
+                1,
+                self.gpu_inventory.torch_device_count if self.gpu_inventory.cuda_executable else 0,
+            ),
             vram_capacity_bytes_per_device=vram_capacity_bytes,
         )
 
@@ -761,6 +982,298 @@ class WeightProgrammingStudio:
         """Returns the catalog of model-agnostic `ReusableTaskGym` components."""
         return self.gyms.list_gyms()
 
+    def register_nemo_task_adapter(self, adapter: Any) -> None:
+        """Register a task-specific NeMo-to-Studio data adapter with declared method capabilities."""
+        self.nemo_gym_adapters.register(adapter)
+
+    def list_nemo_task_adapters(self) -> dict[str, dict[str, bool]]:
+        """List NeMo adapters and the training/evaluation routes they actually support."""
+        return self.nemo_gym_adapters.list_adapters()
+
+    def describe_gym_api(self) -> dict[str, Any]:
+        """Describe the versioned dashboard-facing service surface and its authority limits."""
+        return self.gym_service.describe()
+
+    def register_gym_lifecycle_adapter(self, adapter: Any) -> None:
+        self.gym_lifecycle.register(adapter)
+
+    def run_gym_lifecycle(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        return self.gym_lifecycle.run(request)
+
+    def register_gym_component(
+        self,
+        kind: str,
+        component_id: str,
+        version: str,
+        implementation_digest: str,
+        implementation: Any,
+    ) -> None:
+        """Bind a trusted in-process implementation to an exact JobSpec component identity."""
+        self.gym_service.components.register(
+            kind, component_id, version, implementation_digest, implementation
+        )
+
+    def validate_gym_job(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate a data-only Gym JobSpec and resolve its explicitly registered components."""
+        return self.gym_service.validate_job(document)
+
+    def materialize_gym_scenarios(
+        self,
+        job_document: Mapping[str, Any],
+        *,
+        split: str,
+        seed: int,
+        max_scenarios: int = 100_000,
+    ) -> dict[str, Any]:
+        """Materialize registered public scenario sources for a JobSpec."""
+        from .gym_job import gym_job_from_document
+
+        return self.gym_service.materialize_public_scenarios(
+            gym_job_from_document(job_document),
+            split=split,
+            seed=seed,
+            max_scenarios=max_scenarios,
+        )
+
+    def freeze_gym_practice_plan(
+        self,
+        job_document: Mapping[str, Any],
+        candidate_document: Mapping[str, Any],
+        *,
+        run_id: str,
+        scenario_manifest_digest: str,
+        repetitions: int = 1,
+    ) -> dict[str, Any]:
+        """Freeze every planned public-scenario attempt before dispatching a model worker."""
+        from .gym_job import gym_job_from_document
+        from .gym_service import CandidateIdentity
+
+        candidate = CandidateIdentity(**candidate_document)
+        return self.gym_service.freeze_practice_plan(
+            gym_job_from_document(job_document),
+            candidate,
+            run_id=run_id,
+            scenario_manifest_digest=scenario_manifest_digest,
+            repetitions=repetitions,
+        )
+
+    def score_gym_attempt(
+        self,
+        job_document: Mapping[str, Any],
+        candidate_document: Mapping[str, Any],
+        *,
+        practice_plan_digest: str,
+        attempt_id: str,
+        response: Any,
+    ) -> Any:
+        """Run the registered verifier/scorer for one materialized public scenario."""
+        from .gym_job import gym_job_from_document
+        from .gym_service import CandidateIdentity
+
+        candidate = CandidateIdentity(**candidate_document)
+        return self.gym_service.score_attempt(
+            gym_job_from_document(job_document),
+            candidate,
+            practice_plan_digest=practice_plan_digest,
+            attempt_id=attempt_id,
+            response=response,
+        )
+
+    def register_gym_candidate_executor(
+        self,
+        candidate_document: Mapping[str, Any],
+        *,
+        executor_digest: str,
+        execute: Callable[..., Any],
+        identity_probe: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Bind trusted model execution code to a candidate's exact artifact identity."""
+        from .gym_service import CandidateIdentity
+
+        self.gym_service.register_candidate_executor(
+            CandidateIdentity(**candidate_document),
+            executor_digest=executor_digest,
+            execute=execute,
+            identity_probe=identity_probe,
+        )
+
+    def run_gym_practice_attempt(
+        self,
+        job_document: Mapping[str, Any],
+        candidate_document: Mapping[str, Any],
+        *,
+        practice_plan_digest: str,
+        attempt_id: str,
+    ) -> Any:
+        """Execute a planned scenario with the registered candidate, then validate/score its response."""
+        from .gym_job import gym_job_from_document
+        from .gym_service import CandidateIdentity
+
+        return self.gym_service.run_practice_attempt(
+            gym_job_from_document(job_document),
+            CandidateIdentity(**candidate_document),
+            practice_plan_digest=practice_plan_digest,
+            attempt_id=attempt_id,
+        )
+
+    def run_gym_practice_batch(
+        self,
+        job_document: Mapping[str, Any],
+        candidate_document: Mapping[str, Any],
+        *,
+        practice_plan_digest: str,
+        attempt_ids: Sequence[str],
+    ) -> tuple[Any, ...]:
+        """Dispatch a batch of frozen attempts through one registered candidate executor call."""
+        from .gym_job import gym_job_from_document
+        from .gym_service import CandidateIdentity
+
+        return self.gym_service.run_practice_batch(
+            gym_job_from_document(job_document),
+            CandidateIdentity(**candidate_document),
+            practice_plan_digest=practice_plan_digest,
+            attempt_ids=attempt_ids,
+        )
+
+    def compare_unchanged_gym_bases(
+        self,
+        job_document: Mapping[str, Any],
+        candidate_documents: Sequence[Mapping[str, Any]],
+        *,
+        scenario_manifest_digest: str,
+        repetitions: int = 1,
+        require_worker_identity: bool = False,
+        require_distinct_families: bool = False,
+    ) -> dict[str, Any]:
+        """Run unchanged-base candidates on the same public panel through registered executors."""
+        from .gym_job import gym_job_from_document
+        from .gym_service import CandidateIdentity
+
+        candidates = tuple(CandidateIdentity(**document) for document in candidate_documents)
+        return self.gym_service.compare_unchanged_bases(
+            gym_job_from_document(job_document),
+            candidates,
+            scenario_manifest_digest=scenario_manifest_digest,
+            repetitions=repetitions,
+            require_worker_identity=require_worker_identity,
+            require_distinct_families=require_distinct_families,
+        )
+
+    def record_gym_practice_run(
+        self, run_document: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Record results against the exact practice plan frozen before dispatch."""
+        return self.gym_service.record_practice_run_document(run_document)
+
+    def score_gym_candidate(
+        self,
+        job_document: Mapping[str, Any],
+        candidate_document: Mapping[str, Any],
+        measurements: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Apply one job's frozen gates to a candidate, without granting release authority."""
+        return self.gym_service.score_candidate_document(job_document, candidate_document, measurements)
+
+    def import_nemo_gym_panels(
+        self,
+        adapter_id: str,
+        *,
+        train_jsonl: str | Path,
+        validation_jsonl: str | Path,
+        holdout_jsonl: str | Path,
+        model: Any,
+        gym_id: str,
+        register_as: str | None = None,
+    ) -> Any:
+        """Import NeMo dataset panels through the selected capability-declaring adapter."""
+        panels = self.nemo_gym_adapters.load_panels(
+            adapter_id,
+            train_jsonl=train_jsonl,
+            validation_jsonl=validation_jsonl,
+            holdout_jsonl=holdout_jsonl,
+            tokenizer=model.tokenizer,
+            gym_id=gym_id,
+        )
+        if register_as is not None:
+            self.gyms.register(register_as, panels.gym)
+        return panels
+
+    def generate_nemo_gym_panels(
+        self,
+        adapter_id: str,
+        *,
+        model: Any,
+        register_as: str | None = None,
+        **generator_options: Any,
+    ) -> Any:
+        """Generate deterministic Gym panels through a registered task generator."""
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        panels = self.nemo_gym_adapters.generate_panels(
+            adapter_id,
+            tokenizer=resolved_model.tokenizer,
+            **generator_options,
+        )
+        if register_as is not None:
+            self.gyms.register(register_as, panels.gym)
+        return panels
+
+    def train_nemo_gym_rollouts(
+        self,
+        adapter_id: str,
+        *,
+        model: Any,
+        panels: Any,
+        materialized_inputs_jsonl: str | Path,
+        rollouts_jsonl: str | Path,
+        config: Any,
+        minimum_reward: float = 1.0,
+        training_device: str = "cpu",
+    ) -> Any:
+        """Train a declared NeMo task adapter and return validation-scored weights plus provenance."""
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        return self.nemo_gym_adapters.train_from_rollouts(
+            adapter_id,
+            model=resolved_model,
+            panels=panels,
+            materialized_inputs_jsonl=materialized_inputs_jsonl,
+            rollouts_jsonl=rollouts_jsonl,
+            config=config,
+            minimum_reward=minimum_reward,
+            training_device=training_device,
+        )
+
+    def train_nemo_gym_preferences(
+        self,
+        adapter_id: str,
+        *,
+        model: Any,
+        panels: Any,
+        materialized_inputs_jsonl: str | Path,
+        rollouts_jsonl: str | Path,
+        config: Any,
+        minimum_reward_margin: float = 0.1,
+        training_device: str = "cpu",
+    ) -> Any:
+        """Train a registered NeMo preference adapter and return validation-scored candidate weights."""
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        return self.nemo_gym_adapters.train_from_preferences(
+            adapter_id,
+            model=resolved_model,
+            panels=panels,
+            materialized_inputs_jsonl=materialized_inputs_jsonl,
+            rollouts_jsonl=rollouts_jsonl,
+            config=config,
+            minimum_reward_margin=minimum_reward_margin,
+            training_device=training_device,
+        )
+
+    def load_nemo_sft_candidate(self, model: Any, run_directory: str | Path) -> tuple[Any, dict[str, Any]]:
+        """Reload and verify a NeMo SFT artifact against its base and candidate state digests."""
+        from .nemo_gym import load_nemo_sft_candidate
+
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        return load_nemo_sft_candidate(resolved_model, run_directory)
+
     def select_model(
         self,
         model_id_or_path: str | Path,
@@ -789,6 +1302,89 @@ class WeightProgrammingStudio:
             resolved_model,
             gym=resolved_gym,
             target_strength=target_strength,
+        )
+
+    def run_goal_search(
+        self,
+        model: str | Path | PythiaModel | Qwen2CausalLM,
+        output_dir: str | Path,
+        *,
+        gym: ReusableTaskGym | str = ALGORITHMIC_THREE_SKILL_GYM,
+        acceptance_profile: Any = None,
+        budgets: Any = None,
+        cost: float = 1e-7,
+        cycle_id: str | None = None,
+        include_training_baselines: bool = True,
+        training_device: str = "auto",
+        gpu_python: str | Path | None = None,
+        evaluate_independently: bool = True,
+        isolate_independent_evaluation: bool = True,
+    ) -> dict[str, Any]:
+        """Run an iterative profile-bound Gym and independently evaluate its frozen frontier."""
+        from .cumulative_edit import run_goal_search
+
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        resolved_gym = self.gyms.get(gym)
+        kwargs: dict[str, Any] = {
+            "gym": resolved_gym,
+            "cost": cost,
+            "budgets": budgets,
+            "cycle_id": cycle_id,
+            "include_training_baselines": include_training_baselines,
+            "training_device": training_device,
+            "gpu_python": gpu_python,
+            "gpu_scheduler": self.gpu_scheduler,
+            "evaluate_independently": evaluate_independently,
+            "isolate_independent_evaluation": isolate_independent_evaluation,
+        }
+        if acceptance_profile is not None:
+            kwargs["acceptance_profile"] = acceptance_profile
+        return run_goal_search(resolved_model, output_dir, **kwargs)
+
+    def run_nemo_gym_evaluation(
+        self,
+        *,
+        gym_python: str | Path,
+        gym_root: str | Path,
+        config_paths: Sequence[str | Path],
+        agent: str,
+        input_jsonl: str | Path,
+        output_dir: str | Path,
+        model_url: str,
+        model_name: str,
+        timeout_seconds: float = 3600.0,
+    ) -> dict[str, Any]:
+        """Run pinned NeMo Gym evaluation against a caller-served Studio checkpoint endpoint."""
+        from .nemo_gym import NeMoGymRunner
+
+        runner = NeMoGymRunner(gym_python)
+        return runner.run_evaluation(
+            gym_root=gym_root,
+            config_paths=config_paths,
+            agent=agent,
+            input_jsonl=input_jsonl,
+            output_dir=output_dir,
+            model_url=model_url,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def export_model_for_nemo_gym(
+        self,
+        model: Any,
+        output_dir: str | Path,
+        *,
+        source_checkpoint_dir: str | Path,
+    ) -> Path:
+        """Export canonical model weights for a user-managed OpenAI-compatible inference server."""
+        from .export_formats import export_huggingface_safetensors
+
+        resolved_model = self.select_model(model) if isinstance(model, (str, Path)) else model
+        return export_huggingface_safetensors(
+            resolved_model,
+            output_dir,
+            dtype="f32",
+            source_checkpoint_dir=source_checkpoint_dir,
         )
 
     def run_easyedit(
@@ -1235,7 +1831,7 @@ def generate_release_conformance_report(
             fixture_conformance_verified=rust_shape_ok,
             live_scientific_or_hardware_claim_status=(
                 "verified_on_fixture_scope"
-                if gpu_inv.torch_cuda_available
+                if gpu_inv.cuda_executable
                 else "requires_real_gpu_serving_qualification"
             ),
         ),
@@ -1287,9 +1883,107 @@ def main(argv: Sequence[str] | None = None) -> int:
     ver_p.add_argument("--pubkey", required=True, help="Trusted ed25519_pub:... key")
 
     run_gym_p = sub.add_parser("run-gym", help="Run a reusable Task Gym study on a selected model")
-    run_gym_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
-    run_gym_p.add_argument("--gym", default="algorithmic_three_skill", help="Registered Gym key")
+    run_gym_p.add_argument("--model", required=True, help="Explicit model ID or checkpoint directory; fixtures must be selected by name")
+    run_gym_p.add_argument("--gym", default=None, help="Registered Gym key")
+    run_gym_p.add_argument("--gym-spec", default=None, help="Data-only versioned Gym JSON spec")
     run_gym_p.add_argument("--strength", type=float, default=80.0, help="Target subspace strength")
+
+    goal_p = sub.add_parser("goal-search", help="Run an iterative frozen-frontier Gym workflow")
+    goal_p.add_argument("--model", required=True, help="Model ID or checkpoint directory")
+    goal_p.add_argument("--gym", default=None)
+    goal_p.add_argument("--gym-spec", default=None, help="Data-only versioned Gym JSON spec")
+    goal_p.add_argument("--output-dir", required=True, help="Directory for artifacts and reports")
+    goal_p.add_argument("--profile", choices=("strict", "specialized"), default="strict")
+    goal_p.add_argument("--cost", type=float, default=1e-7)
+    goal_p.add_argument("--max-rounds", type=int, default=40)
+    goal_p.add_argument("--max-candidates", type=int, default=20_000)
+    goal_p.add_argument("--max-wall-seconds", type=float, default=None)
+    goal_p.add_argument("--min-gain", type=float, default=0.005)
+    goal_p.add_argument("--max-no-gain-rounds", type=int, default=3)
+    goal_p.add_argument("--training-device", default="auto", help="auto, cpu, or cuda:N")
+    goal_p.add_argument("--gpu-python", default=None, help="Separate local CUDA interpreter")
+    goal_p.add_argument("--no-training-baselines", action="store_true")
+    goal_p.add_argument("--no-independent-eval", action="store_true")
+    goal_p.add_argument("--in-process-independent", action="store_true")
+
+    nemo_import_p = sub.add_parser(
+        "import-nemo-panels",
+        aliases=("import-nemo-mcqa",),
+        help="Convert NeMo train/validation/holdout JSONL through a registered task adapter",
+    )
+    nemo_import_p.add_argument("--adapter", default="mcqa_single_token")
+    nemo_import_p.add_argument("--model", required=True, help="Model ID or checkpoint for one-token validation")
+    nemo_import_p.add_argument("--train-jsonl", required=True)
+    nemo_import_p.add_argument("--validation-jsonl", required=True)
+    nemo_import_p.add_argument("--holdout-jsonl", required=True)
+    nemo_import_p.add_argument("--gym-id", default="gym.nemo.mcqa.v1")
+    nemo_import_p.add_argument("--output-spec", required=True)
+
+    simulate_nemo_p = sub.add_parser(
+        "simulate-nemo-gym",
+        help="Generate a seeded, no-source-data task Gym through a registered simulator adapter",
+    )
+    simulate_nemo_p.add_argument("--adapter", default="simulated_arithmetic_mcqa")
+    simulate_nemo_p.add_argument("--model", required=True, help="Model used to validate prompt/label tokenization")
+    simulate_nemo_p.add_argument("--output-dir", required=True)
+    simulate_nemo_p.add_argument("--seed", type=int, default=42)
+    simulate_nemo_p.add_argument("--train-size", type=int, default=24)
+    simulate_nemo_p.add_argument("--validation-size", type=int, default=12)
+    simulate_nemo_p.add_argument("--holdout-size", type=int, default=12)
+
+    nemo_eval_p = sub.add_parser(
+        "nemo-eval",
+        help="Run NeMo Gym v0.7 against an already-running OpenAI-compatible model endpoint",
+    )
+    nemo_eval_p.add_argument("--gym-python", required=True, help="Python from the pinned NeMo Gym v0.7.0 environment")
+    nemo_eval_p.add_argument("--gym-root", required=True)
+    nemo_eval_p.add_argument("--config", action="append", required=True, help="NeMo Gym config path; repeatable")
+    nemo_eval_p.add_argument("--agent", required=True)
+    nemo_eval_p.add_argument("--input-jsonl", required=True)
+    nemo_eval_p.add_argument("--output-dir", required=True)
+    nemo_eval_p.add_argument("--model-url", required=True)
+    nemo_eval_p.add_argument("--model-name", required=True)
+    nemo_eval_p.add_argument("--timeout-seconds", type=float, default=3600.0)
+
+    nemo_sft_p = sub.add_parser(
+        "nemo-sft",
+        help="Train LoRA/SFT from complete high-reward NeMo MCQA rollouts and score disjoint validation data",
+    )
+    nemo_sft_p.add_argument("--model", required=True)
+    nemo_sft_p.add_argument("--train-jsonl", required=True)
+    nemo_sft_p.add_argument("--validation-jsonl", required=True)
+    nemo_sft_p.add_argument("--holdout-jsonl", required=True)
+    nemo_sft_p.add_argument("--materialized-inputs", required=True)
+    nemo_sft_p.add_argument("--rollouts", required=True)
+    nemo_sft_p.add_argument("--output-dir", required=True)
+    nemo_sft_p.add_argument("--kind", choices=("lora", "sft"), default="lora")
+    nemo_sft_p.add_argument("--targets", choices=("final_down_proj", "all_down_proj", "all_linear"), default="all_down_proj")
+    nemo_sft_p.add_argument("--rank", type=int, default=4)
+    nemo_sft_p.add_argument("--learning-rate", type=float, default=3e-4)
+    nemo_sft_p.add_argument("--steps", type=int, default=100)
+    nemo_sft_p.add_argument("--retention-weight", type=float, default=1.0)
+    nemo_sft_p.add_argument("--minimum-reward", type=float, default=1.0)
+    nemo_sft_p.add_argument("--training-device", default="cpu")
+
+    nemo_dpo_p = sub.add_parser(
+        "nemo-dpo",
+        help="Train LoRA with within-task preference pairs from repeated NeMo MCQA rollouts",
+    )
+    nemo_dpo_p.add_argument("--model", required=True)
+    nemo_dpo_p.add_argument("--train-jsonl", required=True)
+    nemo_dpo_p.add_argument("--validation-jsonl", required=True)
+    nemo_dpo_p.add_argument("--holdout-jsonl", required=True)
+    nemo_dpo_p.add_argument("--materialized-inputs", required=True)
+    nemo_dpo_p.add_argument("--rollouts", required=True)
+    nemo_dpo_p.add_argument("--output-dir", required=True)
+    nemo_dpo_p.add_argument("--targets", choices=("final_down_proj", "all_down_proj", "all_linear"), default="all_down_proj")
+    nemo_dpo_p.add_argument("--rank", type=int, default=4)
+    nemo_dpo_p.add_argument("--learning-rate", type=float, default=1e-4)
+    nemo_dpo_p.add_argument("--steps", type=int, default=100)
+    nemo_dpo_p.add_argument("--beta", type=float, default=0.1)
+    nemo_dpo_p.add_argument("--minimum-reward-margin", type=float, default=0.1)
+    nemo_dpo_p.add_argument("--retention-weight", type=float, default=0.1)
+    nemo_dpo_p.add_argument("--training-device", default="cpu")
 
     exp_p = sub.add_parser("run-experiments", help="Run PRD Priority Experiments A, B, C, and D")
     exp_p.add_argument("--model", default="nf/mini-pythia-fixture", help="Model ID or checkpoint directory")
@@ -1307,6 +2001,200 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     studio = WeightProgrammingStudio()
+
+    if args.command in {"import-nemo-panels", "import-nemo-mcqa"}:
+        model = studio.select_model(args.model)
+        panels = studio.import_nemo_gym_panels(
+            args.adapter,
+            train_jsonl=args.train_jsonl,
+            validation_jsonl=args.validation_jsonl,
+            holdout_jsonl=args.holdout_jsonl,
+            model=model,
+            gym_id=args.gym_id,
+        )
+        spec_path = Path(args.output_spec)
+        manifest_path = Path(str(spec_path) + ".sources.json")
+        if spec_path.exists() or manifest_path.exists():
+            raise FileExistsError("NeMo MCQA spec or source manifest already exists")
+        panels.write_spec(spec_path)
+        manifest_path.write_text(
+            json.dumps(panels.source_manifest(), indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps({"gym_id": panels.gym.gym_id, "spec": str(spec_path), "source_manifest": str(manifest_path)}, indent=2))
+        return 0
+
+    if args.command == "simulate-nemo-gym":
+        output = Path(args.output_dir)
+        panels = studio.generate_nemo_gym_panels(
+            args.adapter,
+            model=args.model,
+            output_dir=output,
+            seed=args.seed,
+            train_size=args.train_size,
+            validation_size=args.validation_size,
+            holdout_size=args.holdout_size,
+        )
+        spec_path = panels.write_spec(output / "gym.json")
+        manifest_path = output / "gym.sources.json"
+        manifest_path.write_text(
+            json.dumps(panels.source_manifest(), indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps({"gym_id": panels.gym.gym_id, "spec": str(spec_path), "source_manifest": str(manifest_path)}, indent=2))
+        return 0
+
+    if args.command == "nemo-eval":
+        receipt = studio.run_nemo_gym_evaluation(
+            gym_python=args.gym_python,
+            gym_root=args.gym_root,
+            config_paths=args.config,
+            agent=args.agent,
+            input_jsonl=args.input_jsonl,
+            output_dir=args.output_dir,
+            model_url=args.model_url,
+            model_name=args.model_name,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(json.dumps(receipt, indent=2, allow_nan=False))
+        return 0
+
+    if args.command == "nemo-sft":
+        import torch
+
+        from .baselines import BaselineConfig
+
+        output = Path(args.output_dir)
+        if output.exists() and any(output.iterdir()):
+            raise FileExistsError(f"NeMo SFT output directory is not empty: {output}")
+        output.mkdir(parents=True, exist_ok=True)
+        model = studio.select_model(args.model)
+        panels = studio.import_nemo_gym_panels(
+            "mcqa_single_token",
+            train_jsonl=args.train_jsonl,
+            validation_jsonl=args.validation_jsonl,
+            holdout_jsonl=args.holdout_jsonl,
+            model=model,
+            gym_id="gym.nemo.mcqa.v1",
+        )
+        config = BaselineConfig(
+            kind=args.kind,
+            lr=args.learning_rate,
+            steps=args.steps,
+            retention_weight=args.retention_weight,
+            targets=args.targets if args.kind == "lora" else "all",
+            rank=args.rank if args.kind == "lora" else 0,
+        )
+        training = studio.train_nemo_gym_rollouts(
+            "mcqa_single_token",
+            model=model,
+            panels=panels,
+            materialized_inputs_jsonl=args.materialized_inputs,
+            rollouts_jsonl=args.rollouts,
+            config=config,
+            minimum_reward=args.minimum_reward,
+            training_device=args.training_device,
+        )
+        weights_path = output / "merged_weights.pt"
+        torch.save(training.fit.merged_weights, weights_path)
+        receipt = {
+            "schema_version": 1,
+            "kind": "nf_nemo_mcqa_sequence_sft_v1",
+            "adapter_id": "mcqa_single_token",
+            "gym_id": panels.gym.gym_id,
+            "gym_digest": panels.source_manifest()["gym_digest"],
+            "dataset_digest": training.dataset.dataset_digest,
+            "source_input_digest": training.dataset.source_input_digest,
+            "source_rollout_digest": training.dataset.source_rollout_digest,
+            "source_runner_receipt_digest": training.dataset.source_runner_receipt_digest,
+            "minimum_reward": args.minimum_reward,
+            "base_model_digest": training.base_model_digest,
+            "candidate_model_digest": training.candidate_model_digest,
+            "config": config.__dict__,
+            "accepted_rollouts": training.dataset.accepted_rollouts,
+            "excluded_low_reward_rollouts": training.dataset.excluded_low_reward_rollouts,
+            "weights_digest": training.fit.weights_digest(),
+            "weights_path": weights_path.name,
+            "cost": training.fit.cost.__dict__,
+            "validation_accuracy": training.validation_accuracy,
+            "validation_examples": training.validation_examples,
+            "validation_digest": training.validation_digest,
+            "holdout_used": False,
+            "promotion_authorized": False,
+        }
+        (output / "training_receipt.json").write_text(
+            json.dumps(receipt, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        )
+        print(json.dumps(receipt, indent=2, allow_nan=False))
+        return 0
+
+    if args.command == "nemo-dpo":
+        import torch
+
+        from .baselines import DPOConfig
+
+        output = Path(args.output_dir)
+        if output.exists() and any(output.iterdir()):
+            raise FileExistsError(f"NeMo DPO output directory is not empty: {output}")
+        output.mkdir(parents=True, exist_ok=True)
+        model = studio.select_model(args.model)
+        panels = studio.import_nemo_gym_panels(
+            "mcqa_single_token",
+            train_jsonl=args.train_jsonl,
+            validation_jsonl=args.validation_jsonl,
+            holdout_jsonl=args.holdout_jsonl,
+            model=model,
+            gym_id="gym.nemo.mcqa.v1",
+        )
+        config = DPOConfig(
+            learning_rate=args.learning_rate,
+            steps=args.steps,
+            rank=args.rank,
+            targets=args.targets,
+            beta=args.beta,
+            retention_weight=args.retention_weight,
+        )
+        training = studio.train_nemo_gym_preferences(
+            "mcqa_single_token",
+            model=model,
+            panels=panels,
+            materialized_inputs_jsonl=args.materialized_inputs,
+            rollouts_jsonl=args.rollouts,
+            config=config,
+            minimum_reward_margin=args.minimum_reward_margin,
+            training_device=args.training_device,
+        )
+        weights_path = output / "merged_weights.pt"
+        torch.save(training.fit.merged_weights, weights_path)
+        receipt = {
+            "schema_version": 1,
+            "kind": "nf_nemo_mcqa_dpo_v1",
+            "adapter_id": "mcqa_single_token",
+            "gym_id": panels.gym.gym_id,
+            "gym_digest": panels.source_manifest()["gym_digest"],
+            "dataset_digest": training.dataset.dataset_digest,
+            "source_input_digest": training.dataset.source_input_digest,
+            "source_rollout_digest": training.dataset.source_rollout_digest,
+            "source_runner_receipt_digest": training.dataset.source_runner_receipt_digest,
+            "minimum_reward_margin": args.minimum_reward_margin,
+            "base_model_digest": training.base_model_digest,
+            "candidate_model_digest": training.candidate_model_digest,
+            "config": config.__dict__,
+            "preference_pairs": training.dataset.task_pairs,
+            "weights_digest": training.fit.weights_digest(),
+            "weights_path": weights_path.name,
+            "cost": training.fit.cost.__dict__,
+            "validation_accuracy": training.validation_accuracy,
+            "validation_examples": training.validation_examples,
+            "validation_digest": training.validation_digest,
+            "holdout_used": False,
+            "promotion_authorized": False,
+        }
+        (output / "training_receipt.json").write_text(
+            json.dumps(receipt, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        )
+        print(json.dumps(receipt, indent=2, allow_nan=False))
+        return 0
 
     if args.command == "catalog":
         payload = {
@@ -1381,12 +2269,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "run-gym":
+        if args.gym and args.gym_spec:
+            raise ValueError("choose either --gym or --gym-spec")
+        selected_gym = (
+            studio.gyms.load_spec(args.gym_spec)
+            if args.gym_spec
+            else args.gym or "algorithmic_three_skill"
+        )
         rep = studio.run_reusable_gym_study(
             args.model,
-            gym=args.gym,
+            gym=selected_gym,
             target_strength=float(args.strength),
         )
         print(rep.promotion_verification["markdown_dashboard"])
+        return 0
+
+    if args.command == "goal-search":
+        if args.gym and args.gym_spec:
+            raise ValueError("choose either --gym or --gym-spec")
+        selected_gym = (
+            studio.gyms.load_spec(args.gym_spec)
+            if args.gym_spec
+            else args.gym or "algorithmic_three_skill"
+        )
+        from .goal_search import (
+            STRICT_GENERAL_PROFILE,
+            TASK_SPECIALIZED_PROFILE,
+            SearchBudgets,
+        )
+
+        profile = STRICT_GENERAL_PROFILE if args.profile == "strict" else TASK_SPECIALIZED_PROFILE
+        result = studio.run_goal_search(
+            args.model,
+            args.output_dir,
+            gym=selected_gym,
+            acceptance_profile=profile,
+            budgets=SearchBudgets(
+                max_rounds=args.max_rounds,
+                max_candidate_evaluations=args.max_candidates,
+                max_wall_seconds=args.max_wall_seconds,
+                min_gain=args.min_gain,
+                max_no_gain_rounds=args.max_no_gain_rounds,
+            ),
+            cost=args.cost,
+            include_training_baselines=not args.no_training_baselines,
+            training_device=args.training_device,
+            gpu_python=args.gpu_python,
+            evaluate_independently=not args.no_independent_eval,
+            isolate_independent_evaluation=not args.in_process_independent,
+        )
+        independent = result.get("independent_evaluation")
+        print(
+            json.dumps(
+                {
+                    "stop_reason": result["stop_reason"],
+                    "archive_terminal_state": result["archive_terminal_state"],
+                    "snapshot_digest": (
+                        result["frontier_snapshot"]["snapshot_digest"]
+                        if result.get("frontier_snapshot")
+                        else None
+                    ),
+                    "frontier_artifact_directory": result.get("frontier_artifact_directory"),
+                    "independent_evaluation_complete": (
+                        independent.get("complete") if independent is not None else None
+                    ),
+                    "independent_terminal_state": (
+                        independent.get("independent_terminal_state")
+                        if independent is not None
+                        else None
+                    ),
+                    "promoted_candidate_ids": (
+                        independent.get("promoted_candidate_ids") if independent is not None else None
+                    ),
+                    "result_path": result.get("result_path"),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "run-experiments":

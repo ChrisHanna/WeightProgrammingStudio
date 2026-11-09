@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from . import (
         export_formats,
         gpu,
+        gym_job,
+        gym_service,
         m4_ecosystems,
         m4_modalities,
         m5_surgery,
@@ -47,6 +49,8 @@ _LAZY_SUBMODULES = frozenset(
     {
         "export_formats",
         "gpu",
+        "gym_job",
+        "gym_service",
         "m4_ecosystems",
         "m4_modalities",
         "m5_surgery",
@@ -87,6 +91,8 @@ __all__ = [
     "export_formats",
     "flagship",
     "gpu",
+    "gym_job",
+    "gym_service",
     "inspection",
     "ir",
     "m4_ecosystems",
