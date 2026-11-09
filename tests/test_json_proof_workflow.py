@@ -76,7 +76,7 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
 
     def train(command, *, env, **kwargs):
         assert "NF_FRONTIER_API_KEY" not in env
-        assert command[-2:] == ["0.01", "2"]
+        assert command[-3:] == ["0.01", "2", "generalist"]
         return SimpleNamespace(returncode=0, timed_out=False, receipt={},
                                stdout=b"NF_JSON_PROOF_TRAINING=" + json.dumps(result).encode() + b"\n")
 
@@ -109,6 +109,36 @@ def test_missing_frontier_fails_before_creating_output(tmp_path, monkeypatch) ->
         json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
                           frontier_factory=JsonFrontierModel.from_env)
     assert not output.exists()
+
+
+def test_specialist_reports_three_arms_but_blocks_holdout_on_required_set_failure(tmp_path, monkeypatch):
+    base, sft, edited, revision = _references(tmp_path)
+    task = reference_task(rows_per_template=1)
+    result = {"job_digest": task.job.digest, "revision": revision, "base": vars(base), "sft": vars(sft),
+              "training_request_digest": "sha256:" + "c" * 64, "candidate_record_digest": "sha256:" + "d" * 64,
+              "weight_edit": vars(edited), "weight_edit_training_request_digest": "sha256:" + "e" * 64,
+              "weight_edit_candidate_record_digest": "sha256:" + "f" * 64, "dataset_digest": "sha256:" + "a" * 64,
+              "retention_mode": "specialist"}
+    receipt_path = Path(edited.artifact_path) / "training_receipt.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt.update({"retention_mode": "specialist", "preservation_verification": {"passed": False}})
+    receipt_path.write_text(json.dumps(receipt))
+    monkeypatch.setattr(json_proof_workflow, "verify_vllm_candidate_files", lambda *args, **kwargs: None)
+    def train(command, **kwargs):
+        assert command[-1] == "specialist"
+        return SimpleNamespace(returncode=0, timed_out=False, receipt={},
+                               stdout=b"NF_JSON_PROOF_TRAINING=" + json.dumps(result).encode() + b"\n")
+    monkeypatch.setattr(json_proof_workflow, "run_local_worker", train)
+    monkeypatch.setattr(json_proof_workflow, "VllmCandidateServer", lambda *args, **kwargs: _FakeModel())
+    def forbidden(*args, **kwargs):
+        raise AssertionError("holdout must remain untouched")
+    monkeypatch.setattr(json_proof_workflow, "compare_synthetic_holdout", forbidden)
+    report = json_proof_workflow.run_json_proof(tmp_path / "specialist", gpu_python=sys.executable,
+                    automodel_python=sys.executable, rows_per_template=1, retention_mode="specialist")
+    assert report["complete"] and report["public_validation_comparison"]["complete"]
+    assert set(report["public_validation_comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
+    assert report["comparison"] is None and not report["holdout_accessed"] and not report["specialist_gate_passed"]
+    assert report["preservation"] == {"passed": False} and not report["preservation_gating"]
 
 
 def test_retained_failed_public_recipes_do_not_claim_holdout_scores():
