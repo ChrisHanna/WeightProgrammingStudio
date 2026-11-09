@@ -107,8 +107,9 @@ def append_sweep_checkpoint(path: Path, record: dict[str, Any]) -> None:
 
 def _compact_score(score: dict[str, Any]) -> dict[str, Any]:
     compact = {key: score[key] for key in ("split", "cases", "exact_match", "format_valid", "panel_digest", "responses") if key in score}
-    compact["truncated_answer_count"] = sum(
-        bool(row.get("execution_evidence", {}).get("truncated")) for row in score.get("responses", ()))
+    evidence = [row.get("execution_evidence") or {} for row in score.get("responses", ())]
+    compact["truncated_answer_count"] = sum(bool(row.get("truncated")) for row in evidence)
+    compact["generation_cap_failure_count"] = sum(bool(row.get("hit_generation_cap")) for row in evidence)
     return compact
 
 
@@ -133,6 +134,24 @@ def _has_complete_json_value(text: str) -> bool:
     except json.JSONDecodeError:
         return False
     return isinstance(value, (dict, list))
+
+
+class _StopAfterJsonRoot:
+    def __init__(self, tokenizer, *, prompt_width: int, eos_token_id: int, batch_size: int) -> None:
+        self.tokenizer = tokenizer
+        self.prompt_width = prompt_width
+        self.eos_token_id = eos_token_id
+        self.completed = [False] * batch_size
+
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        for index in range(input_ids.shape[0]):
+            generated = input_ids[index, self.prompt_width:].tolist()
+            text = self.tokenizer.decode(generated, skip_special_tokens=True)
+            if _has_complete_json_value(text):
+                self.completed[index] = True
+                scores[index].fill_(float("-inf"))
+                scores[index, self.eos_token_id] = 0
+        return scores
 
 
 def _validation_template_scores(rows: list[dict[str, Any]], score: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -205,7 +224,6 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
         if type(pad_token) is not int:
             raise WeightEditInputError("batched validation generation requires a pad or EOS token")
         results = []
-        use_json_stop = True
         for start in range(0, len(interactions), batch_size):
             chunk = interactions[start:start + batch_size]
             rendered = [renderer.render(interaction) for interaction in chunk]
@@ -220,25 +238,21 @@ def validation_model(loaded, *, max_new_tokens=80, batch_size=8):
                 prompt_ids = torch.tensor(prompt.token_ids, dtype=torch.long, device=device)
                 inputs[index, width - len(prompt_ids):] = prompt_ids
                 attention[index, width - len(prompt_ids):] = 1
+            eos = loaded.tokenizer.eos_token_id
+            if type(eos) is not int:
+                raise WeightEditInputError("JSON completion stopping requires an EOS token")
+            stop_after_json = _StopAfterJsonRoot(loaded.tokenizer, prompt_width=width,
+                eos_token_id=eos, batch_size=len(chunk))
             with deterministic_execution(loaded.model), torch.inference_mode():
-                try:
-                    output = loaded.model.generate(input_ids=inputs, attention_mask=attention, do_sample=False,
-                        max_new_tokens=max_new_tokens, pad_token_id=pad_token,
-                        **({"stop_strings": ["}"], "tokenizer": loaded.tokenizer} if use_json_stop else {}))
-                except ValueError as exc:
-                    if not use_json_stop or "substring not found" not in str(exc):
-                        raise
-                    use_json_stop = False
-                    output = loaded.model.generate(input_ids=inputs, attention_mask=attention, do_sample=False,
-                        max_new_tokens=max_new_tokens, pad_token_id=pad_token)
+                output = loaded.model.generate(input_ids=inputs, attention_mask=attention, do_sample=False,
+                    max_new_tokens=max_new_tokens, pad_token_id=pad_token, logits_processor=[stop_after_json])
             for index in range(len(chunk)):
                 generated = output[index, width:].tolist()
-                eos = loaded.tokenizer.eos_token_id
                 if type(eos) is int and eos in generated:
                     generated = generated[:generated.index(eos) + 1]
                 text = loaded.tokenizer.decode(generated, skip_special_tokens=True)
                 parsed = _parse_generated_json(text)
-                hit_generation_cap = len(generated) >= max_new_tokens
+                hit_generation_cap = len(generated) >= max_new_tokens and not stop_after_json.completed[index]
                 results.append(ExecutionResponse(parsed,
                     {"raw_text": text, "generated_token_ids": generated,
                      "max_new_tokens": max_new_tokens,
@@ -670,7 +684,7 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
     batch_equivalent = all(left["response"] == right["response"]
         and left.get("execution_evidence", {}).get("generated_token_ids") == right.get("execution_evidence", {}).get("generated_token_ids")
         for left, right in zip(batch_baseline_validation["responses"], serial_baseline_validation["responses"], strict=True))
-    exact_batch_size = 8 if batch_equivalent else 1
+    exact_batch_size = 16 if batch_equivalent else 1
     baseline_validation_score = batch_baseline_validation if batch_equivalent else serial_baseline_validation
     failing_examples = examples
     passing_interactions = list(request["recipe"].get("protected_training_interactions", ()))
@@ -942,8 +956,13 @@ def run_layer_strength_sweep(state_dir: Path, request_path: Path, output_path: P
         "baseline_validation": baseline_validation["task"]["truncated_answer_count"],
         "exact_candidates": sum(row["training"]["truncated_answer_count"] + row["validation"]["truncated_answer_count"]
                                 for row in exact_measured),
+        "generation_cap_failures": (baseline_train["task"]["generation_cap_failure_count"]
+            + baseline_validation["task"]["generation_cap_failure_count"]
+            + sum(row["training"]["generation_cap_failure_count"] + row["validation"]["generation_cap_failure_count"]
+                  for row in exact_measured)),
         "answer_count": (baseline_train["task"]["cases"] + baseline_validation["task"]["cases"]
             + sum(row["training"]["cases"] + row["validation"]["cases"] for row in exact_measured)),
+        "cap_hits_are_failures": True,
     }
     report["generation_truncation"]["total_truncated_answers"] = (
         report["generation_truncation"]["baseline_train"]

@@ -8,8 +8,9 @@ from pathlib import Path
 
 from neural_foundry.backends.weight_edit.drift_diagnostic import (STRENGTHS, append_sweep_checkpoint, compare_logits,
     _aggregate_logprobs, _load_training_rosters, _validation_template_scores, expected_answer_logprob,
-    _completion_was_truncated, _interactions_by_template, _mlp_writer_site_map, audit_generation_truncation,
-    measure_mode, open_sweep_checkpoint, select_top_third, select_validation_screen, strength_one_stop_gate)
+    _StopAfterJsonRoot, _completion_was_truncated, _interactions_by_template, _mlp_writer_site_map,
+    audit_generation_truncation, measure_mode, open_sweep_checkpoint, select_top_third,
+    select_validation_screen, strength_one_stop_gate)
 from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
 from neural_foundry.prompt_rendering import PromptRenderer
 from neural_foundry.backends.weight_edit.loader import WeightEditInputError
@@ -149,6 +150,23 @@ def test_generation_truncation_requires_budget_exhaustion_and_incomplete_json():
     assert _completion_was_truncated([1, 2, 3], truncated_at_budget, 4) is True
 
 
+def test_json_generation_stops_after_root_not_nested_closing_brace():
+    class Tokenizer:
+        parts = {1: '{"outer":', 2: '{"inner":1}', 3: '}'}
+
+        def decode(self, token_ids, *, skip_special_tokens=True):
+            return "".join(self.parts[token_id] for token_id in token_ids)
+
+    stop = _StopAfterJsonRoot(Tokenizer(), prompt_width=1, eos_token_id=9, batch_size=1)
+    nested_close = stop(torch.tensor([[0, 1, 2]]), torch.zeros((1, 10)))
+    assert stop.completed == [False]
+    assert torch.isfinite(nested_close).all()
+    root_close = stop(torch.tensor([[0, 1, 2, 3]]), torch.zeros((1, 10)))
+    assert stop.completed == [True]
+    assert root_close.argmax(dim=-1).tolist() == [9]
+    assert torch.isneginf(root_close[0, :9]).all()
+
+
 def test_truncation_audit_reports_count_and_binds_source_digest(tmp_path):
     response_rows = [{"scenario_id": "case:complete", "execution_evidence": {
         "generated_token_ids": list(range(4)), "raw_text": '{"answer":1}'}},
@@ -195,7 +213,9 @@ def test_sweep_site_map_contains_only_verified_mlp_writers(numerical_fixture):
     assert all(site.role == "residual_write_mlp" for site in writers.sites)
 
 
-def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixture, monkeypatch, capsys):
+@pytest.mark.parametrize("batch_equivalent", [False, True])
+def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixture, monkeypatch, capsys,
+                                                      batch_equivalent):
     import neural_foundry.backends.weight_edit.drift_diagnostic as diagnostic
     from neural_foundry.gym_service import _wire_document
     from neural_foundry.model_digest import model_state_digest
@@ -257,7 +277,8 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
         scoring_batch_sizes.append((split, model.batch_size))
         responses = [{"scenario_id": row["scenario_id"], "response": row["reference"],
                       "format_valid": True, "exact_match": float(index % 2),
-                      "execution_evidence": {"generated_token_ids": [index, model.batch_size]}}
+                      "execution_evidence": {"generated_token_ids": [index] if batch_equivalent
+                                             else [index, model.batch_size]}}
                      for index, row in enumerate(rows)]
         return {"split": split, "cases": len(rows), "exact_match": sum(row["exact_match"] for row in responses) / len(rows),
                 "format_valid": 1.0, "panel_digest": "sha256:" + "d" * 64, "responses": responses}
@@ -297,13 +318,14 @@ def test_layer_strength_sweep_cpu_smoke_runs_full_cli(tmp_path, numerical_fixtur
     assert len(report["exact_scored_layer_indices"]) == 1
     assert report["base_train"]["task"]["cases"] == len(parent)
     assert report["base_validation"]["task"]["cases"] == 4
-    assert report["batch_generation_equivalent_to_serial"] is False
-    assert report["exact_batch_size"] == 1
+    assert report["batch_generation_equivalent_to_serial"] is batch_equivalent
+    expected_batch_size = 16 if batch_equivalent else 1
+    assert report["exact_batch_size"] == expected_batch_size
     assert report["base_validation"]["task_by_template"]
     assert generation_limits and set(generation_limits) == {diagnostic.LAYER_SWEEP_MAX_NEW_TOKENS}
     assert report["generation_truncation"]["zero_truncated_answers"] is True
     validation_batches = [batch for split, batch in scoring_batch_sizes if split == "validation"]
-    assert validation_batches[2:] == [1, 1]
+    assert validation_batches[2:] == [expected_batch_size, expected_batch_size]
     assert all(row["preservation_v2_report_only"]["passed"] for row in report["results"]
                if row.get("phase") == "exact" and row.get("status") == "measured")
     assert report["strength_1_stop_gate"]["continue_to_multilayer"] is False
