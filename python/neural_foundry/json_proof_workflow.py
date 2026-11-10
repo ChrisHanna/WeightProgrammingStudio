@@ -109,9 +109,11 @@ def run_json_proof(
         if receipt.get("retention_mode") != "specialist" or result.get("retention_mode") != "specialist":
             raise GymJobError("specialist artifact differs from the frozen retention mode")
         preservation = receipt["preservation_verification"]
-        public_comparison = compare_public_validation(task, seed=seed, models=models)
-    holdout_allowed = retention_mode == "generalist" or (public_comparison["complete"]
-                      and public_comparison["scorecards"]["weight_edit"]["acceptance"]["passed"])
+    public_comparison = compare_public_validation(task, seed=seed, models=models)
+    holdout_allowed = public_comparison["complete"] and (
+        retention_mode == "generalist"
+        or public_comparison["scorecards"]["weight_edit"]["acceptance"]["passed"]
+    )
     comparison = compare_synthetic_holdout(task, seed=seed, models=models, preservation_rows=preservation_rows) if holdout_allowed else None
     report = {"kind": "nf_json_proof_workflow_v1", "job_digest": task.job.digest,
               "scorer_audit": audit,
