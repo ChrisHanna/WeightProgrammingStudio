@@ -1,0 +1,20 @@
+{
+  "base": {
+    "model_id": "EleutherAI/pythia-14m",
+    "revision": "cf967c0a9a04383db6f7b1108d86b2962634b4ac",
+    "path": "/home/ot/.cache/neural-foundry/checkpoints/EleutherAI--pythia-14m--cf967c0a9a04383db6f7b1108d86b2962634b4ac"
+  },
+  "runtime": {"device": "cuda:0", "precision": "float32", "timeout_seconds": 120},
+  "gym_id": "public-contract-training-smoke",
+  "sites": ["gpt_neox.layers.5.mlp.dense_4h_to_h.weight"],
+  "dev": [
+    ["Contract: This contract renews each year.\nA: renewal\nB: termination\nAnswer:", "ĠA"],
+    ["Contract: Either party may terminate with notice.\nA: renewal\nB: termination\nAnswer:", "ĠB"]
+  ],
+  "guard": ["The agreement is"],
+  "reload_prompts": ["This contract renews each year.", "Either party may terminate with notice."],
+  "recipes": [
+    {"recipe_schema_version": 1, "kind": "lora", "lr": 0.0003, "steps": 2, "weight": 1.0, "rank": 2, "checkpoints": [1, 2], "seed": 17},
+    {"recipe_schema_version": 1, "kind": "sft", "lr": 0.00003, "steps": 2, "weight": 1.0, "rank": 0, "checkpoints": [1, 2], "seed": 23}
+  ]
+}

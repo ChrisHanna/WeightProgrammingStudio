@@ -5,10 +5,10 @@ Two phases, run separately:
     python -m neural_foundry.retention_research tune --checkpoint /tmp/pythia-14m
     python -m neural_foundry.retention_research seal --checkpoint /tmp/pythia-14m
 
-`tune` sweeps edit configurations and freezes one winner per method family. It only scores development
-prompts, the validation prefix (reported, never used to select), practice retention, and a tuning
-retention split. It has no code path that evaluates the holdout rules or either sealed set; the sealed text
-is used only to refuse overlapping corpus prompts.
+`tune` sweeps edit configurations and freezes one winner per method family. It scores development rules,
+distinct validation rules, practice retention, and a tuning retention split. Validation is reported but
+not used to select. It has no code path that evaluates the holdout rules or either sealed set; the sealed
+text is used only to refuse overlapping corpus prompts.
 
 `seal` evaluates each frozen winner once on the holdout rules, the original sealed set and the fresh sealed
 set, and records every consultation in a ledger. It refuses to consult twice unless told to, and a forced
@@ -35,6 +35,7 @@ from typing import Any
 import torch
 
 from ._native import NativeError
+from .gym_data import materialize_public_task_data
 from .prd_adapters import PRACTICE_RETENTION_PROMPTS, SEALED_RETENTION_PROMPTS, run_easyedit_adapter
 from .pythia import ALGORITHMIC_THREE_SKILL_GYM, PythiaModel, _compile_and_apply_rust_low_rank_update
 
@@ -186,14 +187,14 @@ def _digest(items: Iterable[str]) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(list(items), ensure_ascii=False).encode()).hexdigest()
 
 
-def gym_task_texts() -> tuple[str, ...]:
-    return tuple(expr for expr, _ in (*GYM.base_rules, *GYM.holdout_rules))
+def gym_task_texts(gym: Any = GYM) -> tuple[str, ...]:
+    return tuple(expr for expr, _ in (*gym.base_rules, *gym.validation_rules, *gym.holdout_rules))
 
 
-def build_corpus() -> dict[str, tuple[str, ...]]:
+def build_corpus(gym: Any = GYM) -> dict[str, tuple[str, ...]]:
     """Generic prompts by group. Sharing a word trigram or exact text with any evaluation set disqualifies a prompt."""
     forbidden_exact = {
-        *SEALED_RETENTION_PROMPTS, *FRESH_SEALED_PROMPTS, *PRACTICE_RETENTION_PROMPTS, *GYM.retention_prompts, *gym_task_texts(),
+        *SEALED_RETENTION_PROMPTS, *FRESH_SEALED_PROMPTS, *PRACTICE_RETENTION_PROMPTS, *gym.retention_prompts, *gym_task_texts(gym),
     }
     forbidden_tri: set[tuple[str, ...]] = set()
     for text in forbidden_exact:
@@ -205,9 +206,14 @@ def build_corpus() -> dict[str, tuple[str, ...]]:
     }
 
 
-def split_corpus(seed: int = 17, tune_share: float = 0.3) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def split_corpus(
+    seed: int = 17,
+    tune_share: float = 0.3,
+    *,
+    gym: Any = GYM,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Group-wise split into (fit, tune), so tuning retention measures templates the solver never saw."""
-    corpus = build_corpus()
+    corpus = build_corpus(gym)
     groups = sorted(corpus)
     random.Random(seed).shuffle(groups)
     target = tune_share * sum(len(corpus[g]) for g in groups)
@@ -249,13 +255,30 @@ class Candidate:
 class Lab:
     """Keys, predictions and solves for one model. Public-set scoring only; sealing lives in `seal`."""
 
-    def __init__(self, model: PythiaModel) -> None:
+    def __init__(self, model: PythiaModel, gym: Any = GYM) -> None:
         self.model = model
-        self.fit, self.tune = split_corpus()
-        self.dev_items = [(f"{p} {e}", t) for p in GYM.gym_dev_prefixes for e, t in GYM.base_rules]
-        self.val_items = [(f"{p} {e}", t) for p in GYM.gym_val_prefixes for e, t in GYM.base_rules]
-        self.dev_aug_items = [(f"{p} {e}", t) for p in DEV_AUGMENT_PREFIXES for e, t in GYM.base_rules]
-        self.list_prompts = tuple(dict.fromkeys((*GYM.retention_prompts, *PRACTICE_RETENTION_PROMPTS)))
+        self.gym = gym
+        self.task_data = materialize_public_task_data(gym, tokenizer=model.tokenizer)
+        raw_fit, raw_tune = split_corpus(gym=gym)
+        self.fit = tuple(prompt for prompt in raw_fit if model.tokenizer.encode(prompt))
+        self.tune = tuple(prompt for prompt in raw_tune if model.tokenizer.encode(prompt))
+        self.dev_items = list(self.task_data.train_items)
+        self.val_items = list(self.task_data.validation_items)
+        self.dev_aug_items = [
+            (f"{p} {e}", t)
+            for p in DEV_AUGMENT_PREFIXES
+            for e, t in gym.base_rules
+            if model.tokenizer.encode(f"{p} {e}")
+        ]
+        self.list_prompts = tuple(
+            dict.fromkeys(
+                prompt
+                for prompt in (*gym.retention_prompts, *PRACTICE_RETENTION_PROMPTS)
+                if model.tokenizer.encode(prompt)
+            )
+        )
+        if not self.fit or not self.tune or not self.dev_items or not self.val_items or not self.list_prompts:
+            raise ValueError("The selected tokenizer cannot encode the public Gym corpus")
         self._keys: dict[tuple[int, str], torch.Tensor] = {}
         self._token_moment: dict[int, torch.Tensor] = {}
         self._top1: dict[str, int] = {}
@@ -514,8 +537,8 @@ def random_control(lab: Lab, like: Candidate, seed: int = 17) -> Candidate:
     return lab.apply(FINAL_LAYER, left * scale, right, {"control": "random_matched_norm_rank"})
 
 
-def run_tune(model: PythiaModel, out: Path) -> dict[str, Any]:
-    lab = Lab(model)
+def run_tune(model: PythiaModel, out: Path, gym: Any = GYM) -> dict[str, Any]:
+    lab = Lab(model, gym=gym)
     print(f"corpus fit={len(lab.fit)} tune={len(lab.tune)}", flush=True)
     base = baseline_candidate(lab)
     base_scores = lab.score_public(FINAL_LAYER, base)
@@ -588,6 +611,9 @@ def run_tune(model: PythiaModel, out: Path) -> dict[str, Any]:
 
     doc = {
         "model": model.model_name,
+        "gym_id": lab.task_data.gym_id,
+        "gym_digest": lab.task_data.gym_digest,
+        "task_data_digest": lab.task_data.dataset_digest,
         "corpus": {"fit": len(lab.fit), "tune": len(lab.tune), "digest": _digest((*lab.fit, *lab.tune))},
         "fresh_sealed_digest": _digest(FRESH_SEALED_PROMPTS),
         "baseline_public": base_scores,
@@ -641,16 +667,32 @@ class SealLedger:
         self.path.write_text(json.dumps(self.entries, indent=1), encoding="utf-8")
 
 
-def run_seal(model: PythiaModel, tuning_path: Path, out: Path, ledger_path: Path, *, force: bool = False) -> dict[str, Any]:
+def run_seal(
+    model: PythiaModel,
+    tuning_path: Path,
+    out: Path,
+    ledger_path: Path,
+    *,
+    gym: Any = GYM,
+    force: bool = False,
+) -> dict[str, Any]:
     tuned = json.loads(tuning_path.read_text(encoding="utf-8"))
-    lab = Lab(model)
+    lab = Lab(model, gym=gym)
+    if (
+        tuned.get("gym_digest") != lab.task_data.gym_digest
+        or tuned.get("task_data_digest") != lab.task_data.dataset_digest
+    ):
+        raise RuntimeError("The Gym or task data changed after tuning")
     if tuned["fresh_sealed_digest"] != _digest(FRESH_SEALED_PROMPTS):
         raise RuntimeError("The fresh sealed set changed after tuning")
     if tuned["corpus"]["digest"] != _digest((*lab.fit, *lab.tune)):
         raise RuntimeError("The corpus changed after tuning")
     ledger = SealLedger(ledger_path)
-    prefixes = GYM.holdout_prefixes
-    holdout = [(f"{prefixes[i % len(prefixes)]} {e}", t) for i, (e, t) in enumerate(GYM.holdout_rules)]
+    from .gym_data import materialize_holdout_items
+
+    holdout = materialize_holdout_items(gym, tokenizer=model.tokenizer)
+    if not holdout:
+        raise ValueError("retention sealing requires separate Gym holdout rules")
     baseline = baseline_candidate(lab)
     w0 = model.tensors[model.mlp_down_proj_site(FINAL_LAYER)].to(torch.float64)
     methods: list[tuple[str, int, Callable[[], Candidate | None], bool]] = [
@@ -719,14 +761,27 @@ def main() -> int:
     parser.add_argument("--tuning", default="docs/retention-research-tuning.json")
     parser.add_argument("--results", default="docs/retention-research-sealed.json")
     parser.add_argument("--ledger", default="docs/retention-research-ledger.json")
+    parser.add_argument("--gym-spec", default=None, help="Data-only versioned Gym JSON spec")
     parser.add_argument("--force-reconsult", action="store_true", help="Consult again; the ledger records the repeat")
     args = parser.parse_args()
     torch.set_num_threads(2)
     model = PythiaModel.from_pretrained_dir(args.checkpoint, model_name="EleutherAI/pythia-14m")
+    gym = GYM
+    if args.gym_spec:
+        from .gym_data import load_gym_spec
+
+        gym = load_gym_spec(args.gym_spec)
     if args.phase == "tune":
-        run_tune(model, Path(args.tuning))
+        run_tune(model, Path(args.tuning), gym=gym)
     else:
-        run_seal(model, Path(args.tuning), Path(args.results), Path(args.ledger), force=args.force_reconsult)
+        run_seal(
+            model,
+            Path(args.tuning),
+            Path(args.results),
+            Path(args.ledger),
+            gym=gym,
+            force=args.force_reconsult,
+        )
     return 0
 
 

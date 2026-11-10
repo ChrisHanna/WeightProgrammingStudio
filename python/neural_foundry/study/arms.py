@@ -55,11 +55,25 @@ class DevelopmentData:
 
     @property
     def splits(self) -> bl.BaselineSplits:
+        dev = tuple((item.prompt, item.target) for item in render(self.train, (self.train_prefix,)))
+        val = tuple((item.prompt, item.target) for item in self.validation_items)
+        retention_guard = tuple(item.prompt for item in self.guard)
+        retention_tune = tuple(item.prompt for item in self.retention_tune)
+        gym_content = {
+            "kind": "nf_study_development_gym_v1",
+            "train": dev,
+            "validation": val,
+            "retention_guard": retention_guard,
+            "retention_tune": retention_tune,
+        }
         return bl.BaselineSplits(
-            dev=tuple((item.prompt, item.target) for item in render(self.train, (self.train_prefix,))),
-            val=tuple((item.prompt, item.target) for item in self.validation_items),
-            retention_guard=tuple(item.prompt for item in self.guard),
-            retention_tune=tuple(item.prompt for item in self.retention_tune),
+            dev=dev,
+            val=val,
+            retention_guard=retention_guard,
+            retention_tune=retention_tune,
+            gym_id="nf.study.development.v1",
+            gym_digest=_digest(gym_content),
+            dataset_digest=_digest({"train": dev, "validation": val}),
         )
 
 

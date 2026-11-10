@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import sysconfig
-from os import PathLike
+from os import PathLike, environ
 from pathlib import Path
 
 from . import _native
@@ -25,11 +25,16 @@ def qualify(
     negotiate()
     if not hasattr(_native, "qualify_torch_worker"):
         raise NotImplementedError("Native Linux trusted model worker is unavailable")
+    worker_site_packages = (
+        site_packages
+        if site_packages is not None
+        else environ.get("NF_TRUSTED_TORCH_SITE_PACKAGES", sysconfig.get_path("purelib"))
+    )
     return _native.qualify_torch_worker(
         str(Path(sys.executable if python is None else python).absolute()),
         str(
             Path(
-                sysconfig.get_path("purelib") if site_packages is None else site_packages
+                worker_site_packages
             ).absolute()
         ),
         _native.__file__,

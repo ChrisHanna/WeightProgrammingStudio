@@ -60,6 +60,27 @@ UV_CACHE_DIR="$KIROCREW_SCRATCH/uv-cache" UV_LINK_MODE=copy \
 
 No model package/checkpoint is downloaded. Tests construct tiny independent CPU tensors, run under no_grad, and assert no gradient-dependent state. The extension sees only bytes/records, never a Torch object or callback. A missing Torch installation fails collection rather than skipping qualification. This framework is optional runtime tooling, never imported by the SDK itself; installed-package smoke tests verify no research-stack import.
 
+## Optional GPU training runtime
+
+Keep the `.venv` CPU reference unchanged. On WSL, Blackwell hosts can use a separate local runtime; for the pinned RTX 5090/`torch 2.9.1` setup:
+
+```sh
+uv venv --python 3.12 ~/.venvs/neural-foundry-gpu
+uv pip install --python ~/.venvs/neural-foundry-gpu/bin/python \
+  --index-url https://download.pytorch.org/whl/cu128 'torch==2.9.1'
+uv pip install --python ~/.venvs/neural-foundry-gpu/bin/python 'numpy==2.5.4'
+export NF_GPU_PYTHON="$HOME/.venvs/neural-foundry-gpu/bin/python"
+```
+
+`gpu.probe_gpu_hardware` and the vLLM isolated preflight both execute and synchronize a real CUDA matmul. `torch.cuda.is_available()` alone is insufficient. The conventional `~/.venvs/neural-foundry-gpu/bin/python` path is auto-discovered; `NF_GPU_PYTHON` overrides it. Gradient baselines may execute in that worker, while returned tensors, candidate scores, edit replay, and independent gates remain CPU `float64` in the parent process.
+
 Twenty-two cases compare native f32/f64 replace, add, scale, U8 mask, both permutation axes, left/right linear maps, left/right projection subtraction and rank-one updates against actual PyTorch operations. Two more tests enumerate every nonempty rectangle of a 2x2 matrix in each dtype, compare sliced Torch operations and untouched coordinates, and preserve the original source. All edits pass the real compiler, transaction, alias, numeric and smoke gates. Tolerances are fixed at absolute 1e-6 for f32/1e-12 for f64 with zero relative tolerance; rectangle checks are exact. No-op metadata or mocks cannot satisfy these cases. NumPy conversion is not used; the reference works without NumPy despite Torch's import-time optional-NumPy warning.
 
 The compiler requires explicit matching write effects for each target, including ties. Rectangle fixtures narrow their declared effective alias regions before compilation; the domain remains a fixed whole-tensor allowed site. Failures are not worked around by weakening source, mask, dtype, or permission checks.
+
+For pytest in the optional CUDA interpreter, the trusted model-worker child must
+still import the CPU Torch reference wheel under its fixed address-space cap. Set
+`NF_TRUSTED_TORCH_SITE_PACKAGES` to the CPU reference `.venv` site-packages while
+keeping pytest in the GPU interpreter. `nf-experiments` requires the documented
+empty-capability user-namespace wrapper. Docker-backed tests require the pinned
+local Docker daemon and cannot pass on a host without Docker control.

@@ -138,9 +138,46 @@ def test_scan_limits_scale_and_report_their_limits() -> None:
     assert any("spike" in reason for reason in flagged.flagged_reasons)
 
 
+def test_transformers_sampling_restores_rng_and_checks_context() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    import torch
+
+    class Tokenizer:
+        def __call__(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"input_ids": torch.tensor([[1]])}
+
+        def decode(self, tokens: Any, **kwargs: Any) -> str:
+            return str(int(tokens[0]))
+
+    class Model:
+        def generate(self, *, input_ids: Any, **kwargs: Any) -> Any:
+            return torch.cat((input_ids, torch.randint(0, 10000, (1, 1))), dim=1)
+
+    adapter = object.__new__(serving.TransformersAdapter)
+    adapter._torch, adapter.tokenizer, adapter.model = torch, Tokenizer(), Model()
+    adapter.device, adapter.context_limit, adapter.model_digest = torch.device("cpu"), 8, "sha256:" + "a" * 64
+    before = torch.random.get_rng_state().clone()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outputs = list(pool.map(lambda _: adapter.generate("prompt", {"temperature": 1.0, "max_tokens": 1, "seed": 17}).text, range(8)))
+    assert len(set(outputs)) == 1 and torch.equal(before, torch.random.get_rng_state())
+    with pytest.raises(ValueError, match="context limit"):
+        adapter.generate("prompt", {"max_tokens": 8})
+    for sampler in ({"temperature": float("nan")}, {"max_tokens": 1.5}, {"seed": True}):
+        with pytest.raises(ValueError):
+            serving.normalize_sampler(sampler)
+
+
 def test_reload_uses_memory_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model = pythia.build_mini_pythia_model()
-    export_formats.export_huggingface_safetensors(model, tmp_path, dtype="f32")
+    model.config.setdefault("model_type", "gpt_neox")
+    model.config.setdefault("architectures", ["GPTNeoXForCausalLM"])
+    source = tmp_path / "fixture-tokenizer"
+    source.mkdir()
+    (source / "tokenizer.json").write_text(json.dumps({
+        "model": {"vocab": model.tokenizer.vocab, "merges": []},
+    }))
+    export_formats.export_huggingface_safetensors(model, tmp_path, dtype="f32", source_checkpoint_dir=source)
     original = Path.read_bytes
 
     def refuse(self: Path) -> bytes:
@@ -150,6 +187,15 @@ def test_reload_uses_memory_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(Path, "read_bytes", refuse)
     _, receipt = export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, ["Hello world"])
     assert receipt.file_digest.startswith("sha256:")
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer = json.loads(tokenizer_path.read_text())
+    tokenizer["model"]["vocab"]["unexpected-token"] = 0
+    tokenizer_path.write_text(json.dumps(tokenizer))
+    with pytest.raises(ValueError, match="tokenizer differs"):
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, ["Hello world"])
+    tokenizer_path.unlink()
+    with pytest.raises(ValueError, match="config and tokenizer assets"):
+        export_formats.reload_and_verify_huggingface_safetensors(tmp_path, model, ["Hello world"])
 
 
 def test_llama_adapter_runs_a_real_subprocess_and_checks_identity(tmp_path: Path) -> None:

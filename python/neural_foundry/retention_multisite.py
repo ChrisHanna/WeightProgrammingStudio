@@ -149,14 +149,14 @@ def contrast(m: torch.Tensor) -> torch.Tensor:
 class MultiLab:
     """Solves and public scoring. Sealed sets are reachable only from `run_seal`."""
 
-    def __init__(self, model: PythiaModel) -> None:
+    def __init__(self, model: PythiaModel, gym: Any = GYM) -> None:
         self.model = model
-        self.lab = rr.Lab(model)
+        self.lab = rr.Lab(model, gym=gym)
         self.dev_prompts = [p for p, _ in self.lab.dev_items]
         self._state: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._solve_cache: dict[tuple[Any, ...], dict[int, torch.Tensor]] = {}
         self._base_pred: dict[str, tuple[int, torch.Tensor]] = {}
-        self.task_ids = [model.tokenizer.vocab[t] for t in TASK_TOKENS]
+        self.task_ids = list(dict.fromkeys(model.tokenizer.vocab[token] for _, token in self.lab.dev_items))
 
     def fit_prompts(self, seed: int | None) -> list[str]:
         fit = list(self.lab.fit)
@@ -426,9 +426,19 @@ def config_from(data: Mapping[str, Any]) -> MultiConfig:
     return MultiConfig(**{**data, "layers": tuple(data["layers"])})
 
 
-def run_tune(model: PythiaModel, families: Sequence[str], out: Path) -> None:
+def _task_data_identity(lab: MultiLab) -> dict[str, Any]:
+    data = lab.lab.task_data
+    return {
+        "gym_id": data.gym_id,
+        "gym_digest": data.gym_digest,
+        "dataset_digest": data.dataset_digest,
+    }
+
+
+def run_tune(model: PythiaModel, families: Sequence[str], out: Path, gym: Any = GYM) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    lab = MultiLab(model)
+    lab = MultiLab(model, gym=gym)
+    identity = _task_data_identity(lab)
     all_grids = grids()
     for family in families:
         path = out / f"sweep_{family}.jsonl"
@@ -438,7 +448,7 @@ def run_tune(model: PythiaModel, families: Sequence[str], out: Path) -> None:
                 _tune_gradient(lab, f)
             else:
                 for i, cfg in enumerate(all_grids[family]):
-                    row: dict[str, Any] = {"family": family, "config": dataclasses.asdict(cfg)}
+                    row: dict[str, Any] = {**identity, "family": family, "config": dataclasses.asdict(cfg)}
                     try:
                         row["scores"] = lab.score_public(lab.solve(cfg).merged)
                     except (ValueError, RuntimeError) as exc:
@@ -467,6 +477,7 @@ def _tune_gradient(lab: MultiLab, f: Any) -> None:
     for config in gradient_recipes():
         def record(step: int, weights: dict[str, torch.Tensor], wall: float, config: bl.BaselineConfig = config) -> None:
             row = {
+                **_task_data_identity(lab),
                 "family": f"{config.kind}_fit_guard",
                 "config": {**dataclasses.asdict(config), "steps": step, "checkpoints": []},
                 "scores": lab.score_public(weights),
@@ -508,15 +519,28 @@ def frontier(rows: Sequence[Mapping[str, Any]], bars: Sequence[float] = (1.0, 11
 
 def trained_fit(model: PythiaModel, spec: Mapping[str, Any], lab: MultiLab) -> bl.BaselineFit:
     config = bl.BaselineConfig(**{**spec["config"], "checkpoints": ()})
-    splits = bl.build_splits(GYM, PRACTICE_RETENTION_PROMPTS, model=model)
+    splits = bl.build_splits(lab.lab.gym, PRACTICE_RETENTION_PROMPTS, model=model)
     guard = lab.lab.fit if spec["guard"] == "fit" else splits.refit_guard
     return bl.fit_baseline(model, config, dev=lab.lab.dev_items, retention_guard=guard)
 
 
-def run_freeze(model: PythiaModel, out: Path, frozen_path: Path, weights_dir: Path, refit_report: Path, prior_tuning: Path) -> dict[str, Any]:
-    lab = MultiLab(model)
+def run_freeze(
+    model: PythiaModel,
+    out: Path,
+    frozen_path: Path,
+    weights_dir: Path,
+    refit_report: Path,
+    prior_tuning: Path,
+    gym: Any = GYM,
+) -> dict[str, Any]:
+    lab = MultiLab(model, gym=gym)
+    identity = _task_data_identity(lab)
     rows = load_sweep(out)
+    if not rows or any(any(row.get(key) != value for key, value in identity.items()) for row in rows):
+        raise RuntimeError("multisite sweep rows do not match the selected Gym dataset")
     prior = json.loads(prior_tuning.read_text(encoding="utf-8"))
+    if prior.get("gym_digest") != identity["gym_digest"] or prior.get("task_data_digest") != identity["dataset_digest"]:
+        raise RuntimeError("retention tuning artifact does not match the selected Gym dataset")
     floor = prior["dev_aug_floor"]
     selected: dict[str, Any] = {}
     for family in sorted({r["family"] for r in rows}):
@@ -534,6 +558,12 @@ def run_freeze(model: PythiaModel, out: Path, frozen_path: Path, weights_dir: Pa
         lab.execute(lab.solve(cfg))  # An edit the executor refuses must fail here, before any seal.
 
     report = json.loads(refit_report.read_text(encoding="utf-8"))
+    if any(
+        report.get(kind, {}).get("dataset", {}).get("gym_digest") != identity["gym_digest"]
+        or report.get(kind, {}).get("dataset", {}).get("dataset_digest") != identity["dataset_digest"]
+        for kind in ("lora", "sft")
+    ):
+        raise RuntimeError("LoRA/SFT refit report does not match the selected Gym dataset")
     gradient = {
         "lora_public_guard": {"config": report["lora"]["config"], "guard": "public"},
         "sft_public_guard": {"config": report["sft"]["config"], "guard": "public"},
@@ -552,6 +582,7 @@ def run_freeze(model: PythiaModel, out: Path, frozen_path: Path, weights_dir: Pa
     rank = lambda f: selection_key(selected[f]["public"], floor)
     doc = {
         "model": model.model_name,
+        **identity,
         "sealed_v3_digest": sealed_v3_digest(),
         "corpus_digest": rr._digest((*lab.lab.fit, *lab.lab.tune)),
         "dev_aug_floor": floor,
@@ -597,16 +628,31 @@ def holm(pvalues: Mapping[str, float]) -> dict[str, float]:
     return adjusted
 
 
-def run_seal(model: PythiaModel, frozen_path: Path, out: Path, ledger_path: Path, weights_dir: Path, *, force: bool = False) -> dict[str, Any]:  # noqa: PLR0912
+def run_seal(
+    model: PythiaModel,
+    frozen_path: Path,
+    out: Path,
+    ledger_path: Path,
+    weights_dir: Path,
+    *,
+    gym: Any = GYM,
+    force: bool = False,
+) -> dict[str, Any]:  # noqa: PLR0912
     frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
     if frozen["sealed_v3_digest"] != sealed_v3_digest():
         raise RuntimeError("The V3 sealed set changed after the freeze")
-    lab = MultiLab(model)
+    lab = MultiLab(model, gym=gym)
+    identity = _task_data_identity(lab)
+    if any(frozen.get(key) != value for key, value in identity.items()):
+        raise RuntimeError("frozen multisite results do not match the selected Gym dataset")
     if frozen["corpus_digest"] != rr._digest((*lab.lab.fit, *lab.lab.tune)):
         raise RuntimeError("The corpus changed after the freeze")
     ledger = rr.SealLedger(ledger_path)
-    prefixes = GYM.holdout_prefixes
-    old_holdout = [(f"{prefixes[i % len(prefixes)]} {e}", t) for i, (e, t) in enumerate(GYM.holdout_rules)]
+    from .gym_data import materialize_holdout_items
+
+    old_holdout = materialize_holdout_items(gym, tokenizer=model.tokenizer)
+    if not old_holdout:
+        raise ValueError("multisite sealing requires separate Gym holdout rules")
 
     methods: dict[str, dict[str, torch.Tensor]] = {"control_no_edit": {}}
     executed: dict[str, MultiCandidate] = {}
@@ -671,7 +717,7 @@ def run_seal(model: PythiaModel, frozen_path: Path, out: Path, ledger_path: Path
     adjusted = holm({k: v["p"] for k, v in comparisons.items()})
     for name, value in adjusted.items():
         comparisons[name]["p_holm"] = value
-    doc = {"comparator": comparator, "primary": primary, "rows": rows, "comparisons": comparisons, "n_retention": len(SEALED_V3_RETENTION), "n_task": len(SEALED_V3_TASK)}
+    doc = {**identity, "comparator": comparator, "primary": primary, "rows": rows, "comparisons": comparisons, "n_retention": len(SEALED_V3_RETENTION), "n_task": len(SEALED_V3_TASK)}
     out.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     return doc
 
@@ -732,10 +778,14 @@ def reversibility(model: PythiaModel, original_f32: Mapping[str, bytes], merged:
     }
 
 
-def run_cost(checkpoint: str, method: str, frozen_path: Path, out: Path | None) -> dict[str, Any]:
+def run_cost(checkpoint: str, method: str, frozen_path: Path, out: Path | None, gym: Any = GYM) -> dict[str, Any]:
     """One method per process, so the peak belongs to it. Peak includes the loaded model, and wall time is rough."""
     frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
     model = PythiaModel.from_pretrained_dir(checkpoint, model_name=checkpoint)
+    lab = MultiLab(model, gym=gym)
+    identity = _task_data_identity(lab)
+    if any(frozen.get(key) != value for key, value in identity.items()):
+        raise RuntimeError("frozen multisite results do not match the selected Gym dataset")
     original = {k: f32_bytes(v) for k, v in model.tensors.items()}
     loaded_rss = rss_now()
     bl._reset_peak_rss()
@@ -745,13 +795,11 @@ def run_cost(checkpoint: str, method: str, frozen_path: Path, out: Path | None) 
     if method in frozen.get("cumulative", {}):
         from .cumulative_edit import replay_graph
 
-        lab = MultiLab(model)
         merged, factors = replay_graph(model, Path(frozen["cumulative"][method]["graph"])), None
         plan_bytes = Path(frozen["cumulative"][method]["graph"]).stat().st_size
         receipts = frozen["cumulative"][method]["steps"]
     elif method in frozen["gradient"]:
         spec = frozen["gradient"][method]
-        lab = MultiLab(model)
         fit = trained_fit(model, spec, lab)
         merged = fit.merged_weights
         factors = None
@@ -762,7 +810,6 @@ def run_cost(checkpoint: str, method: str, frozen_path: Path, out: Path | None) 
             plan_bytes = fit.cost.changed_parameters * 12  # Value and index per changed coordinate.
         receipts = 0
     else:
-        lab = MultiLab(model)
         cand = lab.execute(lab.solve(config_from(frozen["selected"][method]["config"])))
         merged = cand.merged
         factors = cand.factors
@@ -771,6 +818,7 @@ def run_cost(checkpoint: str, method: str, frozen_path: Path, out: Path | None) 
     wall = time.perf_counter() - started
     peak = bl._peak_rss_bytes()
     result = {
+        **identity,
         "checkpoint": checkpoint,
         "method": method,
         "wall_seconds_rough": wall,
@@ -806,22 +854,46 @@ def main() -> int:
     parser.add_argument("--method", default="")
     parser.add_argument("--dir", default="docs/retention-multisite")
     parser.add_argument("--weights-dir", default="/tmp/nf-ms-weights")
+    parser.add_argument("--gym-spec", default=None, help="Data-only versioned Gym JSON spec")
+    parser.add_argument("--refit-report", default="docs/real_baselines/refit_report.json")
+    parser.add_argument("--prior-tuning", default="docs/retention-research-tuning.json")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--force-reconsult", action="store_true")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
     root = Path(args.dir)
     frozen = root / "frozen.json"
+    gym = GYM
+    if args.gym_spec:
+        from .gym_data import load_gym_spec
+
+        gym = load_gym_spec(args.gym_spec)
     if args.phase == "cost":
-        run_cost(args.checkpoint, args.method, frozen, root / "costs.jsonl")
+        run_cost(args.checkpoint, args.method, frozen, root / "costs.jsonl", gym=gym)
         return 0
     model = PythiaModel.from_pretrained_dir(args.checkpoint, model_name="EleutherAI/pythia-14m")
     if args.phase == "tune":
-        run_tune(model, args.families.split(","), root)
+        run_tune(model, args.families.split(","), root, gym=gym)
     elif args.phase == "freeze":
-        run_freeze(model, root, frozen, Path(args.weights_dir), Path("docs/real_baselines/refit_report.json"), Path("docs/retention-research-tuning.json"))
+        run_freeze(
+            model,
+            root,
+            frozen,
+            Path(args.weights_dir),
+            Path(args.refit_report),
+            Path(args.prior_tuning),
+            gym=gym,
+        )
     else:
-        run_seal(model, frozen, root / "sealed.json", root / "ledger.json", Path(args.weights_dir), force=args.force_reconsult)
+        run_seal(
+            model,
+            frozen,
+            root / "sealed.json",
+            root / "ledger.json",
+            Path(args.weights_dir),
+            gym=gym,
+            force=args.force_reconsult,
+        )
     return 0
 
 

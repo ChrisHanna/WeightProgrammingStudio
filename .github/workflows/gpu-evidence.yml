@@ -1,0 +1,59 @@
+name: Manual GPU Execution Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_python:
+        description: Prequalified CUDA Python interpreter
+        required: true
+        default: /home/ot/.venvs/neural-foundry-gpu/bin/python
+      cpu_python:
+        description: Prequalified CPU development interpreter with maturin
+        required: true
+        default: /home/ot/.venvs/neural-foundry-dev/bin/python
+      generated_config:
+        description: Pinned generated-response run configuration
+        required: true
+        default: protocols/contract-generated-cuda-v1.json
+      training_config:
+        description: Explicit local training recipe and checkpoint configuration
+        required: true
+        default: protocols/gpu-training-smoke-v1.json
+
+permissions:
+  contents: read
+
+jobs:
+  execution-evidence:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 30
+    env:
+      GPU_PYTHON: ${{ inputs.gpu_python }}
+      CPU_PYTHON: ${{ inputs.cpu_python }}
+      GENERATED_CONFIG: ${{ inputs.generated_config }}
+      TRAINING_CONFIG: ${{ inputs.training_config }}
+      PYTHONPATH: ${{ github.workspace }}/python
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native boundary in the CPU reference environment
+        run: '"$CPU_PYTHON" -m maturin develop --locked'
+      - name: Real generated responses and both in-flight failure points
+        run: >-
+          "$GPU_PYTHON" -O scripts/run_gym_cuda_generated.py
+          --config "$GENERATED_CONFIG" --output-dir artifacts/manual-generated
+          --allow-download --startup-seconds 600
+      - name: Explicit recipes and fresh export reload
+        run: >-
+          "$GPU_PYTHON" -O scripts/run_gym_cuda_generated.py
+          --config "$GENERATED_CONFIG" --output-dir artifacts/manual-training
+          --training-only --training-config "$TRAINING_CONFIG"
+      - name: Preserve reports and responses, not checkpoint weights
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-gpu-execution-evidence-not-release
+          path: |
+            artifacts/**/*.json
+            artifacts/**/*.log

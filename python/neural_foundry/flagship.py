@@ -710,9 +710,9 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     say nothing about naturally occurring failures. A failed repair still publishes a complete
     bundle with `promote_eligible=False`. With no `signing_key`, a fresh key is generated.
     """
-    import copy
     import torch
 
+    from .edit_plan import sign_edit_graph
     from .export_formats import (
         _apply_state_tensors_to_clone,
         _extract_model_state_tensors,
@@ -721,6 +721,7 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         reload_and_verify_gguf_v3,
         reload_and_verify_huggingface_safetensors,
     )
+    from .method_plans import add_delta_step, edit_plan_from_steps, verify_method_steps
     from .patch_ux import (
         build_open_patch_v1,
         diff_model_weights,
@@ -730,14 +731,10 @@ def run_flagship_loop_repair_study_and_publish_bundle(
         verify_open_patch_v1,
         verify_patch_signature,
     )
-    from .edit_plan import sign_edit_graph
-    from .method_plans import add_delta_step, edit_plan_from_steps, verify_method_steps
     from .prd_adapters import FrontierAgentProgrammer
     from .provenance import evidence_grade_for_model, write_artifact_manifest
     from .pythia import (
         ALGORITHMIC_THREE_SKILL_GYM,
-        PythiaModel,
-        build_mini_pythia_model,
         run_pythia_gym_task_learning_study,
     )
 
@@ -923,6 +920,12 @@ def run_flagship_loop_repair_study_and_publish_bundle(
     verify_prompts = [p for p, _ in ALGORITHMIC_THREE_SKILL_GYM.base_rules[:4]]
     hf_dir = out / "huggingface_export"
     export_huggingface_safetensors(repaired_model, hf_dir, dtype="f32")
+    if getattr(repaired_model, "checkpoint_identity", None) is None:
+        if not str(getattr(repaired_model, "model_name", "")).startswith("nf/"):
+            raise ValueError("A non-fixture model export requires source checkpoint tokenizer assets")
+        (hf_dir / "tokenizer.json").write_text(json.dumps({
+            "model": {"vocab": repaired_model.tokenizer.vocab, "merges": []},
+        }, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     _, hf_receipt = reload_and_verify_huggingface_safetensors(hf_dir, repaired_model, verify_prompts)
 
     gguf_path = out / "repaired_model.gguf"

@@ -74,13 +74,30 @@ def load_trials(path: Path) -> list[dict]:
 
 def stage_tune(model: PythiaModel, splits: bl.BaselineSplits, out: Path) -> None:
     path = out / "tune_trials.jsonl"
-    done = {json.dumps(t["config"], sort_keys=True) for t in load_trials(path)}
+    trials = load_trials(path)
+    if any(
+        trial.get("dataset", {}).get("dataset_digest") != splits.dataset_digest
+        or trial.get("dataset", {}).get("gym_digest") != splits.gym_digest
+        for trial in trials
+    ):
+        raise ValueError("tuning file contains trials from a different Gym or dataset")
+    done = {json.dumps(t["config"], sort_keys=True) for t in trials}
     for i, config in enumerate(grid()):
         key = json.dumps(asdict(config), sort_keys=True, default=list)
         if json.dumps(json.loads(key), sort_keys=True) in done:
             continue
         scores, fit = bl.tune_trial(model, config, splits)
-        row = {"config": asdict(config), "scores": [asdict(s) for s in scores], "cost": asdict(fit.cost)}
+        row = {
+            "config": asdict(config),
+            "dataset": {
+                "schema_version": 1,
+                "gym_id": splits.gym_id,
+                "gym_digest": splits.gym_digest,
+                "dataset_digest": splits.dataset_digest,
+            },
+            "scores": [asdict(s) for s in scores],
+            "cost": asdict(fit.cost),
+        }
         with path.open("a") as f:
             f.write(json.dumps(row) + "\n")
         best = max(scores, key=lambda s: s.selection_score)
@@ -91,6 +108,12 @@ def stage_tune(model: PythiaModel, splits: bl.BaselineSplits, out: Path) -> None
 
 def stage_refit(model: PythiaModel, splits: bl.BaselineSplits, out: Path) -> None:
     trials = load_trials(out / "tune_trials.jsonl")
+    if any(
+        trial.get("dataset", {}).get("dataset_digest") != splits.dataset_digest
+        or trial.get("dataset", {}).get("gym_digest") != splits.gym_digest
+        for trial in trials
+    ):
+        raise ValueError("tuning trials do not match the refit Gym dataset")
     report: dict = {}
     for kind in ("lora", "sft"):
         rows = [t for t in trials if t["config"]["kind"] == kind]
@@ -120,13 +143,21 @@ def stage_refit(model: PythiaModel, splits: bl.BaselineSplits, out: Path) -> Non
     (out / "refit_report.json").write_text(json.dumps(report, indent=1))
 
 
-def stage_final(model: PythiaModel, out: Path) -> None:
+def stage_final(model: PythiaModel, out: Path, gym=GYM) -> None:
     report = json.loads((out / "refit_report.json").read_text())
+    from neural_foundry.gym_data import gym_digest
+
+    expected_gym_digest = gym_digest(gym)
+    if any(
+        report[kind].get("dataset", {}).get("gym_digest") != expected_gym_digest
+        for kind in ("lora", "sft")
+    ):
+        raise ValueError("refit report does not match the selected Gym")
     try:  # Created before any sealed scoring, so a crash also uses up the attempt.
         os.close(os.open(out / "HOLDOUT_USED", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     except FileExistsError:
         raise SystemExit("holdout already used for this run directory") from None
-    holdout = bl.SealedHoldout(GYM, SEALED_RETENTION_PROMPTS)
+    holdout = bl.SealedHoldout(gym, SEALED_RETENTION_PROMPTS)
     results = {"original_model_control": holdout.evaluate_once("original", model, {})}
     for kind in ("lora", "sft"):
         weights = torch.load(out / f"{kind}_merged_weights.pt")
@@ -143,17 +174,23 @@ def main() -> None:
     parser.add_argument("--model-dir", default="/tmp/pythia-14m")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--gym-spec", type=Path, default=None, help="Data-only versioned Gym JSON spec")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
     args.out.mkdir(parents=True, exist_ok=True)
     model = PythiaModel.from_pretrained_dir(args.model_dir)
-    splits = bl.build_splits(GYM, PRACTICE_RETENTION_PROMPTS, model=model)
+    gym = GYM
+    if args.gym_spec is not None:
+        from neural_foundry.gym_data import load_gym_spec
+
+        gym = load_gym_spec(args.gym_spec)
+    splits = bl.build_splits(gym, PRACTICE_RETENTION_PROMPTS, model=model)
     if args.stage == "tune":
         stage_tune(model, splits, args.out)
     elif args.stage == "refit":
         stage_refit(model, splits, args.out)
     else:
-        stage_final(model, args.out)
+        stage_final(model, args.out, gym=gym)
 
 
 if __name__ == "__main__":

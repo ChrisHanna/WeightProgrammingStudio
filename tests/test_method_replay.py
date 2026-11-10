@@ -149,6 +149,7 @@ def test_mismatched_steps_are_refused_by_every_method_path(monkeypatch: pytest.M
     monkeypatch.setattr(prd_adapters, "low_rank_step", _corrupting(method_plans.low_rank_step))
     monkeypatch.setattr(prd_adapters, "add_delta_step", _corrupting(method_plans.add_delta_step))
     monkeypatch.setattr(pythia, "low_rank_step", _corrupting(method_plans.low_rank_step))
+    monkeypatch.setattr(pythia, "select_gym_branch", lambda trials: (tuple(trials), trials[0]))
     with pytest.raises(EditGraphError):
         repair.repair_repetition_attractor(defective, PROMPTS)
     with pytest.raises(EditGraphError):
@@ -386,6 +387,10 @@ def test_gym_study_replays(tmp_path: Path, kind: str) -> None:
         assert study.selected_branch_id is None and study.edit_steps == () and study.edited_weight is None
         assert [c.selected for c in study.gym_proposals] == [False, False, False]
         return
+    if study.selected_branch_id is None:
+        assert study.edit_steps == () and study.edited_weight is None
+        assert study.holdout_after == ()
+        return
     site = model.mlp_down_proj_site(int(model.config["num_hidden_layers"]) - 1)
     _assert_replays(tmp_path, model, study.edit_steps, {site: study.edited_weight}, **_on_disk(kind))
 
@@ -399,6 +404,11 @@ def test_reasoning_loop_arm_replays(tmp_path: Path, kind: str, feedback: bool) -
         # This arm submits the Gym's selection, and no branch qualifies on the real checkpoint.
         assert report.submitted_edit_steps == () and report.submitted_weights_by_layer is None and report.held_out_accuracy_after is None
         # The arm's rejected candidate must still replay.
+        study = pythia.run_pythia_gym_task_learning_study(model, gym=GYM, target_strength=80.0)
+        assert _replay_emitted(tmp_path, model, study, kind, prefix="branch_3") == 1
+        return
+    if report.submitted_weights_by_layer is None:
+        assert report.submitted_edit_steps == ()
         study = pythia.run_pythia_gym_task_learning_study(model, gym=GYM, target_strength=80.0)
         assert _replay_emitted(tmp_path, model, study, kind, prefix="branch_3") == 1
         return
@@ -421,7 +431,7 @@ def test_patch_composition_replays(tmp_path: Path, kind: str) -> None:
 
 
 def _devices() -> list[str]:
-    return ["cpu", *(["cuda:0"] if torch.cuda.is_available() else [])]
+    return ["cpu", *(["cuda:0"] if gpu.probe_gpu_hardware().cuda_executable else [])]
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])

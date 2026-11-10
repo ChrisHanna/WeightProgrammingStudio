@@ -70,15 +70,14 @@ print(result["verification"])  # {"verified": False, "rejection_reason": ...} wh
 
 ## 5-Minute Quickstart
 
-### 1. Run a Gym-Driven Weight Edit on an Open-Weight Model
+### 1. Run a Fixture-Scoped Gym Study
 ```python
 from neural_foundry.studio import WeightProgrammingStudio
 
 studio = WeightProgrammingStudio()
 
-# Select any registered model ("EleutherAI/pythia-14m", "EleutherAI/pythia-31m",
-# "Qwen/qwen2-dense-mini", "nf/mini-pythia-fixture", or a local checkpoint path)
-# and teach it a multi-skill task Gym in 0 gradient steps:
+# This fixture study compares direct edits, controls, and a LoRA baseline. It
+# demonstrates the workflow only; it does not qualify a real model or Gym.
 report = studio.run_reusable_gym_study(
     "nf/mini-pythia-fixture",
     gym="algorithmic_three_skill",
@@ -90,6 +89,23 @@ print(f"Rust Candidate Digest: {report.rust_candidate_digest}")
 print(f"Reload Parity:         {report.reload_parity_verified}")
 print(report.promotion_verification["markdown_dashboard"])  # The digests are None when no branch qualifies.
 ```
+
+For iterative search, use the profile-aware API. It freezes every candidate, writes content-addressed tensor artifacts, and evaluates the frozen frontier in a fresh process:
+
+```python
+from neural_foundry.goal_search import STRICT_GENERAL_PROFILE, SearchBudgets
+
+result = studio.run_goal_search(
+    "EleutherAI/pythia-14m",
+    "./goal-search-run",
+    acceptance_profile=STRICT_GENERAL_PROFILE,
+    budgets=SearchBudgets(max_rounds=8, max_candidate_evaluations=500),
+)
+print(result["archive_terminal_state"])
+print(result["independent_evaluation"]["independent_terminal_state"])
+```
+
+The equivalent command is `nf-studio goal-search --model MODEL --output-dir DIR --profile strict`. The existing `run-gym` path remains available as a one-shot study.
 
 ### 2. Knowledge Editing (`EasyEdit`) & Multi-Checkpoint Merging (`mergekit`)
 ```python
@@ -195,7 +211,8 @@ from neural_foundry.studio import WeightProgrammingStudio
 
 studio = WeightProgrammingStudio()
 
-# 1. Register tensor naming conventions for any custom transformer family
+# 1. Register tensor naming metadata. This alone does not add inference/edit
+# support; the model still needs a compatible, qualified architecture adapter.
 studio.models.register_architecture(
     ArchitectureSiteProfile(
         family_id="custom_decoder",
@@ -502,9 +519,12 @@ Status: **experimental, and the real-model edits are harmful.** These rows measu
 
 ## Limitations
 
-- **No edit is qualified on a real checkpoint.** Milestone 1's replay and measurement pipeline runs on Pythia-14M, but the edit it selected is harmful. The vLLM check below currently fails. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
+- **No edit is qualified on a real checkpoint.** The measured Pythia-14M edit remains harmful. Goal search freezes candidate artifacts, replays accepted plans, and can score candidates against Gym holdout rules in a fresh evaluator process. That process is not independently custodied: holdout data is still supplied by the caller, promotion remains disabled, and these scores do not establish deployment eligibility. The vLLM check below currently fails. See [milestones](docs/milestones.md) and the [qualification matrix](docs/qualification-matrix.md).
+- **NeMo Gym integration is modular and capability-declared.** `nf-studio import-nemo-panels --adapter mcqa_single_token` (also `import-nemo-mcqa`) imports disjoint, single-turn MCQA train/validation/holdout panels into a shared Gym used by weight-space search and LoRA/SFT. With no labeled data, `nf-studio simulate-nemo-gym --adapter simulated_arithmetic_mcqa` creates a seeded synthetic single-digit-addition Gym, source panels, and provenance manifest; this is a workflow fixture, not a general simulator or real-task evidence. `nf-studio nemo-sft` trains sequence LoRA/SFT on complete, high-reward single-turn MCQA rollouts; `nf-studio nemo-dpo` trains LoRA from same-task reward-ranked response pairs. Both write digest-bound receipts and support candidate verification on reload. `nf-studio nemo-eval` invokes a separately installed NeMo Gym 0.7.0 against an already-running OpenAI-compatible model endpoint. Each data adapter declares its training capabilities. Multi-turn/tool trajectory training and GRPO remain unsupported; external evaluation is not native sealed custody or promotion authority. See [text-task Gym v1](protocols/text-task-gym-v1.md).
+- **Parameterized Gym job foundation.** `nf_gym_job` binds typed task schemas, real/simulated scenario providers, scorer/verifier identities, candidate methods and required gates; the in-process Studio API records batch attempts and same-panel unchanged-base comparisons for a future dashboard. Registered adapters are trusted code, the optional state directory is local rather than native custody, served-model identity is unverified, and scorecards never authorize release. See [Gym Job and Studio API v1](protocols/gym-job-v1.md).
+- **Research lifecycle adapters.** `WeightProgrammingStudio.run_gym_lifecycle` connects structured task inputs and private practice responses to frozen datasets, compatible model/trainer adapters, staged resumable artifacts, evaluator receipts and a common Scorecard. The local CUDA acceptance exercises support routing on Qwen3 and SmolLM2 with the same PEFT trainer and a one-call tool task on Qwen3. Both trained support candidates scored `0/1` on validation; the tool task passed its task verifier but its Scorecard remains incomplete without holdout, controls and reproducibility evidence. Caller-approved training responses are reported inputs, and release remains blocked. See [Gym Studio Lifecycle v1](protocols/gym-lifecycle-v1.md).
 - **Other architectures:** Llama, Mistral, Gemma, Gemma2 and Qwen3 can't be edited. `Qwen/qwen2-dense-mini` is a fixture despite its name.
-- **Not external packages:** EasyEdit, mergekit, NeMo-Gym, Verifiers, Gymnasium and circuit-tracer names refer to local code unless a receipt says otherwise. The gym adapter receipts record `sandbox_used=False` and `external_package_executed=False`.
+- **Not external packages:** EasyEdit, mergekit, Verifiers, Gymnasium and circuit-tracer names refer to local code unless a receipt says otherwise. The NeMo Gym runner is an explicit external CLI integration; it does not import NeMo into the Studio process.
 - **Not implemented:** `run_transfer_benchmark`, `run_proposer_training_study`, `qualify_tensorrt_llm_adapter`, `run_end_to_end_systems_profile` and `run_weight_efficiency_benchmark` raise `NotImplementedError` once their contract checks pass.
 - **vLLM is not qualified:** `qualify_vllm_serving_adapter` checks serving parity for one configuration: vLLM 0.33.0, Pythia-14M, f32, `FLEX_ATTENTION`, greedy decoding. It currently raises `VLLM_PARITY_FAILED`: on 40 held-out prompts the base export differs from transformers by up to 2.6e-3 nats, over the 2e-3 limit fixed beforehand. Even a pass would say nothing about other models, dtypes, attention backends or sampling, or about whether an edit is correct. vLLM's default `TRITON_ATTN` failed this check. vLLM runs Pythia through its Transformers modeling backend, so this isn't an independent implementation of the model.
 - **Caller-supplied results:** many M4 and M5 evaluators score numbers they are given and mark them `evidence="caller_supplied"`. Their output isn't a measurement.

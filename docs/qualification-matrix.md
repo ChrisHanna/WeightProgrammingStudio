@@ -34,6 +34,7 @@ A row records that the cited test passed when this matrix was last audited. The 
 | --- | --- | --- | --- | --- | --- | --- |
 | EditPlan apply and replay | GPT-NeoX mini fixture | f64 | native Rust CPU | same shape | fixture-only | tests/test_edit_plan.py::test_third_party_replay_reproduces_exact_weights |
 | Gym study | GPT-NeoX Pythia-14m | f64 | native Rust CPU | same shape | experimental | tests/test_pythia_edit.py::test_real_eleutherai_pythia_14m_weight_programming_if_cached |
+| Iterative cumulative goal search, artifact freeze, and Qwen capture | GPT-NeoX and Qwen2 mini fixtures | f64 | native Rust CPU + optional external GPU LoRA/SFT worker | same shape | fixture-only | tests/test_goal_search.py::test_qwen_capture_exposes_supported_cumulative_sites |
 | Gym study | GPT-NeoX Pythia-31m | f64 | native Rust CPU | same shape | experimental | none |
 | Attractor repair | GPT-NeoX mini fixture | f64 | native Rust CPU | same shape | fixture-only | tests/test_attractor_repair.py::test_repair_finds_and_reduces_injected_attractor |
 | Attractor repair | GPT-NeoX Pythia-14m, Pythia-31m | f64 | native Rust CPU | same shape | experimental | none |

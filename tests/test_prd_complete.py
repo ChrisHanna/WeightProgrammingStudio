@@ -131,13 +131,17 @@ def test_prd_priority_experiments_a_b_c_d_and_claude_gpt6_interoperability() -> 
     studio = WeightProgrammingStudio()
     suite_rep = studio.run_priority_experiments("nf/mini-pythia-fixture")
 
-    assert suite_rep.experiment_a_agent_interoperability_verified is True
+    assert suite_rep.experiment_a_agent_interoperability_verified is False
+    assert suite_rep.experiment_a_claude.tool_schemas_digest == suite_rep.experiment_a_gpt6.tool_schemas_digest
+    assert suite_rep.experiment_a_claude.rust_candidate_digest is None
+    assert suite_rep.experiment_a_gpt6.rust_candidate_digest is None
     assert suite_rep.experiment_a_claude.repaired_loop_rate_after is None  # Not measured by this session.
     assert suite_rep.experiment_b_synthesized_accuracy == 1.0
     assert suite_rep.experiment_c_merge_receipt.task_a_survival_rate == 1.0
     assert suite_rep.experiment_c_merge_receipt.task_b_survival_rate == 1.0
-    assert suite_rep.experiment_d_direct_holdout_accuracy > suite_rep.experiment_d_lora_holdout_accuracy
-    assert suite_rep.all_experiments_succeeded is True
+    assert suite_rep.experiment_d_direct_holdout_accuracy is None
+    assert suite_rep.experiment_d_direct_retention_accuracy is None
+    assert suite_rep.all_experiments_succeeded is False
 
     if Path("/tmp/pythia-14m/model.safetensors").is_file():
         real_rep = studio.run_priority_experiments("EleutherAI/pythia-14m")

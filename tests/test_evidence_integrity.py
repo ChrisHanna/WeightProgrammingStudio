@@ -9,7 +9,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from neural_foundry import flagship, patch_ux, prd_adapters, pythia
 from neural_foundry.records import canonicalize, content_digest
 
@@ -162,13 +161,15 @@ def test_synthesis_source_contains_no_holdout_expression() -> None:
         assert not literals & {expr for expr, _ in gym.holdout_rules}
 
 
-def test_exposure_is_computed_from_inputs() -> None:
+def test_overlapping_holdout_input_is_rejected_before_exposure_reporting() -> None:
+    from neural_foundry.gym_data import GymDataError
+
     gym = pythia.ALGORITHMIC_THREE_SKILL_GYM
     leaky = type(gym)(**{**gym.__dict__, "base_rules": (*gym.base_rules, *gym.holdout_rules)})
-    report = pythia.run_pythia_gym_task_learning_study(
-        pythia.build_mini_pythia_model(), gym=leaky, target_strength=80.0
-    )
-    assert report.exposure_ledger.holdout_exposure_count_during_synthesis == len(gym.holdout_rules)
+    with pytest.raises(GymDataError, match="occurs in multiple splits"):
+        pythia.run_pythia_gym_task_learning_study(
+            pythia.build_mini_pythia_model(), gym=leaky, target_strength=80.0
+        )
 
 
 def test_agent_session_does_not_report_unmeasured_numbers() -> None:

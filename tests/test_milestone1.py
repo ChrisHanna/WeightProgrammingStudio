@@ -190,13 +190,14 @@ def test_resolved_proposal_must_match_its_spec_semantically(model) -> None:  # t
         replace(low_rank, operations=(replace(factors, operands={"left_factor": {}, "right_factor": {}}),))
 
 
-# ---- Review finding 3: the Gym emits frozen proposals.
-def test_gym_report_keeps_all_frozen_proposals_and_selects_one() -> None:
+# ---- Review finding 3: all frozen proposals replay; selection may correctly reject all branches.
+def test_gym_report_keeps_all_frozen_proposals_and_fails_closed_when_none_qualify() -> None:
     base = pythia.build_mini_pythia_model()
     report = pythia.run_pythia_gym_task_learning_study(base, target_strength=85.0)
     assert [c.branch_id for c in report.gym_proposals] == [b.branch_id for b in report.branches]
-    assert [c.branch_id for c in report.gym_proposals if c.selected] == [report.selected_branch_id]
-    assert report.selected_proposal.spec.evidence_source == "development_split"
+    assert report.selected_branch_id is None
+    assert report.selected_proposal is None
+    assert not any(candidate.selected for candidate in report.gym_proposals)
     for candidate in report.gym_proposals:
         graph = compile_to_edit_graph(base, candidate.proposal)
         assert apply_edit_graph(pythia.build_mini_pythia_model(), json.loads(json.dumps(graph))).state_digest == candidate.proposal.expected_candidate_digest
@@ -205,14 +206,16 @@ def test_gym_report_keeps_all_frozen_proposals_and_selects_one() -> None:
 def test_selected_proposal_reproduces_the_weights_the_gym_measured() -> None:
     base = pythia.build_mini_pythia_model()
     report = pythia.run_pythia_gym_task_learning_study(base, target_strength=85.0)
-    replayed = apply_edit_graph(base, compile_to_edit_graph(base, report.selected_proposal)).model
-    for prediction in report.holdout_after:
-        assert replayed.evaluate_prompt(prediction.prompt).top1_logit == prediction.top1_logit
+    assert report.selected_branch_id is None
+    assert report.edit_steps == () and report.holdout_after == ()
+    for candidate in report.gym_proposals:
+        replayed = apply_edit_graph(base, compile_to_edit_graph(base, candidate.proposal))
+        assert replayed.state_digest == candidate.proposal.expected_candidate_digest
 
 
 def test_gym_proposals_do_not_depend_on_the_holdout() -> None:
     gym = pythia.ALGORITHMIC_THREE_SKILL_GYM
-    other = replace(gym, holdout_rules=(("Number 3 has parity", "\u0120odd"),))
+    other = replace(gym, holdout_rules=(("Boolean False OR False gives", "\u0120False"),))
     one = pythia.run_pythia_gym_task_learning_study(pythia.build_mini_pythia_model(), gym=gym, target_strength=85.0)
     two = pythia.run_pythia_gym_task_learning_study(pythia.build_mini_pythia_model(), gym=other, target_strength=85.0)
     assert [gp.proposal_digest(c.proposal) for c in one.gym_proposals] == [gp.proposal_digest(c.proposal) for c in two.gym_proposals]

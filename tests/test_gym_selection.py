@@ -64,7 +64,7 @@ def test_selection_has_no_holdout_input() -> None:
 
 
 def test_selection_is_unchanged_by_the_holdout() -> None:
-    other = replace(GYM, holdout_rules=(("Number 3 has parity", "Ġodd"),))
+    other = replace(GYM, holdout_rules=(("Boolean False AND False gives", "ĠFalse"),))
     one = pythia.run_pythia_gym_task_learning_study(pythia.build_mini_pythia_model(), gym=GYM, target_strength=85.0)
     two = pythia.run_pythia_gym_task_learning_study(pythia.build_mini_pythia_model(), gym=other, target_strength=85.0)
     assert one.selected_branch_id == two.selected_branch_id

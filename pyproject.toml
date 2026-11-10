@@ -6,22 +6,20 @@ build-backend = "maturin"
 name = "neural-foundry"
 version = "0.1.0"
 description = "Local-first tools for verifiable neural weight programming"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "python/neural_foundry/data/THIRD_PARTY_NOTICES.txt"]
 readme = "README.md"
-dependencies = []
-
 [project.scripts]
 nf-studio = "neural_foundry.studio:main"
 
 [project.optional-dependencies]
+# Install with the explicit CPU index documented in protocols/core-testing-v1.md.
+differential = ["torch==2.9.1+cpu"]
 peft = ["torch==2.9.1", "transformers==4.57.3", "peft==0.18.0"]
 peft-qlora = ["torch==2.9.1", "transformers==4.57.3", "peft==0.18.0", "bitsandbytes==0.49.1"]
 nemo-automodel = ["nemo-automodel==0.7.0", "torch==2.10.0", "triton==3.6.0", "transformers==5.18.0", "torchao==0.18.0", "torchdata==0.11.0", "datasets==5.1.0"]
 nemo-automodel-qlora = ["nemo-automodel==0.7.0", "torch==2.10.0", "triton==3.6.0", "transformers==5.18.0", "torchao==0.18.0", "torchdata==0.11.0", "datasets==5.1.0", "bitsandbytes==0.49.1"]
-# Install with the explicit CPU index documented in protocols/core-testing-v1.md.
-differential = ["torch==2.9.1+cpu"]
 dev = [
     "pytest==8.4.2",
     "maturin==1.16.0",
@@ -41,9 +39,9 @@ testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 100
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true

@@ -53,9 +53,13 @@ def test_mini_pythia_gym_task_learning_branches() -> None:
     mini = build_mini_pythia_model()
     mini_rep = run_pythia_gym_task_learning_study(mini, target_strength=85.0)
     assert len(mini_rep.branches) == 3
-    assert mini_rep.selected_branch_id == "branch_3_contrastive_prefix_nullspace_rank6"
+    assert mini_rep.selected_branch_id is None
+    assert mini_rep.net_gain_over_noop is None
+    assert mini_rep.net_gain_over_random is None
+    assert any("validation 0.333 below 0.7" in reason for trial in mini_rep.branches for reason in trial.disqualified_because)
     assert mini_rep.reload_parity_verified is True
     assert mini_rep.branches[2].gym_dev_accuracy == 1.0
+    assert mini_rep.branches[2].gym_prefix_val_accuracy == pytest.approx(1 / 3)
     assert mini_rep.branches[2].retention_accuracy == 1.0
 
 

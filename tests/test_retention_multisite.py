@@ -144,6 +144,40 @@ def test_accept_split_is_group_wise_and_excludes_reporting_data() -> None:
         assert kept <= set(solve) or kept <= set(accept)
 
 
+def test_goal_search_split_has_group_wise_monitor_disjointness() -> None:
+    from neural_foundry import cumulative_edit as ce
+
+    splits = ce.goal_search_splits()
+    fit, tune = rr.split_corpus()
+    parts = [set(splits.solve_guard), set(splits.accept_guard), set(splits.monitor_guard)]
+    assert all(parts)
+    assert not (parts[0] & parts[1] or parts[0] & parts[2] or parts[1] & parts[2])
+    assert set().union(*parts) == set(fit)
+    assert not set().union(*parts) & set(tune)
+    for prompts in rr.build_corpus().values():
+        kept = set(prompts) & set(fit)
+        if kept:
+            assert sum(kept <= part for part in parts) == 1
+
+
+def test_move_policy_is_deterministic_and_logged_by_rule_id() -> None:
+    from neural_foundry import cumulative_edit as ce
+    from neural_foundry.goal_search import NextMoveDecision
+
+    moves = (
+        ce.Move("a", "task", 1.0, 1e3, 1.0),
+        ce.Move("a", "task", 0.1, 1e3, 1.0),
+        ce.Move("a", "repair", 0.0, 1e3, 100.0),
+    )
+    task = ce.moves_for_policy(moves, NextMoveDecision("target_gap", "target", "task"))
+    repair = ce.moves_for_policy(
+        moves, NextMoveDecision("retention_or_kl_gap", "retention", "retention_repair")
+    )
+    assert [move.mode for move in task] == ["task", "task"]
+    assert [move.mode for move in repair] == ["repair", "task"]
+    assert ce.moves_for_policy(moves, NextMoveDecision("stop", "stop", "none", "monitor_drift")) == []
+
+
 def test_objective_charges_for_parameters() -> None:
     from neural_foundry import cumulative_edit as ce
 

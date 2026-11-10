@@ -37,6 +37,35 @@ def dev_loss(model, items):
         return float(bl._mean_ce(model, items).item())
 
 
+def test_precision_conversion_is_not_a_learned_delta():
+    original = {"weight": torch.tensor([1.0 + 1e-10], dtype=torch.float64)}
+    training_base = {"weight": original["weight"].float()}
+    unchanged = bl._training_update_snapshot(original, training_base, training_base)
+    assert torch.equal(unchanged["weight"], original["weight"])
+    assert bl._conversion_drift(original, training_base) > 0
+    changed = bl._training_update_snapshot(original, training_base, {"weight": training_base["weight"] + 0.25})
+    assert torch.equal(changed["weight"] - original["weight"], torch.tensor([0.25], dtype=torch.float64))
+
+
+def test_byte_level_sequence_decoder_preserves_utf8():
+    from neural_foundry.pythia import PythiaBPETokenizer
+
+    tokenizer = PythiaBPETokenizer({"Ã": 0, "©": 1, "Ã©": 2}, (), byte_level=True)
+    assert tokenizer.decode((0, 1)) == "é"
+    assert tokenizer.decode_token(2) == "é"
+
+
+def test_holdout_reuse_uses_model_identity_and_supports_no_prefixes(model, monkeypatch):
+    from dataclasses import replace
+
+    panel = bl.SealedHoldout(replace(GYM, holdout_prefixes=()), ())
+    assert panel._items
+    monkeypatch.setattr(bl, "accuracy", lambda candidate, items: 0.0)
+    panel.evaluate_once("first-name", model, {})
+    with pytest.raises(RuntimeError, match="already used"):
+        panel.evaluate_once("different-name", model, {})
+
+
 def test_gradients_reach_every_parameter_through_the_real_forward_pass(model, splits):
     fit = bl.fit_baseline(model, sft(steps=1), dev=splits.dev)
     # The unembedding and an early layer both move, so this is not a one-matrix fit.
@@ -51,6 +80,20 @@ def test_training_lowers_dev_loss_and_leaves_input_model_untouched(model, splits
     fit = bl.fit_baseline(model, config, dev=splits.dev)
     assert dev_loss(bl.merged_model(model, fit.merged_weights), splits.dev) < dev_loss(model, splits.dev)
     assert all(torch.equal(before[k], v) for k, v in model.tensors.items())
+
+
+def test_sequence_lora_trains_full_response_tokens_and_preserves_input_model(model):
+    examples = (("The capital of France is", " Paris"),)
+    config = lora(steps=12, lr=0.1, rank=2)
+    before = {name: tensor.clone() for name, tensor in model.tensors.items()}
+    initial_loss = float(bl._sequence_ce(model, examples).item())
+    fit = bl.fit_sequence_baseline(model, config, examples=examples)
+    trained = bl.merged_model(model, fit.merged_weights)
+
+    assert float(bl._sequence_ce(trained, examples).item()) < initial_loss
+    assert fit.cost.trainable_parameters > 0
+    assert fit.merged_weights
+    assert all(torch.equal(before[name], tensor) for name, tensor in model.tensors.items())
 
 
 def test_lora_merge_is_low_rank_and_limited_to_its_sites(model, splits):
@@ -115,6 +158,10 @@ def test_splits_keep_tuning_fold_out_of_training_and_reject_leaks(model, splits)
     assert set(splits.refit_guard) >= set(PRACTICE)
     assert {p.split()[0] for p, _ in splits.dev} == {"Task:", "Rule:"}
     assert {p.split()[0] for p, _ in splits.val} == {"Note:"}
+    assert {prompt for prompt, _ in splits.dev}.isdisjoint({prompt for prompt, _ in splits.val})
+    assert splits.gym_id == GYM.gym_id
+    assert splits.gym_digest.startswith("sha256:")
+    assert splits.dataset_digest.startswith("sha256:")
     leaky = PRACTICE + (GYM.holdout_rules[0][0],)
     with pytest.raises(ValueError, match="leaked"):
         bl.build_splits(GYM, leaky)

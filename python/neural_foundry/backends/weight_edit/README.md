@@ -69,6 +69,18 @@ V2 records a one-ULP base sensitivity control on a predeclared selected-site sca
 
 The measured Qwen3 v2 `1e-3` rerun is retained in `docs/evidence/weight-edit-preservation-v2-qwen3.json`. On 59 public preservation cases, exact-weight float32 maximum drift was 0.004814, bf16 top-1 agreement was 100%, and mean KL was 2.408e-5. Top-5 agreement was 56/59 (94.915%), below the frozen 95% gate, so the worker rejected the candidate before export or holdout evaluation. Bf16 maximum drift 0.5625 is report-only. The one-ULP control changed one scalar and had zero observed logit effect in either precision. The three-way comparison remains incomplete; thresholds were not changed and no smaller-step retry followed.
 
+## Specialist Retention
+
+Frozen recipes may explicitly select `retention_mode="specialist"` with preservation policy v2. Preservation remains fully measured and its original pass/fail is retained, but does not gate specialist export. Legacy recipes default to generalist preservation gating. Both modes retain exact lineage, valid calibration, execution receipts, frozen portability limits, and fresh serving identity. Specialist artifacts cannot be reclassified as generalist by changing receipt metadata.
+
+The specialist public policy is frozen in `protocols/specialist-retention-v1.json`. It retains the reference job's 100% validation exact-match task threshold and requires 100% schema validity plus 100% source-faithful extraction on 16 public invoice prompt-injection cases. This is task-scoped robustness, not a broad model safety qualification. All three arms receive the same public panels and scorer. A failing specialist candidate blocks holdout while still producing a complete, honestly labelled public comparison. No release or generalist approval follows from specialist publication.
+
+The corrected Transformers bf16 sweep uses the shared response parser and frozen 64-example training dataset. On 64 public validation cases, base scored 45/64, `1e-5` scored 44/64, `1e-4` scored 45/64, and `1e-3` scored 44/64. Gains were -1/64, zero, and -1/64 respectively; only `1e-5` passed v2 preservation. This is no observed task improvement on this panel, not a general claim about all edit methods. Raw responses and exact tensor identities are retained under `artifacts/weight-edit-public-validation-shared-parser-20261109/`.
+
+The earlier `artifacts/weight-edit-public-validation-20261109/` sweep is invalidated: its diagnostic used strict whole-text JSON parsing instead of the frozen model adapter's Markdown-fence handling. Its zero scores are not comparable task evidence. It is retained unchanged, and a parser regression test protects the corrected path.
+
+Generalist approval remains blocked pending improved target optimization, covariance-weighted calculation, and null-space projection. A future preservation v3 should use approximately 300 or more protected cases to reduce top-5 granularity; the current v2 panel and thresholds are unchanged.
+
 ## Advanced Methods
 
 The [methods contract](methods/README.md) records the next milestone: locate, calculated edits, and measured preservation, followed by sequential updates, merging, portable directions, and restricted training. It also specifies the frozen gym-to-edit request, bounded preservation panel, and receipts. These remain planned; holdout is final one-shot evaluation, never feedback for iterative stopping or target optimization.

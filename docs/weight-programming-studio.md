@@ -26,7 +26,9 @@ This document maps product requirements to code. A row showing where code lives 
 | `evals.py` | First-class Evaluation Engine (`import_suite`, `import_lm_eval_harness_task`, `import_inspect_ai_eval_spec`, `run_eval`, `compare_runs`, `verify_promotion`, `render_dashboard_markdown`). |
 | `pythia.py` | `PythiaModel` (`GPTNeoXForCausalLM`, e.g., `EleutherAI/pythia-14m` and `EleutherAI/pythia-31m`), `Qwen2CausalLM`, `ReusableTaskGym`, and the Contrastive-Prefix-Nullspace Weight Programmer. |
 | `prd_adapters.py` | `EasyEdit` adapters (`ROME`, `MEMIT`, `AlphaEdit`), `mergekit` adapters (`task_arithmetic`, `ties`, `dare`), `FrontierAgentProgrammer` (`claude-4-5-sonnet`, `gpt-6-astra`), and Priority Experiments `A`–`D` runner. |
-| `gpu.py` | Hardware GPU probing, DLPack view contracts (`export_dlpack_contract`, `import_dlpack_verified`), copy-on-write GPU dispatch (`dispatch_weight_operation`), and VRAM leasing (`GpuResourceScheduler`, `T108`–`T109`). |
+| `gpu.py` | Executable CUDA probing, external GPU runtime discovery, DLPack view contracts, copy-on-write GPU dispatch, training placement, and VRAM leasing (`T108`–`T109`). |
+| `gpu_training_worker.py` | Trusted local LoRA/SFT worker. It returns CPU `float64` checkpoints to a CPU parent; direct-edit scoring, replay, and archive decisions never cross that process boundary. |
+| `frontier_evaluation.py` / `independent_frontier_worker.py` | Loads digest-bound replacement tensors from a frozen snapshot and evaluates each materialized frontier candidate in a fresh CPU process. No search-loop or proposer object crosses the boundary. |
 | `inspection.py` | Bounded weight statistics, activation summaries, attention entropy, and gradient-assisted saliency (`T047`). |
 | `diagnostics.py` | Failure clustering, contrastive localization, causal activation patching, and structured hypothesis cards (`T048`–`T051`). |
 | `autonomous.py` | Interchangeable agent provider contracts, constrained IR synthesis, multi-branch search, ablation pruning, and Gym Scientist audits (`T052`–`T058`). |
@@ -35,7 +37,58 @@ This document maps product requirements to code. A row showing where code lives 
 | `m5_surgery.py` | Tensor slicing for surgery, grouped quantization, and evaluators over caller-supplied numbers. Serving qualification, systems profile and WeightEfficiencyBench are unsupported. |
 | `export_formats.py` | Native HuggingFace Safetensors and **GGUF v3** (`F32`, `F16`, `Q8_0`) export and reload round-trip verification, block-quantized `Q8_0` matrix editing (`execute_quantized_q8_matrix_edit`), and sharded Safetensors `mmap` copy-on-write checkpoint loader (`ShardedMmapCheckpoint`, up to `64 GiB`). |
 | `patch_ux.py` | Layer-by-layer weight diff summaries (`diff_model_weights`: Frobenius, spectral $\ell_2$, and $\ell_\infty$ norms), cryptographic patch signing (`sign_patch_envelope`, `verify_patch_signature`), and one-command rollback (`create_rollback_handle`, `rollback_model_patch`). |
+### Method Dispatch Contracts
 
+`studio.methods.list_methods()` includes a versioned `contract` for every entry:
+declared argument kinds, result types, output scope, owning implementation ID,
+supported model types, and evidence level. Local ROME/MEMIT/AlphaEdit and merging
+implementations are not labeled as execution of the EasyEdit or mergekit packages.
+The existing `lora_baseline` is a matrix-training fixture; surgery returns sliced
+tensors, not a standalone checkpoint. Model-edit reports also do not imply a
+qualified export or accepted model.
+
+`studio.methods.run()` checks declared arguments before dispatch and result types
+after execution. These checks do not certify numerical fidelity, enforce a study
+permission, or grant promotion authority. Implementation IDs name local code and
+protocol versions, not source-hash attestations. Existing custom registrations
+without a contract stay compatible and are listed as `undeclared`.
+
+```python
+import torch
+from neural_foundry.studio import MethodContract
+
+@studio.methods.register(
+   "matrix_identity",
+   contract=MethodContract(
+      inputs=(("weight", "matrix"),),
+      output_scope="matrix",
+      result_types=(torch.Tensor,),
+   ),
+)
+def matrix_identity(weight: torch.Tensor) -> torch.Tensor:
+   return weight.clone()
+```
+
+Native family accounting, sealed-data custody, GPU reservations, independent
+statistics, serving qualification, and recipe publication remain separate
+integration requirements; a registry contract does not establish any of them.
+
+### CPU/GPU Ownership
+
+Canonical model state, closed-form proposal synthesis, candidate acceptance, edit-graph replay, hashing, and independent CPU reference evaluation remain on CPU `float64`. LoRA/SFT optimization uses a CUDA `float32` training copy when a synchronized kernel probe succeeds. A separate `NF_GPU_PYTHON` interpreter is allowed to perform that gradient work, but every returned checkpoint is copied to CPU `float64` and rescored by the parent before entering a frontier. vLLM qualification independently requires its own executable CUDA probe and never treats driver visibility as GPU readiness.
+
+goal-search --gym KEY` pass a registered `ReusableTaskGym` into the iterative
+`WeightProgrammingStudio.run_goal_search(..., gym=...)` and the `nf-studio goal-search --gym KEY` command pass a registered `ReusableTaskGym` into the iterative
+controller. Public corpus splits are rebuilt to exclude that Gym's task and
+holdout text; the Gym content digest is part of the cycle identity. Search output
+directories must be new or empty and are never silently reused. External GPU
+training leases are process-local cooperative reservations only.
+
+The Python workflow is a local research preview, not native experiment authority:
+it does not issue a native family lease, reserve native budgets, prove sealed
+target custody, or mint a promotion grant. Independent deployment remains
+ineligible until those native witnesses and a genuinely held-out target panel are
+integrated. The runner explicitly records `promotion_authorized: false`.
 ---
 
 ## 2. Product Requirements Traceability (`WP-01`–`WP-24`)
