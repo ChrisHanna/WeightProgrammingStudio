@@ -24,6 +24,22 @@ fn request() -> Value {
         "invocation":{"contract":"frozen-A","epoch":4,"lease_deadline":100,
             "operation":"promotion-A","expected_head":null,"edit":"edit-A","smoke":"smoke-A","runtime":"runtime-A"}})
 }
+// Parallel test subprocesses can briefly inherit open registry locks across fork/exec.
+fn retry_registry_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match operation() {
+            Err(error)
+                if error.code == ErrorCode::PermissionDenied
+                    && error.message == "operator registry busy; revocation/admission did not linearize"
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            result => return result,
+        }
+    }
+}
 #[test]
 fn issuance_resolution_binding_revocation_and_cross_process_lock() {
     let registry = Registry::new();
@@ -190,7 +206,7 @@ fn every_writer_fault_preserves_immutable_provenance_and_burns_published_consump
             let expires = test_expiration();
             let id = hash(&json!({"request":request,"expires_unix_ms":expires})).unwrap();
             if action != "issue" {
-                assert_eq!(issue(&request, expires).unwrap(), id);
+                assert_eq!(retry_registry_busy(|| issue(&request, expires)).unwrap(), id);
             }
             let before = std::fs::read(registry.0.join(name(&id))).ok();
             FAULT.with(|v| *v.borrow_mut() = Some(point));
@@ -203,28 +219,28 @@ fn every_writer_fault_preserves_immutable_provenance_and_burns_published_consump
             assert!(result.is_err(), "{action}/{point}");
             if action == "issue" {
                 if registry.0.join(name(&id)).exists() {
-                    audit(&id, &request).unwrap();
+                    retry_registry_busy(|| audit(&id, &request)).unwrap();
                 } else {
-                    issue(&request, expires).unwrap();
+                    retry_registry_busy(|| issue(&request, expires)).unwrap();
                 }
             } else {
                 assert_eq!(
                     std::fs::read(registry.0.join(name(&id))).unwrap(),
                     before.unwrap()
                 );
-                audit(&id, &request).unwrap();
+                retry_registry_busy(|| audit(&id, &request)).unwrap();
                 if action == "revoke" {
-                    revoke(&id).unwrap();
+                    retry_registry_busy(|| revoke(&id)).unwrap();
                     assert!(verify(&id, &request).is_err());
-                    audit(&id, &request).unwrap();
+                    retry_registry_busy(|| audit(&id, &request)).unwrap();
                 } else if registry.0.join(sidecar(&id, "consumed")).exists() {
                     assert!(
                         consume(&id, &request).is_err(),
                         "published consumption cannot be retried"
                     );
-                    audit_consumed(&id).unwrap();
+                    retry_registry_busy(|| audit_consumed(&id)).unwrap();
                 } else {
-                    drop(consume(&id, &request).unwrap());
+                    drop(retry_registry_busy(|| consume(&id, &request)).unwrap());
                 }
             }
         }
@@ -246,26 +262,26 @@ fn every_writer_fault_preserves_immutable_provenance_and_burns_published_consump
             1,
             "only stable lock may remain"
         );
-        let id = issue(&request, expires).unwrap();
-        audit(&id, &request).unwrap();
+        let id = retry_registry_busy(|| issue(&request, expires)).unwrap();
+        retry_registry_busy(|| audit(&id, &request)).unwrap();
     }
 }
 #[test]
 fn consumption_is_external_one_shot_and_revocation_does_not_destroy_history() {
     let registry = Registry::new();
     let request = request();
-    let id = issue(&request, test_expiration()).unwrap();
+    let id = retry_registry_busy(|| issue(&request, test_expiration())).unwrap();
     assert!(audit_consumed(&id).is_err());
-    let guard = consume(&id, &request).unwrap();
+    let guard = retry_registry_busy(|| consume(&id, &request)).unwrap();
     assert!(consume(&id, &request).is_err());
     assert!(revoke(&id).is_err());
     drop(guard);
-    audit_consumed(&id).unwrap();
+    retry_registry_busy(|| audit_consumed(&id)).unwrap();
     assert!(consume(&id, &request).is_err());
     let original = std::fs::read(registry.0.join(name(&id))).unwrap();
-    revoke(&id).unwrap();
-    audit(&id, &request).unwrap();
-    audit_consumed(&id).unwrap();
+    retry_registry_busy(|| revoke(&id)).unwrap();
+    retry_registry_busy(|| audit(&id, &request)).unwrap();
+    retry_registry_busy(|| audit_consumed(&id)).unwrap();
     assert_eq!(original, std::fs::read(registry.0.join(name(&id))).unwrap());
     assert!(verify(&id, &request).is_err());
 }
