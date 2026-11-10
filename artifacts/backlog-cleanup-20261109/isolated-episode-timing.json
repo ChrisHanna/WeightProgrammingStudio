@@ -254,5 +254,14 @@
     "summary": "2003 passed, 122 skipped, 3 xfailed, 1 failed before the callback annotation",
     "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-3/receipt.json",
     "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-3/stdout.log"
+  },
+  "final_python_suite": {
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 1644.2688557770016,
+    "timed_out": false,
+    "summary": "2003 passed, 122 skipped, 4 xfailed",
+    "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-4/receipt.json",
+    "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-4/stdout.log"
   }
 }
