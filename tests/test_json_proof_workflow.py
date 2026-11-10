@@ -161,9 +161,9 @@ def test_missing_frontier_fails_before_creating_output(tmp_path, monkeypatch) ->
     for name in ("NF_FRONTIER_URL", "NF_FRONTIER_MODEL", "NF_FRONTIER_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     output = tmp_path / "proof"
-    with pytest.raises(GymJobError, match="endpoint"):
+    with pytest.raises(GymJobError, match="credential"):
         json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
-                          frontier_factory=JsonFrontierModel.from_env)
+                          frontier_factory=lambda: JsonFrontierModel.from_env(env_file=tmp_path / "missing.env"))
     assert not output.exists()
 
 
