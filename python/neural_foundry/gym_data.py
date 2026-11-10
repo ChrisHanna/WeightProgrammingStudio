@@ -39,7 +39,7 @@ def _canonical_digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def gym_spec_document(gym: ReusableTaskGym) -> dict[str, Any]:
+def _gym_identity_document(gym: ReusableTaskGym) -> dict[str, Any]:
     prefixes = {
         "train": list(gym.gym_dev_prefixes),
         "validation": list(gym.gym_val_prefixes),
@@ -61,8 +61,16 @@ def gym_spec_document(gym: ReusableTaskGym) -> dict[str, Any]:
     }
 
 
+def gym_spec_document(gym: ReusableTaskGym) -> dict[str, Any]:
+    document = _gym_identity_document(gym)
+    document.pop("holdout_rules")
+    document["prefixes"].pop("holdout")
+    document.pop("selection_retention_guard_prompts")
+    return document
+
+
 def gym_digest(gym: ReusableTaskGym) -> str:
-    return _canonical_digest(gym_spec_document(gym))
+    return _canonical_digest(_gym_identity_document(gym))
 
 
 def _normalize_rules(value: Any, name: str) -> tuple[tuple[str, str], ...]:
@@ -132,8 +140,10 @@ def load_gym_spec(path: str | Path) -> ReusableTaskGym:
         or len({item.strip() for item in skills}) != len(skills)
     ):
         raise GymDataError("skills_taught must be a non-empty list of strings")
-    if not isinstance(prefixes, Mapping) or set(prefixes) != {"train", "validation", "holdout"}:
-        raise GymDataError("prefixes must define train, validation, and holdout lists")
+    if not isinstance(prefixes, Mapping) or set(prefixes) not in (
+        {"train", "validation"}, {"train", "validation", "holdout"}
+    ):
+        raise GymDataError("prefixes must define public train and validation lists, with optional private holdout")
 
     def strings(
         value: Any, name: str, *, required: bool = True, allow_duplicates: bool = False
@@ -166,7 +176,7 @@ def load_gym_spec(path: str | Path) -> ReusableTaskGym:
             prefixes.get("validation"), "prefixes.validation", required=False
         ),
         holdout_prefixes=strings(
-            prefixes.get("holdout"), "prefixes.holdout", required=False, allow_duplicates=True
+            prefixes.get("holdout", []), "prefixes.holdout", required=False, allow_duplicates=True
         ),
         retention_prompts=retention or ReusableTaskGym.__dataclass_fields__["retention_prompts"].default,
         selection_retention_guard_prompts=(

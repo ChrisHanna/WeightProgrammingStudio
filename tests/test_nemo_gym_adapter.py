@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ from neural_foundry.baselines import build_splits
 from neural_foundry.gym_data import (
     GymDataError,
     gym_digest,
+    gym_spec_document,
     load_gym_spec,
     materialize_public_task_data,
 )
@@ -81,7 +83,7 @@ def test_nemo_adapter_registry_declares_capabilities_and_allows_eval_only_tasks(
         registry.load_panels("interactive_tools")
 
 
-def test_nemo_mcqa_panels_feed_identical_wsp_and_lora_data(tmp_path: Path) -> None:
+def test_nemo_mcqa_panels_preserve_public_data_across_spec_export(tmp_path: Path) -> None:
     model = build_mini_pythia_model()
     train = _write_jsonl(
         tmp_path / "train.jsonl",
@@ -98,12 +100,10 @@ def test_nemo_mcqa_panels_feed_identical_wsp_and_lora_data(tmp_path: Path) -> No
 
     panels = load_mcqa_panels(train, validation, holdout, tokenizer=model.tokenizer)
     assert panels.source_manifest()["gym_digest"] == gym_digest(panels.gym)
-    splits = build_splits(panels.gym, (), model=model)
     shared_data = materialize_public_task_data(panels.gym, tokenizer=model.tokenizer)
 
-    assert splits.dev == shared_data.train_items
-    assert splits.val == shared_data.validation_items
-    assert splits.dataset_digest == shared_data.dataset_digest
+    assert len(shared_data.train_items) == 2
+    assert len(shared_data.validation_items) == 2
     assert len(panels.gym.holdout_rules) == 2
     assert panels.source_manifest()["source_panels"]["train"]["sha256"].startswith("sha256:")
     changed_train = _write_jsonl(
@@ -117,8 +117,8 @@ def test_nemo_mcqa_panels_feed_identical_wsp_and_lora_data(tmp_path: Path) -> No
     assert spec_path.is_file()
     reloaded = load_gym_spec(spec_path)
     reloaded_data = materialize_public_task_data(reloaded, tokenizer=model.tokenizer)
-    assert reloaded_data.train_items == splits.dev
-    assert reloaded_data.validation_items == splits.val
+    assert reloaded_data.train_items == shared_data.train_items
+    assert reloaded_data.validation_items == shared_data.validation_items
     with pytest.raises(FileExistsError):
         panels.write_spec(spec_path)
 
@@ -147,6 +147,35 @@ def test_shared_materializer_rejects_prompt_overlap_after_prefix_expansion() -> 
     )
     with pytest.raises(GymDataError, match="materialized prompt.*both train and holdout"):
         materialize_public_task_data(holdout_gym)
+
+
+def test_public_spec_and_nemo_dataset_exclude_private_holdout(tmp_path: Path) -> None:
+    gym = ReusableTaskGym(
+        gym_id="public-export-regression",
+        skills_taught=("multiple_choice_qa",),
+        base_rules=(("public-train", "A"),),
+        validation_rules=(("public-validation", "B"),),
+        gym_dev_prefixes=(), gym_val_prefixes=(),
+        holdout_rules=(("PRIVATE_PROMPT_SENTINEL", "PRIVATE_TARGET_SENTINEL"),),
+        holdout_prefixes=("PRIVATE_PREFIX_SENTINEL",),
+        selection_retention_guard_prompts=("PRIVATE_GUARD_SENTINEL",),
+    )
+    panels = nemo_gym.NeMoMCQAPanels(gym, {}, {}, {}, ())
+    public = gym_spec_document(gym)
+    assert panels.to_spec_document() == public
+    spec = panels.write_spec(tmp_path / "package" / "gym.json")
+    reloaded = load_gym_spec(spec)
+    assert reloaded.holdout_rules == () and reloaded.holdout_prefixes == ()
+    assert gym_digest(gym) != gym_digest(replace(gym, holdout_rules=(("changed-private-prompt", "C"),)))
+    assert "holdout_rules" not in public and "holdout" not in public["prefixes"]
+    assert "selection_retention_guard_prompts" not in public
+    data = materialize_public_task_data(reloaded)
+    _write_jsonl(tmp_path / "package" / "train.jsonl", [
+        {"prompt": prompt, "target": target} for prompt, target in data.train_items
+    ])
+    exported = "\n".join(path.read_text(encoding="utf-8") for path in (tmp_path / "package").iterdir())
+    assert "PRIVATE_" not in exported
+    assert "holdout" not in exported
 
 
 def test_shared_materializer_enforces_text_bound_without_tokenizer() -> None:
@@ -285,6 +314,9 @@ def test_nemo_panels_bind_into_job_spec_with_private_answer_references(tmp_path:
     assert receipt["execution_ready"] is False and receipt["verifier_bound"] is False
     assert row["metadata"]["nf_scorer_digest"] == scorer_digest
     assert "reference" not in row and "expected_answer" not in row
+    exported = output.read_text(encoding="utf-8")
+    assert "holdout" not in exported
+    assert all(prompt not in exported for prompt, _target in panels.gym.holdout_rules)
     with pytest.raises(NeMoGymError, match="public train or validation"):
         nemo_gym.compile_public_nemo_dataset(task, service, split="holdout", seed=5, output_path=tmp_path / "holdout-output.jsonl")
     import os
@@ -337,7 +369,7 @@ def test_studio_cli_generates_simulated_gym_spec_and_provenance(tmp_path: Path) 
     manifest = json.loads((output / "gym.sources.json").read_text(encoding="utf-8"))
     assert len(gym.base_rules) == 4
     assert len(gym.validation_rules) == 2
-    assert len(gym.holdout_rules) == 2
+    assert gym.holdout_rules == ()
     assert manifest["source_metadata"]["kind"] == "deterministic_simulator"
     assert manifest["source_metadata"]["seed"] == 7
 

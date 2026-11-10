@@ -33,3 +33,7 @@ Commit `692801f` adds the versioned Gym lifecycle, NeMo adapters, format convers
 `NeMoMCQAPanels.write_spec()` in [nemo_gym.py](../python/neural_foundry/nemo_gym.py) writes `to_spec_document()`, which calls `gym_spec_document()` in [gym_data.py](../python/neural_foundry/gym_data.py). That document includes every `holdout_rules` prompt and target. The CLI's `import-nemo-panels` path writes this spec, and [test_nemo_gym_adapter.py](../tests/test_nemo_gym_adapter.py) reloads the exported file. Therefore private holdout answers can leave the NeMo panel boundary even though public materialization rejects holdout. Do not use this export path with sealed holdout data until it is changed and covered by a regression test.
 
 The protocol's holdout-custody language is a policy boundary, not evidence that the exported panel is isolated. The script's receipts also do not attest that a remote endpoint served the recorded checkpoint bytes.
+
+## Export Remediation
+
+The public `gym_spec_document()` now omits holdout rules, holdout prefixes, and selection guard prompts. `write_spec()` uses that public document; public-only specs reload with empty holdout data. The separate private identity document still binds all private fields in `gym_digest()`. Regressions check synthetic sentinel exclusion, private digest sensitivity, CLI round trips, and the actual public NeMo compiler output. Previously exported copies are not made secret by this fix and must not be used as sealed evidence.
