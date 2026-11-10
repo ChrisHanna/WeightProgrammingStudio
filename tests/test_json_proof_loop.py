@@ -78,3 +78,16 @@ def test_weight_edit_arm_uses_common_holdout_and_reports_preservation_regression
     assert report["scorecards"]["weight_edit"]["value"] == 1.0
     assert report["scorecards"]["weight_edit"]["newly_broken_cases"] == 1
     assert report["scorecards"]["sft"]["newly_broken_cases"] == 0
+
+def test_public_validation_allows_base_sft_frontier_without_weight_edit() -> None:
+    task = reference_task(rows_per_template=1)
+    rows = generate_scenarios(split="validation", seed=31, parameters={"rows_per_template": 1})
+    required = json_proof_loop.public_required_rows(seed=31)
+    correct = [row["reference"] for row in [*rows, *required]]
+    models = {role: _factory(list(correct)) for role in ("base", "sft", "frontier")}
+    report = json_proof_loop.compare_public_validation(task, seed=31, models=models)
+    assert report["complete"] is True
+    assert set(report["scorecards"]) == {"base", "sft", "frontier"}
+    assert report["holdout_accessed"] is False
+    assert report["release_authorized"] is False
+

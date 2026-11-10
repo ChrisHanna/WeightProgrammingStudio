@@ -75,7 +75,11 @@ def specialist_acceptance(task_score: Mapping[str, Any], required: Mapping[str, 
 
 
 def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[str, Callable]) -> dict[str, Any]:
-    if set(models) not in ({"base", "sft", "weight_edit"}, {"base", "sft", "weight_edit", "frontier"}):
+    if set(models) not in (
+        {"base", "sft", "frontier"},
+        {"base", "sft", "weight_edit"},
+        {"base", "sft", "weight_edit", "frontier"},
+    ):
         raise GymJobError("specialist comparison requires the complete declared roster")
     rows = generate_scenarios(split="validation", seed=seed, parameters=task.job.scenario_sources[0].parameters)
     required = public_required_rows(seed=seed)
