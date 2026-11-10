@@ -1,0 +1,14 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_episode_callback_returns_are_immutable_wire_values ____________
+tests/test_gym_reference_episode.py:226: in test_episode_callback_returns_are_immutable_wire_values
+    report = audit(gym, plan, sandbox, policies[:1], ["valid"])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_gym_reference_episode.py:57: in audit
+    handle = run_reference_audit(gym, json.dumps(plan), policies,
+python/neural_foundry/gym_scientist.py:362: in run_reference_audit
+    return _native.run_gym_reference_audit(
+E   neural_foundry._native.NativeError: sandbox authority expired; preflight_timing_ns={"binding_decode_ns":323885,"request_validation_ns":4172330,"snapshot_restore_ns":1621169,"coverage_parse_ns":289875,"docker_qualification_ns":1247380698,"before_audit_ns":1253796075,"audit_preflight_ns":12357434}; timed_audit_elapsed_ns=7596784523
+=========================== short test summary info ============================
+FAILED tests/test_gym_reference_episode.py::test_episode_callback_returns_are_immutable_wire_values
+1 failed in 9.39s

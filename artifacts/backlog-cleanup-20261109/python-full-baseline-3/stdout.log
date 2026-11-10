@@ -1,0 +1,116 @@
+........................................................................ [  3%]
+........................................................................ [  6%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 16%]
+........................................................................ [ 20%]
+........................................................................ [ 23%]
+........................................................................ [ 27%]
+.........sss............................................................ [ 30%]
+.................ss..................................................... [ 33%]
+................................s..............s........................ [ 37%]
+........................................................................ [ 40%]
+............................................sssssssss................... [ 43%]
+.............xx....................x.F.................................. [ 47%]
+..............................s......................................... [ 50%]
+........................s.sssssssssssssssssssssssssssssssssssssssss..... [ 54%]
+....s..........ss....................................................... [ 57%]
+........................................................................ [ 60%]
+........................................................................ [ 64%]
+.......s.....sssss....ssss....sss.s.s.s.s.s.s.s.s....................... [ 67%]
+........................s............................................... [ 71%]
+............sss....s.......ss.....s..................................... [ 74%]
+........................................................................ [ 77%]
+s.s.........................................................ssssssssss.. [ 81%]
+.............................................................sssssss.... [ 84%]
+ss....................................................................s. [ 87%]
+........................................................................ [ 91%]
+..........s.......................................................sss... [ 94%]
+..s..................................................................... [ 98%]
+..s....................sss...............                                [100%]
+=================================== FAILURES ===================================
+___________ test_episode_callback_returns_are_immutable_wire_values ____________
+tests/test_gym_reference_episode.py:226: in test_episode_callback_returns_are_immutable_wire_values
+    report = audit(gym, plan, sandbox, policies[:1], ["valid"])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_gym_reference_episode.py:57: in audit
+    handle = run_reference_audit(gym, json.dumps(plan), policies,
+python/neural_foundry/gym_scientist.py:362: in run_reference_audit
+    return _native.run_gym_reference_audit(
+E   neural_foundry._native.NativeError: sandbox authority expired; preflight_timing_ns={"binding_decode_ns":22049,"request_validation_ns":211622,"snapshot_restore_ns":1084304,"coverage_parse_ns":940,"docker_qualification_ns":1240988441,"before_audit_ns":1242313452,"audit_preflight_ns":8951217}; timed_audit_elapsed_ns=7324530913
+=========================== short test summary info ============================
+FAILED tests/test_gym_reference_episode.py::test_episode_callback_returns_are_immutable_wire_values
+SKIPPED [3] tests/test_automodel_backend.py:36: set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_AUTOMODEL_LIVE=1
+SKIPPED [2] tests/test_edit_plan.py:267: Needs Pythia-14M at /tmp/pythia-14m/model.safetensors, which is absent
+SKIPPED [1] tests/test_gguf_format.py:236: checkpoint not found at /tmp/pythia-14m
+SKIPPED [1] tests/test_gguf_format.py:360: checkpoint not found at /tmp/pythia-14m
+SKIPPED [3] tests/test_gym_job.py:1052: set NF_AUTOMODEL_PYTHON, NF_AUTOMODEL_BASE_PATH and NF_AUTOMODEL_LIVE=1
+SKIPPED [3] tests/test_gym_job.py:1117: set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_AUTOMODEL_LIVE=1
+SKIPPED [3] tests/test_gym_job.py:1170: set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_AUTOMODEL_LIVE=1
+SKIPPED [1] tests/test_gym_selection.py:152: checkpoint not present at /tmp/pythia-14m
+SKIPPED [1] tests/test_independent_eval.py:365: Pythia-14M checkpoint is not available
+SKIPPED [1] tests/test_inference_reference.py:411: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:420: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [5] tests/test_inference_reference.py:429: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [5] tests/test_inference_reference.py:434: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:439: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:445: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:449: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [2] tests/test_inference_reference.py:468: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:490: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:496: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:502: pythia-14m checkpoint not found: /tmp/pythia-14m/config.json is missing; set NF_PYTHIA_14M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:411: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:420: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [5] tests/test_inference_reference.py:429: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [5] tests/test_inference_reference.py:434: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:439: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:445: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:449: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [2] tests/test_inference_reference.py:468: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:490: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:496: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:502: pythia-31m checkpoint not found: /tmp/pythia-31m/config.json is missing; set NF_PYTHIA_31M_DIR (see module docstring)
+SKIPPED [1] tests/test_inference_reference.py:63: no checkpoint was measured
+SKIPPED [1] tests/test_json_model_adapters.py:130: set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_AUTOMODEL_LIVE=1
+SKIPPED [1] tests/test_json_proof_workflow.py:220: set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_JSON_PROOF_LIVE=1
+SKIPPED [1] tests/test_json_proof_workflow.py:232: set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_JSON_PROOF_LOCAL_LIVE=1
+SKIPPED [17] tests/test_method_replay.py:31: real Pythia-14M checkpoint not at /tmp/pythia-14m
+SKIPPED [1] tests/test_method_replay.py:440: CUDA is not available in this environment
+SKIPPED [1] tests/test_method_replay.py:456: CUDA is not available in this environment
+SKIPPED [2] tests/test_method_replay.py:477: CUDA is not available in this environment
+SKIPPED [1] tests/test_milestone1.py:518: Needs Pythia-14M at /tmp/pythia-14m
+SKIPPED [3] tests/test_nemo_gym_adapter.py:981: set NF_NEMO_GYM_PYTHON to a NeMo Gym 0.7.0 interpreter
+SKIPPED [1] tests/test_nemo_gym_adapter.py:1160: set NF_NEMO_GYM_PYTHON and NF_NEMO_GYM_LIVE=1 for the real server test
+SKIPPED [1] tests/test_nemo_json_compiler.py:59: set NF_NEMO_GYM_PYTHON to the pinned NeMo Gym interpreter
+SKIPPED [1] tests/test_nemo_json_resource_server.py:18: set NF_NEMO_GYM_PYTHON to the pinned NeMo Gym interpreter
+SKIPPED [1] tests/test_nemo_rollout_rendering.py:13: set NF_NEMO_GYM_PYTHON to the pinned NeMo interpreter
+SKIPPED [1] tests/test_pythia_edit.py:33: checkpoint not present at /tmp/pythia-14m
+SKIPPED [1] tests/test_pythia_edit.py:71: checkpoint not present at /tmp/pythia-14m
+SKIPPED [1] tests/test_real_runtimes.py:71: checkpoint pythia-14m not found; set NF_PYTHIA_DIRS
+SKIPPED [1] tests/test_real_runtimes.py:71: checkpoint pythia-31m not found; set NF_PYTHIA_DIRS
+SKIPPED [1] tests/test_real_runtimes.py:75: checkpoint pythia-14m not found; set NF_PYTHIA_DIRS
+SKIPPED [1] tests/test_real_runtimes.py:75: checkpoint pythia-31m not found; set NF_PYTHIA_DIRS
+SKIPPED [1] tests/test_real_runtimes.py:85: checkpoint pythia-14m not found; set NF_PYTHIA_DIRS
+SKIPPED [1] tests/test_real_runtimes.py:85: checkpoint pythia-31m not found; set NF_PYTHIA_DIRS
+SKIPPED [1] tests/test_real_runtimes.py:29: llama.cpp is not installed; set NF_LLAMA_CLI
+SKIPPED [1] tests/test_real_runtimes.py:29: vllm is not installed
+SKIPPED [2] tests/test_real_runtimes.py:29: set NF_VLLM_PYTHON to an interpreter with vLLM installed
+SKIPPED [1] tests/test_retention_multisite.py:75: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:84: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:92: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:101: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:109: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:115: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:125: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:187: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_retention_multisite.py:207: needs the Pythia-14M checkpoint
+SKIPPED [1] tests/test_study_controls.py:291: needs a Pythia-14M checkpoint
+SKIPPED [1] tests/test_study_harness.py:694: needs a Pythia-14M checkpoint
+SKIPPED [1] tests/test_vllm_container_adapter.py:147: set NF_VLLM_LIVE=1 for the GPU container smoke test
+SKIPPED [1] tests/test_vllm_container_adapter.py:167: set NF_VLLM_SFT_ARTIFACT to a published full SFT candidate
+SKIPPED [1] tests/test_vllm_container_adapter.py:186: set NF_VLLM_DIAGNOSTIC=1 for the isolated startup probe
+SKIPPED [1] tests/test_weight_edit_apply.py:98: fixture has no tied storage
+SKIPPED [1] tests/test_weight_edit_loader.py:260: set NF_WEIGHT_EDIT_LIVE=1 for the cached Qwen CUDA check
+SKIPPED [3] tests/test_weight_edit_probe.py:74: set NF_WEIGHT_EDIT_PROBE_LIVE=1 for cached GPU compatibility probes
+1 failed, 2003 passed, 122 skipped, 3 xfailed in 1651.89s (0:27:31)

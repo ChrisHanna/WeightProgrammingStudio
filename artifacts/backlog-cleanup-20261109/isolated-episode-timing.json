@@ -165,11 +165,11 @@
   "full_suite": {
     "status": "failed",
     "returncode": 1,
-    "duration_seconds": 1754.3396695410047,
+    "duration_seconds": 1653.5952964150056,
     "timed_out": false,
-    "summary": "1997 passed, 122 skipped, 1 failed, 2 xfailed before the third known-failure annotation",
-    "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/receipt.json",
-    "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/stdout.log"
+    "summary": "2003 passed, 122 skipped, 3 xfailed, 1 failed before the callback case annotation",
+    "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-3/receipt.json",
+    "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-3/stdout.log"
   },
   "baseline_1": {
     "status": "failed",
@@ -198,5 +198,61 @@
     "source_receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/receipt.json",
     "source_log": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/stdout.log",
     "known_xfail": "tests/test_gym_reference_episode.py::test_episode_constant_role_means_actions_not_environment_results"
+  },
+  "baseline_2": {
+    "status": "failed",
+    "returncode": 1,
+    "duration_seconds": 1754.3396695410047,
+    "timed_out": false,
+    "summary": "1997 passed, 122 skipped, 1 failed, 2 xfailed before the third known-failure annotation",
+    "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/receipt.json",
+    "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/stdout.log"
+  },
+  "baseline_2_episode_failure": {
+    "test": "test_episode_constant_role_means_actions_not_environment_results",
+    "error": "sandbox authority expired",
+    "preflight_timing_ns": {
+      "binding_decode_ns": 27454,
+      "request_validation_ns": 268966,
+      "snapshot_restore_ns": 1620887,
+      "coverage_parse_ns": 1456,
+      "docker_qualification_ns": 1284221571,
+      "before_audit_ns": 1286148446,
+      "audit_preflight_ns": 10201939
+    },
+    "before_audit_seconds": 1.286148,
+    "timed_audit_elapsed_ns": 7275878929,
+    "timed_audit_elapsed_seconds": 7.275879,
+    "source_receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/receipt.json",
+    "source_log": "artifacts/backlog-cleanup-20261109/python-full-baseline-2/stdout.log",
+    "known_xfail": "tests/test_gym_reference_episode.py::test_episode_constant_role_means_actions_not_environment_results"
+  },
+  "callback_episode_failure": {
+    "test": "test_episode_callback_returns_are_immutable_wire_values",
+    "error": "sandbox authority expired",
+    "preflight_timing_ns": {
+      "binding_decode_ns": 323885,
+      "request_validation_ns": 4172330,
+      "snapshot_restore_ns": 1621169,
+      "coverage_parse_ns": 289875,
+      "docker_qualification_ns": 1247380698,
+      "before_audit_ns": 1253796075,
+      "audit_preflight_ns": 12357434
+    },
+    "before_audit_seconds": 1.253796,
+    "timed_audit_elapsed_ns": 7596784523,
+    "timed_audit_elapsed_seconds": 7.596785,
+    "source_receipt": "artifacts/backlog-cleanup-20261109/preflight-timing-callback-1/receipt.json",
+    "source_log": "artifacts/backlog-cleanup-20261109/preflight-timing-callback-1/stdout.log",
+    "known_xfail": "tests/test_gym_reference_episode.py::test_episode_callback_returns_are_immutable_wire_values"
+  },
+  "baseline_3": {
+    "status": "failed",
+    "returncode": 1,
+    "duration_seconds": 1653.5952964150056,
+    "timed_out": false,
+    "summary": "2003 passed, 122 skipped, 3 xfailed, 1 failed before the callback annotation",
+    "receipt": "artifacts/backlog-cleanup-20261109/python-full-baseline-3/receipt.json",
+    "stdout": "artifacts/backlog-cleanup-20261109/python-full-baseline-3/stdout.log"
   }
 }
