@@ -10,6 +10,8 @@ mod authority_service_tests;
 mod fixture;
 #[path = "supplied_tests.rs"]
 mod supplied_tests;
+const REGISTRY_CRASH_CHILD_ENV: &str = "NF_TEST_REGISTRY_CRASH_CHILD";
+const SUPPLIED_IR_CHILD_ENV: &str = "NF_TEST_SUPPLIED_IR_CHILD";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Setup {
     root: PathBuf,
@@ -98,6 +100,41 @@ impl Drop for Setup {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+fn assert_child_entry_returns_with_open_stdin(test_name: &str, child_env: &str) {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--test-threads=1"])
+        .env_remove(child_env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _open_stdin = child.stdin.take().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "child entry test failed: {status}");
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            panic!("child entry blocked on open stdin: {status}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+#[test]
+fn child_entry_tests_return_without_child_marker_when_stdin_is_open() {
+    assert_child_entry_returns_with_open_stdin(
+        "manual_workflow::authorization::tests::authority_service_tests::registry_crash_child_entry",
+        REGISTRY_CRASH_CHILD_ENV,
+    );
+    assert_child_entry_returns_with_open_stdin(
+        "manual_workflow::authorization::tests::supplied_tests::supplied_ir_child_entry",
+        SUPPLIED_IR_CHILD_ENV,
+    );
 }
 #[test]
 fn manual_workflow_trusted_authority_dispatches_real_local_fixture_and_retains_costs() {

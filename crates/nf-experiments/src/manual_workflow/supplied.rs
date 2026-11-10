@@ -178,6 +178,7 @@ pub(super) fn launch(
         contract,
         cancel,
         &["study", "execute-supplied", "-"],
+        &[],
         |bytes| decode(bytes),
     )
 }
@@ -187,6 +188,7 @@ fn launch_with(
     contract: &Validated<StudyContract>,
     cancel: &CancellationToken,
     arguments: &[&str],
+    child_environment: &[(&str, &str)],
     response: impl FnOnce(&[u8]) -> Result<Value>,
 ) -> Result<Value> {
     cancel.check()?;
@@ -209,6 +211,7 @@ fn launch_with(
     command
         .args(arguments)
         .env_clear()
+        .envs(child_environment.iter().copied())
         .current_dir("/")
         .stdin(Stdio::from(input))
         .stdout(Stdio::piped())
@@ -359,6 +362,7 @@ pub(super) fn launch_test_with_cancel(
             "--nocapture",
             "--test-threads=1",
         ],
+        &[("NF_TEST_SUPPLIED_IR_CHILD", "1")],
         |bytes| {
             let text = std::str::from_utf8(bytes).map_err(|_| mismatch())?;
             let line = text

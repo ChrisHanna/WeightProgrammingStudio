@@ -17,6 +17,9 @@ fn install(s: &mut Setup, issue: &Value) -> ContentDigest {
 }
 #[test]
 fn registry_crash_child_entry() {
+    if std::env::var_os(REGISTRY_CRASH_CHILD_ENV).is_none() {
+        return;
+    }
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes).unwrap();
     if bytes.is_empty() {
@@ -53,7 +56,7 @@ fn registry_crash_child_entry() {
 fn registry_actual_process_crashes_leave_staging_inert_and_consumption_monotonic() {
     fn crash(s: &Setup, operation: &str, request: &Value, point: &str) {
         use std::process::{Command, Stdio};
-        let mut child = Command::new(std::env::current_exe().unwrap()).args(["--exact",
+        let mut child = Command::new(std::env::current_exe().unwrap()).env(REGISTRY_CRASH_CHILD_ENV, "1").args(["--exact",
             "manual_workflow::authorization::tests::authority_service_tests::registry_crash_child_entry", "--test-threads=1"])
             .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         child

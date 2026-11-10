@@ -216,6 +216,9 @@ fn authorize_until(s: &mut Setup, planned: &Value, expires: u64) -> Grant {
 }
 #[test]
 fn supplied_ir_child_entry() {
+    if std::env::var_os(SUPPLIED_IR_CHILD_ENV).is_none() {
+        return;
+    }
     // Test-only IPC adapter: no test authority selector exists in production.
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes).unwrap();
