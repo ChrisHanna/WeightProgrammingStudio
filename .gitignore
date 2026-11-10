@@ -1,4 +1,5 @@
 /.venv/
+/.env
 /target/
 /dist/
 /.pytest_cache/
