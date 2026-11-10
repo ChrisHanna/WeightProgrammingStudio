@@ -5,14 +5,51 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shlex
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .gym_job import GymJobError
 from .gym_service import ExecutionResponse
 from .provenance import parse_strict_json
+
+OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+_FRONTIER_ENV_NAMES = frozenset({
+    "NF_FRONTIER_URL", "NF_FRONTIER_MODEL", "NF_FRONTIER_API_KEY", "OPENAI_API_KEY",
+})
+
+
+def _frontier_environment(env_file: str | os.PathLike[str] | None = None) -> dict[str, str]:
+    values = {name: os.environ[name] for name in _FRONTIER_ENV_NAMES if os.environ.get(name)}
+    path = Path(env_file) if env_file is not None else Path(__file__).resolve().parents[2] / ".env"
+    if not path.is_file():
+        return values
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        raise GymJobError("frontier environment file could not be read") from exc
+    for line_number, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, separator, raw_value = line.partition("=")
+        name = name.strip()
+        if not separator or name not in _FRONTIER_ENV_NAMES or name in values:
+            continue
+        try:
+            parsed = shlex.split(raw_value, comments=True, posix=True)
+        except ValueError as exc:
+            raise GymJobError(f"frontier environment syntax is invalid at line {line_number}") from exc
+        if len(parsed) > 1:
+            raise GymJobError(f"frontier environment syntax is invalid at line {line_number}")
+        values[name] = parsed[0] if parsed else ""
+    return values
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -38,9 +75,13 @@ class JsonFrontierModel:
         self._host, self._max_new_tokens = parsed.hostname, max_new_tokens
 
     @classmethod
-    def from_env(cls) -> JsonFrontierModel:
-        return cls(endpoint=os.environ.get("NF_FRONTIER_URL", ""), model=os.environ.get("NF_FRONTIER_MODEL", ""),
-                   api_key=os.environ.get("NF_FRONTIER_API_KEY", ""))
+    def from_env(cls, *, env_file: str | os.PathLike[str] | None = None) -> JsonFrontierModel:
+        values = _frontier_environment(env_file)
+        return cls(
+            endpoint=values.get("NF_FRONTIER_URL") or OPENAI_CHAT_COMPLETIONS_URL,
+            model=values.get("NF_FRONTIER_MODEL") or OPENAI_DEFAULT_MODEL,
+            api_key=values.get("NF_FRONTIER_API_KEY") or values.get("OPENAI_API_KEY", ""),
+        )
 
     def __enter__(self) -> JsonFrontierModel:
         return self

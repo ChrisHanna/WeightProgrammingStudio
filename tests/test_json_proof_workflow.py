@@ -61,6 +61,33 @@ def _failure_report(tmp_path: Path, *, rows_per_template: int = 1, seed: int = 1
     return path
 
 
+def test_frontier_env_file_reads_allowlisted_names_without_exposing_key(tmp_path: Path, monkeypatch) -> None:
+    from neural_foundry.json_frontier_model import (
+        OPENAI_CHAT_COMPLETIONS_URL,
+        OPENAI_DEFAULT_MODEL,
+        JsonFrontierModel,
+    )
+
+    secret = "test-only-key-value"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"OPENAI_API_KEY='{secret}'\nNF_FRONTIER_MODEL=gpt-4.1-mini\nUNRELATED=value\n",
+        encoding="utf-8",
+    )
+    for name in ("OPENAI_API_KEY", "NF_FRONTIER_API_KEY", "NF_FRONTIER_URL", "NF_FRONTIER_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+    frontier = JsonFrontierModel.from_env(env_file=env_file)
+
+    assert frontier._endpoint == OPENAI_CHAT_COMPLETIONS_URL
+    assert frontier.loaded_identity()["provider_reported_model"] == "gpt-4.1-mini"
+    assert secret not in json.dumps(frontier.loaded_identity())
+    assert OPENAI_DEFAULT_MODEL == "gpt-4o-mini"
+    monkeypatch.setenv("NF_FRONTIER_MODEL", "gpt-4.1-nano")
+    overridden = JsonFrontierModel.from_env(env_file=env_file)
+    assert overridden.loaded_identity()["provider_reported_model"] == "gpt-4.1-nano"
+
+
 def test_weight_edit_preservation_panel_respects_backend_limit() -> None:
     from neural_foundry.json_proof_train_worker import bound_preservation_panel
 
