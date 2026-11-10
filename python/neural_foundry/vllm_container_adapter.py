@@ -186,6 +186,7 @@ class VllmCandidateServer:
                     "model_family": reference.family, "device": "cuda:0", "precision": self.precision,
                     "mounted_files_verified": True, "local_loaded_files_verified": False,
                     "served_model_identity_verified": self._identity_verified, "artifact_digest": reference.artifact_digest,
+                    "model_digest": reference.model_digest,
                     "prompt_renderer_digest": renderer.digest,
                     "identity_probe_evidence": dict(self._identity_evidence),
                     "config_digest": files["config.json"], "tokenizer_digest": files["tokenizer.json"]}
@@ -199,6 +200,11 @@ class VllmCandidateServer:
                 return
             observed = self.record_identity_probes()
             self._identity_evidence = verify_identity(probe_record, observed)
+            if observed["model_digest"] != reference.model_digest:
+                raise GymJobError("identity probes differ from the candidate weights digest")
+            self._identity_evidence.update({"model_digest": observed["model_digest"],
+                "expected_record": probe_record, "observed_record": observed})
+            self._identity_evidence["evidence_digest"] = _document_digest(self._identity_evidence)
             self._identity_verified = True
 
         def infer(interaction: Mapping[str, Any]) -> ExecutionResponse:

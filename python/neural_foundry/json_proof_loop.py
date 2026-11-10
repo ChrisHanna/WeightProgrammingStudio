@@ -74,6 +74,60 @@ def specialist_acceptance(task_score: Mapping[str, Any], required: Mapping[str, 
             "generalist_authorized": False, "release_authorized": False}
 
 
+def _stub_model_identity(identity: Any) -> bool:
+    if not isinstance(identity, Mapping):
+        return True
+    stub_flags = {"stub", "is_stub", "test_stub", "fixture", "is_fixture", "fake", "is_fake", "mock", "is_mock"}
+    label_fields = {"provider", "model", "model_id", "model_name", "model_type", "type", "kind", "label", "identity_type", "source", "implementation"}
+    markers = {"stub", "fake", "mock"}
+    for key, value in identity.items():
+        field = str(key).casefold().replace("-", "_")
+        if field in stub_flags and value is True:
+            return True
+        if field in label_fields and isinstance(value, str):
+            tokens = set(value.casefold().replace("-", " ").replace("_", " ").replace("/", " ").split())
+            if tokens & markers:
+                return True
+        if isinstance(value, Mapping) and _stub_model_identity(value):
+            return True
+        if isinstance(value, (list, tuple)) and any(_stub_model_identity(item) for item in value if isinstance(item, Mapping)):
+            return True
+    return False
+
+
+def _require_model_evidence(model: Any, role: str) -> None:
+    from .json_frontier_model import JsonFrontierModel
+    from .gym_lifecycle import ModelAdapter
+    from .backends.weight_edit.serving_probes import verify_identity
+
+    identity = model.loaded_identity()
+    if _stub_model_identity(identity):
+        raise GymJobError("stub model identity is not eligible")
+    if role == "frontier":
+        if type(model) is not JsonFrontierModel:
+            raise GymJobError("frontier requires the approved API client and response receipts")
+        model.require_proof_configuration()
+        return
+    if type(model) is not ModelAdapter or model.reference is None:
+        raise GymJobError("served model requires a candidate-bound vLLM identity probe")
+    evidence = identity.get("identity_probe_evidence")
+    if (identity.get("served_model_identity_verified") is not True or not isinstance(evidence, Mapping)
+        or evidence.get("verified") is not True or evidence.get("model_digest") != model.reference.model_digest
+        or identity.get("model_digest") != model.reference.model_digest
+        or evidence.get("evidence_digest") != _document_digest({key: value for key, value in evidence.items() if key != "evidence_digest"})):
+        raise GymJobError("served model lacks verified candidate weights evidence")
+    expected, observed = evidence.get("expected_record"), evidence.get("observed_record")
+    if (not isinstance(expected, Mapping) or not isinstance(observed, Mapping)
+        or observed.get("model_digest") != model.reference.model_digest):
+        raise GymJobError("served model identity probe records are missing or foreign")
+    verify_identity(expected, observed)
+
+
+def _require_response_evidence(model: Any, interaction: Mapping[str, Any], result: Any, role: str) -> None:
+    if role == "frontier":
+        model.verify_response_receipt(interaction, result)
+
+
 def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[str, Callable]) -> dict[str, Any]:
     if set(models) not in (
         {"base", "sft", "frontier"},
@@ -90,8 +144,12 @@ def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[s
     for role, factory in models.items():
         try:
             with factory() as model:
+                _require_model_evidence(model, role)
                 task_score = score_public_rows(task, model, rows)
                 required_score = score_public_rows(task, model, required)
+                for row, record in zip([*rows, *required], [*task_score["responses"], *required_score["responses"]], strict=True):
+                    _require_response_evidence(model, task.project(row["input"], None),
+                        ExecutionResponse(record["response"], record["execution_evidence"] or {}), role)
                 cards[role] = {"task": task_score, "required_set": required_score}
         except Exception as exc:
             return {**report, "failure": {"stage": role, "reason": str(exc)}}
@@ -138,20 +196,27 @@ def compare_synthetic_holdout(
     for role in roles:
         try:
             with models[role]() as model:
+                _require_model_evidence(model, role)
                 identity = model.loaded_identity()
                 if not isinstance(identity, Mapping):
                     raise GymJobError("model identity must be a mapping")
-                identities[role] = dict(identity)
+                if _stub_model_identity(identity):
+                    return {**report, "failure": {"stage": role, "reason": "stub model identity is not eligible"}}
                 outputs = []
                 for row in rows:
-                    result = model.infer(task.project(row["input"], None))
+                    interaction = task.project(row["input"], None)
+                    result = model.infer(interaction)
+                    _require_response_evidence(model, interaction, result, role)
                     outputs.append(result.response if isinstance(result, ExecutionResponse) else result)
                 responses[role] = outputs
                 preserved = []
                 for row in preservation:
-                    result = model.infer(task.project(row["input"], None))
+                    interaction = task.project(row["input"], None)
+                    result = model.infer(interaction)
+                    _require_response_evidence(model, interaction, result, role)
                     preserved.append(result.response if isinstance(result, ExecutionResponse) else result)
                 preserved_responses[role] = preserved
+                identities[role] = dict(model.loaded_identity())
         except Exception as exc:
             return {**report, "failure": {"stage": role, "reason": type(exc).__name__}}
     scorecards = {}

@@ -82,7 +82,7 @@ def test_frontier_env_file_reads_allowlisted_names_without_exposing_key(tmp_path
     assert frontier._endpoint == OPENAI_CHAT_COMPLETIONS_URL
     assert frontier.loaded_identity()["provider_reported_model"] == "gpt-4.1-mini"
     assert secret not in json.dumps(frontier.loaded_identity())
-    assert OPENAI_DEFAULT_MODEL == "gpt-4o-mini"
+    assert OPENAI_DEFAULT_MODEL == "gpt-4o-mini-2024-07-18"
     monkeypatch.setenv("NF_FRONTIER_MODEL", "gpt-4.1-nano")
     overridden = JsonFrontierModel.from_env(env_file=env_file)
     assert overridden.loaded_identity()["provider_reported_model"] == "gpt-4.1-nano"
@@ -135,25 +135,30 @@ def test_workflow_compiles_trains_and_compares_without_exposing_credentials(tmp_
 
     monkeypatch.setattr(json_proof_workflow, "run_local_worker", train)
     monkeypatch.setattr(json_proof_workflow, "VllmCandidateServer", lambda *args, **kwargs: _FakeModel())
+    def forbidden_holdout(*args, **kwargs):
+        raise AssertionError("holdout must wait for a complete public validation comparison")
+    monkeypatch.setattr(json_proof_workflow, "compare_synthetic_holdout", forbidden_holdout)
     output = tmp_path / "proof"
     report = json_proof_workflow.run_json_proof(output, gpu_python=sys.executable, automodel_python=sys.executable,
                                                  rows_per_template=1, frontier_factory=lambda: _FakeModel(),
                                                  base_failure_report_path=failure_report)
-    assert report["complete"] is True and report["comparison"]["scenario_count"] == 2
+    assert report["complete"] is False
+    assert report["public_validation_comparison"]["failure"] == {
+        "stage": "base", "reason": "stub model identity is not eligible"
+    }
+    assert report["comparison"] is None and report["holdout_accessed"] is False
     assert report["scorer_audit"]["passed"] is True
     assert report["scorer_audit"]["cases"] == 3 * (len(TEMPLATES["train"]) + len(TEMPLATES["validation"]))
-    assert all(card["value"] == 0 for card in report["comparison"]["scorecards"].values())
     assert not list(output.glob("nemo_*/resources_servers/nf_json_extraction/data/holdout.jsonl"))
     assert json.loads((output / "report.json").read_text()) == report
     assert "private-token" not in json.dumps(report)
     assert report["release_authorized"] is False
-    assert set(report["comparison"]["scorecards"]) == {"base", "sft", "weight_edit", "frontier"}
-    assert all(card["newly_broken_cases"] == 0 for card in report["comparison"]["scorecards"].values())
     second = json_proof_workflow.run_json_proof(tmp_path / "local-proof", gpu_python=sys.executable,
                                                 automodel_python=sys.executable, rows_per_template=1,
                                                 base_failure_report_path=failure_report)
     assert second["frontier_configured"] is False
-    assert set(second["comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
+    assert second["public_validation_comparison"]["failure"]["stage"] == "base"
+    assert second["holdout_accessed"] is False
 
 
 def test_missing_frontier_fails_before_creating_output(tmp_path, monkeypatch) -> None:
@@ -193,13 +198,11 @@ def test_specialist_reports_three_arms_but_blocks_holdout_on_required_set_failur
     report = json_proof_workflow.run_json_proof(tmp_path / "specialist", gpu_python=sys.executable,
                     automodel_python=sys.executable, rows_per_template=1, retention_mode="specialist",
                     base_failure_report_path=failure_report)
-    assert report["complete"] and report["public_validation_comparison"]["complete"]
-    assert set(report["public_validation_comparison"]["scorecards"]) == {"base", "sft", "weight_edit"}
+    assert report["complete"] is False
+    assert report["public_validation_comparison"]["complete"] is False
+    assert report["public_validation_comparison"]["failure"]["stage"] == "base"
     assert report["comparison"] is None and not report["holdout_accessed"] and not report["specialist_gate_passed"]
     assert report["preservation"] == {"passed": False} and not report["preservation_gating"]
-    acceptance = report["public_validation_comparison"]["scorecards"]["weight_edit"]["acceptance"]
-    assert acceptance["policy_version"] == 2 and acceptance["policy_status"] == "approved_frozen"
-    assert "confidence_interval_lower_bound" in acceptance["checks"]
 
 
 def test_retained_failed_public_recipes_do_not_claim_holdout_scores():
@@ -247,9 +250,11 @@ def test_real_gpu_workflow_with_explicit_frontier_stub(tmp_path) -> None:
         pytest.skip("set NF_GPU_PYTHON, NF_AUTOMODEL_PYTHON and NF_JSON_PROOF_LIVE=1")
     report = json_proof_workflow.run_json_proof(tmp_path / "proof", gpu_python=gpu_python,
                                                automodel_python=automodel_python, frontier_factory=lambda: _FakeModel())
-    assert report["complete"] is True, report["comparison"].get("failure")
-    assert report["comparison"]["scorecards"]["frontier"]["model_identity"]["fixture"] is True
-    assert report["comparison"]["served_model_identity_verified"] is False
+    assert report["complete"] is False
+    assert report["public_validation_comparison"]["failure"] == {
+        "stage": "frontier", "reason": "stub model identity is not eligible"
+    }
+    assert report["comparison"] is None and report["holdout_accessed"] is False
 
 
 def test_real_gpu_local_three_way_weight_edit_proof(tmp_path) -> None:
