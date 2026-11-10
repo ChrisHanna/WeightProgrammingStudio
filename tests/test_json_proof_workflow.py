@@ -97,6 +97,44 @@ def test_weight_edit_preservation_panel_respects_backend_limit() -> None:
     assert panel == interactions[:128]
 
 
+def test_training_preparation_freezes_only_train_without_loading_or_dispatch(tmp_path, monkeypatch) -> None:
+    import runpy
+    from neural_foundry import reference_json_extraction
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run_gym_lifecycle_real.py"
+    module = runpy.run_path(str(script))
+    original = reference_json_extraction.generate_scenarios
+    splits = []
+
+    def train_only(**kwargs):
+        splits.append(kwargs["split"])
+        assert kwargs["split"] == "train"
+        return original(**kwargs)
+
+    monkeypatch.setattr(reference_json_extraction, "generate_scenarios", train_only)
+    namespace = module["main"].__globals__
+    def forbidden(*args, **kwargs):
+        raise AssertionError("preparation must not load a model, resolve a checkpoint, or start a trainer")
+    for name in ("resolve_checkpoint", "transformers_model", "peft_sequence_trainer"):
+        monkeypatch.setitem(namespace, name, forbidden)
+    output = tmp_path / "prepared"
+    monkeypatch.setattr(sys, "argv", [str(script), "--prepare-json-training", "--output-dir", str(output),
+                                    "--rows-per-template", "1"])
+    module["main"]()
+    document = json.loads((output / "training-preparation.json").read_bytes())
+    assert splits == ["train"]
+    assert document["training_cases"] == len(TEMPLATES["train"])
+    assert set(document["intents"]) == {"sft", "lora"}
+    assert not document["ready_to_train"] and not document["holdout_accessed"] and not document["provider_called"]
+    assert not document["download_allowed"] and not document["weight_edit_dispatched"]
+    assert document["preparation_digest"] == _document_digest({
+        key: value for key, value in document.items() if key != "preparation_digest"})
+    for intent in document["intents"].values():
+        request = intent["lifecycle_request"]
+        assert intent["request_digest"] == _document_digest(request)
+        assert all(name.startswith("train:") for name in request["approved_responses"])
+
+
 class _FakeModel:
     def __init__(self, *, fail=False):
         self.fail = fail

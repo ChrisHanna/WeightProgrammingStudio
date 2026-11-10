@@ -178,6 +178,49 @@ def _build_tool_task(registry: GymComponentRegistry) -> tuple[TaskAdapter, dict[
     return task, handlers
 
 
+def prepare_json_training_request(*, seed: int = 17, rows_per_template: int = 32, steps: int = 32) -> dict[str, Any]:
+    from neural_foundry.backends.automodel.config import AutoModelSFTRecipe, AUTOMODEL_VERSIONS, PEFT_RELOAD_VERSIONS
+    from neural_foundry.json_frontier_model import frontier_proof_configuration
+    from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
+
+    if type(steps) is not int or not 1 <= steps <= 256:
+        raise GymJobError("prepared training steps must be an integer from 1 to 256")
+    task = reference_task(rows_per_template=rows_per_template)
+    rows = generate_scenarios(split="train", seed=seed, parameters={"rows_per_template": rows_per_template})
+    approved = {row["scenario_id"]: row["reference"] for row in rows}
+    projected = [task.project(row["input"], row["reference"]) for row in rows]
+    intents = {}
+    for method in ("sft", "lora"):
+        recipe = {"method": method, "seed": seed, "steps": steps, "max_sequence_tokens": 256,
+                  "tokens_per_batch": 256, "max_dataset_tokens": 512 * len(rows),
+                  "learning_rate": 0.00001 if method == "sft" else 0.00005}
+        if method == "lora":
+            recipe.update({"rank": 8, "target_modules": ["q_proj", "v_proj"]})
+        frozen_recipe = AutoModelSFTRecipe.from_document(recipe)
+        request = {"run_id": f"json-validation-{method}-{seed}", "task": "reference_invoice_extraction@1",
+                   "model": "transformers:Qwen3-0.6B@1", "trainer": "nemo_automodel.sft@1",
+                   "evaluator": "public@1", "recipe": frozen_recipe.document(), "approved_responses": approved}
+        intents[method] = {"lifecycle_request": request, "request_digest": _document_digest(request),
+                           "recipe_digest": frozen_recipe.digest}
+    document = {"kind": "nf_json_training_preparation_v1", "status": "prepared_not_dispatched",
+                "base_model": {"model_id": "Qwen/Qwen3-0.6B", "revision": "c1899de289a04d12100db370d81485cdf75e47ca"},
+                "job_digest": task.job.digest, "training_split": "train", "training_cases": len(rows),
+                "training_rows_digest": _document_digest({"rows": rows}),
+                "projected_demonstrations_digest": _document_digest({"interactions": projected}),
+                "demonstration_source": "synthetic_train_references_caller_reported_not_model_evidence",
+                "training_rows": rows, "intents": intents,
+                "runtime_requirements": {"automodel": dict(AUTOMODEL_VERSIONS), "lora_reload": dict(PEFT_RELOAD_VERSIONS),
+                    "device": "cuda:0", "precision": "bfloat16", "context_tokens": 512, "max_new_tokens": 128},
+                "frontier_configuration": frontier_proof_configuration(),
+                "preflight_required": ["local_checkpoint_file_digests", "loaded_base_state_digest",
+                    "pinned_automodel_runtime", "pinned_peft_reload_runtime", "tokenized_dataset_budget",
+                    "lifecycle_frozen_training_request", "candidate_reload_and_vllm_identity_probes"],
+                "weight_edit_dispatched": False, "holdout_accessed": False, "provider_called": False,
+                "download_allowed": False, "ready_to_train": False, "release_authorized": False}
+    document["preparation_digest"] = _document_digest(document)
+    return document
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -186,10 +229,26 @@ def main() -> None:
     parser.add_argument("--context-tokens", type=int, default=2048)
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--allow-download", action="store_true")
+    parser.add_argument("--prepare-json-training", action="store_true", help="Freeze train-only SFT/LoRA intents without loading a model or dispatching work")
+    parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--rows-per-template", type=int, default=32)
+    parser.add_argument("--training-steps", type=int, default=32)
     parser.add_argument("--tool-only", action="store_true", help="Run only the bounded one-call task without training")
     parser.add_argument("--resume", action="store_true", help="Resume the exact run from its durable state directory")
     parser.add_argument("--interrupt-training-after-step", type=int, help="Test fault injection after a committed optimizer step")
     args = parser.parse_args()
+    if args.prepare_json_training:
+        if args.allow_download or args.resume or args.tool_only or args.interrupt_training_after_step is not None:
+            parser.error("preparation cannot download, resume, train, or inject runtime faults")
+        document = prepare_json_training_request(seed=args.seed, rows_per_template=args.rows_per_template, steps=args.training_steps)
+        output = args.output_dir.resolve()
+        output.mkdir(parents=True, mode=0o700, exist_ok=False)
+        with (output / "training-preparation.json").open("x", encoding="utf-8") as stream:
+            json.dump(document, stream, indent=2, allow_nan=False)
+            stream.write("\n")
+        print(json.dumps({"preparation_digest": document["preparation_digest"], "status": document["status"],
+                          "training_cases": document["training_cases"], "ready_to_train": False}))
+        return
     output = args.output_dir.resolve()
     if output.exists() and any(output.iterdir()) and not args.resume:
         raise FileExistsError("Choose a fresh output directory")
