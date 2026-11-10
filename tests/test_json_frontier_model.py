@@ -57,6 +57,7 @@ def test_frontier_scores_only_completed_response_from_selected_model(monkeypatch
     assert "secret" not in json.dumps(receipt)
     model._endpoint, model._model = OPENAI_CHAT_COMPLETIONS_URL, OPENAI_DEFAULT_MODEL
     document["model"] = OPENAI_DEFAULT_MODEL
+    model.require_proof_configuration()
     result = model.infer(interaction)
     model.verify_response_receipt(interaction, result)
     from neural_foundry.gym_service import ExecutionResponse
@@ -73,4 +74,32 @@ def test_frontier_scores_only_completed_response_from_selected_model(monkeypatch
     document["choices"][0]["finish_reason"] = "stop"
     document["model"] = "another-model"
     with pytest.raises(GymJobError, match="incomplete"):
+        model.infer(interaction)
+
+
+def test_frontier_configuration_pins_shared_prompt_scorer_and_decoding(monkeypatch) -> None:
+    from neural_foundry import json_frontier_model
+    from neural_foundry.gym_service import _document_digest
+
+    configuration = json_frontier_model.frontier_proof_configuration()
+    assert configuration["model"] == "gpt-4o-mini-2024-07-18"
+    assert configuration["temperature"] == 0 and configuration["max_new_tokens"] == 128
+    assert configuration["prompt_template"] == reference_task().project({"text": "{text}"}, None)
+    assert configuration["scorer"]["implementation_digest"] == reference_task().job.scorer.implementation_digest
+    assert configuration["configuration_digest"] == _document_digest({
+        key: value for key, value in configuration.items() if key != "configuration_digest"})
+    model = JsonFrontierModel(endpoint=OPENAI_CHAT_COMPLETIONS_URL, model=OPENAI_DEFAULT_MODEL, api_key="test-only")
+    model.require_proof_configuration()
+    monkeypatch.setattr(json_frontier_model, "frontier_proof_configuration", lambda: {**configuration, "scorer": {}})
+    with pytest.raises(GymJobError, match="changed"):
+        model.require_proof_configuration()
+
+
+def test_pinned_frontier_refuses_prompt_drift_before_network(monkeypatch) -> None:
+    model = JsonFrontierModel(endpoint=OPENAI_CHAT_COMPLETIONS_URL, model=OPENAI_DEFAULT_MODEL, api_key="test-only")
+    model.require_proof_configuration()
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: pytest.fail("must not contact provider"))
+    interaction = reference_task().project({"text": "Order for Aster: 2 lamps."}, None)
+    interaction["messages"][0]["content"] = "Use a different extraction prompt"
+    with pytest.raises(GymJobError, match="prompt"):
         model.infer(interaction)

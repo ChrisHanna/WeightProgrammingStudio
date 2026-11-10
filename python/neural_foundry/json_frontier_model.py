@@ -24,6 +24,21 @@ _FRONTIER_ENV_NAMES = frozenset({
 })
 
 
+def frontier_proof_configuration() -> dict[str, Any]:
+    from .reference_json_extraction import project, reference_task
+
+    task = reference_task()
+    document = {"kind": "nf_json_frontier_configuration_v1", "provider": "openai",
+                "endpoint": OPENAI_CHAT_COMPLETIONS_URL, "model": OPENAI_DEFAULT_MODEL,
+                "temperature": 0, "max_new_tokens": 128,
+                "prompt_template": project({"text": "{text}"}, None),
+                "projection": task.projection.document(),
+                "scorer": {"id": task.job.scorer.component_id, "version": task.job.scorer.version,
+                           "implementation_digest": task.job.scorer.implementation_digest}}
+    document["configuration_digest"] = _document_digest(document)
+    return document
+
+
 def _frontier_environment(env_file: str | os.PathLike[str] | None = None) -> dict[str, str]:
     values = {name: os.environ[name] for name in _FRONTIER_ENV_NAMES if os.environ.get(name)}
     path = Path(env_file) if env_file is not None else Path(__file__).resolve().parents[2] / ".env"
@@ -75,16 +90,22 @@ class JsonFrontierModel:
         self._endpoint, self._model, self._api_key = endpoint, model, api_key
         self._host, self._max_new_tokens = parsed.hostname, max_new_tokens
         self._response_receipts: list[dict[str, Any]] = []
+        self._proof_configuration: dict[str, Any] | None = None
 
     def require_proof_configuration(self) -> None:
         if (self._endpoint != OPENAI_CHAT_COMPLETIONS_URL or self._model != OPENAI_DEFAULT_MODEL
             or self._max_new_tokens != 128):
             raise GymJobError("frontier proof requires the pinned OpenAI endpoint, model snapshot and token cap")
+        configuration = frontier_proof_configuration()
+        if self._proof_configuration is not None and self._proof_configuration != configuration:
+            raise GymJobError("frontier prompt or scorer changed after configuration was frozen")
+        self._proof_configuration = configuration
 
     def verify_response_receipt(self, interaction: Mapping[str, Any], result: Any) -> None:
         self.require_proof_configuration()
         receipt = result.interaction.get("api_response_receipt") if isinstance(result, ExecutionResponse) else None
         if (not isinstance(receipt, Mapping) or receipt not in self._response_receipts
+            or receipt.get("configuration_digest") != self._proof_configuration["configuration_digest"]
             or receipt.get("interaction_digest") != _document_digest(interaction)
             or receipt.get("response_digest") != _document_digest(result.response)):
             raise GymJobError("frontier response lacks a matching API response receipt")
@@ -108,12 +129,24 @@ class JsonFrontierModel:
         return {"provider": "openai" if self._endpoint == OPENAI_CHAT_COMPLETIONS_URL else "openai_compatible",
             "pinned_model": self._model, "provider_reported_model": self._model, "provider_host": self._host,
             "api_response_receipts": [dict(receipt) for receipt in self._response_receipts],
+            "proof_configuration_digest": self._proof_configuration["configuration_digest"] if self._proof_configuration else None,
+            "scorer_digest": self._proof_configuration["scorer"]["implementation_digest"] if self._proof_configuration else None,
                 "served_model_identity_verified": False}
 
     def infer(self, interaction: Mapping[str, Any]) -> ExecutionResponse:
         if (not isinstance(interaction, Mapping) or interaction.get("format") != "json_extraction_v1"
             or not isinstance(interaction.get("messages"), list) or not isinstance(interaction.get("output_schema"), Mapping)):
             raise GymJobError("frontier requires a JSON extraction interaction")
+        if self._proof_configuration is not None:
+            from .reference_json_extraction import project
+
+            self.require_proof_configuration()
+            prefix = self._proof_configuration["prompt_template"]["messages"][0]["content"].removesuffix("{text}")
+            messages = interaction["messages"]
+            content = messages[0].get("content") if len(messages) == 1 and isinstance(messages[0], Mapping) else None
+            if (not isinstance(content, str) or not content.startswith(prefix)
+                or interaction != project({"text": content[len(prefix):]}, None)):
+                raise GymJobError("frontier proof interaction differs from the shared frozen prompt")
         payload = {"model": self._model, "messages": interaction["messages"], "temperature": 0,
                    "max_tokens": self._max_new_tokens, "response_format": {"type": "json_schema", "json_schema": {
                        "name": "nf_output", "strict": True, "schema": interaction["output_schema"]}}}
@@ -155,6 +188,9 @@ class JsonFrontierModel:
                    "requested_at_unix_ns": requested_at_ns, "latency_ns": time.monotonic_ns() - started,
                    "request_digest": _document_digest(payload), "interaction_digest": _document_digest(interaction),
                    "response_digest": _document_digest(parsed_response), "wire_response_digest": _document_digest(document)}
+        if self._proof_configuration is not None:
+            receipt["configuration_digest"] = self._proof_configuration["configuration_digest"]
+            receipt["scorer_digest"] = self._proof_configuration["scorer"]["implementation_digest"]
         receipt["receipt_digest"] = _document_digest(receipt)
         self._response_receipts.append(receipt)
         return ExecutionResponse(parsed_response, {"served_model_identity_verified": False,
