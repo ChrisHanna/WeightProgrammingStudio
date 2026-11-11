@@ -36,7 +36,8 @@ _HTTP_CLIENT = (
 class VllmCandidateServer:
     def __init__(self, reference: CandidateRef, *, revision: str, image: str = VLLM_IMAGE,
                  context_tokens: int = 512, max_new_tokens: int = 64, timeout_seconds: float = 240,
-                 precision: str = "bfloat16", gpu_memory_utilization: float = 0.25) -> None:
+                 precision: str = "bfloat16", gpu_memory_utilization: float = 0.25,
+                 identity_record: Mapping[str, Any] | None = None) -> None:
         if os.name == "nt":
             raise GymJobError("network-isolated vLLM serving requires a Linux Docker runtime")
         if (not isinstance(image, str) or len(image) != 71 or not image.startswith("sha256:")
@@ -62,6 +63,7 @@ class VllmCandidateServer:
         self._identity_evidence: dict[str, Any] = {}
         self._renderer: PromptRenderer | None = None
         self._files: dict[str, str] = {}
+        self._expected_identity = identity_record
 
     def _docker(self, arguments: list[str], *, data: bytes | None = None, timeout: float = 30) -> subprocess.CompletedProcess[bytes]:
         try:
@@ -101,6 +103,16 @@ class VllmCandidateServer:
         if self._temporary is not None or self._container is not None:
             raise GymJobError("vLLM server is already open")
         files = verify_vllm_candidate_files(self.reference, revision=self.revision)
+        if self._expected_identity is not None:
+            from .backends.weight_edit.serving_probes import verify_identity
+
+            verify_identity(self._expected_identity, self._expected_identity)
+            if (self._expected_identity["model_digest"] != self.reference.model_digest
+                or self._expected_identity["weight_files"] != {name: digest for name, digest in files.items() if name.endswith(".safetensors")}
+                or self._expected_identity["image"] != self.image
+                or self._expected_identity["precision"] != self.precision
+                or self._expected_identity["context_tokens"] != self.context_tokens):
+                raise GymJobError("frozen vLLM identity differs from candidate files or runtime")
         self._temporary = tempfile.TemporaryDirectory(prefix="nf-vllm-candidate-")
         self._snapshot = Path(self._temporary.name)
         try:
@@ -127,6 +139,7 @@ class VllmCandidateServer:
             create.extend([self.image, "/model", "--host", "127.0.0.1", "--port", "8000", "--served-model-name",
                            "nf-candidate", "--dtype", self.precision, "--max-model-len", str(self.context_tokens),
                            "--gpu-memory-utilization", str(self.gpu_memory_utilization), "--enforce-eager", "--disable-log-stats",
+                           "--no-enable-prefix-caching", "--max-num-seqs", "1",
                            "--disable-uvicorn-access-log", "--no-enable-log-requests", "--no-enable-log-outputs", "--no-enable-log-deltas"])
             created = self._docker(create, timeout=60)
             container = created.stdout.decode("ascii", errors="replace").strip()
@@ -162,10 +175,14 @@ class VllmCandidateServer:
         tokenizer = AutoTokenizer.from_pretrained(self._snapshot, local_files_only=True, trust_remote_code=False)
         renderer = PromptRenderer(tokenizer)
         self._renderer, self._files = renderer, files
+        self._identity_verified = False
+        self._identity_evidence = {}
         probe_record = None
         receipt_path = self._snapshot / "training_receipt.json"
         if receipt_path.is_file():
             probe_record = parse_strict_json(receipt_path.read_bytes()).get("identity_probes")
+        if self._expected_identity is not None:
+            probe_record = self._expected_identity
         identity = AdapterIdentity("vllm_container", "1", _document_digest({
             "adapter": sha256_file(__file__), "candidate_verifier": sha256_file(Path(__file__).with_name("vllm_candidate_files.py")),
             "image": self.image,
@@ -176,6 +193,8 @@ class VllmCandidateServer:
         settings = {"image": self.image, "device": "cuda:0", "precision": self.precision, "context_tokens": self.context_tokens,
                     "gpu_memory_utilization": self.gpu_memory_utilization,
                     "max_new_tokens": self.max_new_tokens, "network": "none", "seed": 0,
+                    "enable_prefix_caching": False, "max_num_seqs": 1,
+                    "identity_verification_phase": "before_scoring",
                     "prompt_renderer_digest": renderer.digest}
 
         def loaded_identity() -> Mapping[str, Any]:
@@ -194,11 +213,18 @@ class VllmCandidateServer:
         def verify_probes() -> None:
             from .backends.weight_edit.serving_probes import verify_identity
 
+            if self._identity_verified:
+                if artifact_files(self._snapshot) != self._files:
+                    self._identity_verified = False
+                    raise GymJobError("mounted files changed after identity verification")
+                return
             self._identity_verified = False
             self._identity_evidence = {}
             if probe_record is None:
                 return
             observed = self.record_identity_probes()
+            self._identity_evidence = {"kind": "nf_vllm_identity_rejection_v1", "verified": False,
+                "model_digest": observed.get("model_digest"), "expected_record": probe_record, "observed_record": observed}
             self._identity_evidence = verify_identity(probe_record, observed)
             if observed["model_digest"] != reference.model_digest:
                 raise GymJobError("identity probes differ from the candidate weights digest")
@@ -244,6 +270,31 @@ class VllmCandidateServer:
 
         return ModelAdapter(identity, candidate, reference.family, ("chat_messages_v1", "json_extraction_v1"), settings,
                             infer, loaded_identity, artifact_kinds=("full", "weight_edit"), artifact_kind=reference.kind, reference=reference)
+
+    def verify_end_identity(self) -> dict[str, Any]:
+        from .backends.weight_edit.serving_probes import compare_records
+
+        if self._expected_identity is None or not self._identity_verified:
+            raise GymJobError("end identity check requires a successful pre-scoring identity check")
+        if self._snapshot is None or artifact_files(self._snapshot) != self._files:
+            raise GymJobError("mounted files changed before end identity verification")
+        try:
+            observed = self.record_identity_probes()
+            expected = self._expected_identity
+            for name in ("model_digest", "weight_files", "image", "context_tokens"):
+                if expected.get(name) != observed.get(name):
+                    raise GymJobError(f"end identity {name} differs")
+            drift = compare_records(expected, observed)
+            evidence = {"kind": "nf_vllm_end_identity_v1", "verified": True, "fixed_prompts": 16,
+                        "greedy_tokens_match": True, "max_logprob_absolute_error": drift,
+                        "logprob_comparison": "informational_only", "observed_record": observed}
+            self._identity_evidence["end_of_session"] = evidence
+            return evidence
+        except Exception as error:
+            self._identity_verified = False
+            self._identity_evidence["end_of_session"] = {
+                "kind": "nf_vllm_end_identity_v1", "verified": False, "failure": str(error)}
+            raise
 
     def record_identity_probes(self) -> dict[str, Any]:
         from .backends.weight_edit.probe import IDENTITY_PROMPTS

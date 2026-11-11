@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from neural_foundry.backends.weight_edit.loader import UnsupportedModel
 from neural_foundry.gym_artifacts import CandidateRef
 from neural_foundry.gym_job import GymJobError
 from neural_foundry.gym_service import _document_digest
@@ -70,6 +71,33 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         record = server.record_identity_probes()
         assert len(record["records"]) == 16
         assert record["records"][0]["top_two"] == [{"token_id": 16, "logprob": -0.5}, {"token_id": 17, "logprob": -0.51}]
+        server._expected_identity = record
+        guarded = server._adapter(server._files)
+        assert guarded.loaded_identity()["served_model_identity_verified"] is True
+        end_identity = server.verify_end_identity()
+        assert end_identity["greedy_tokens_match"] is True
+        assert end_identity["max_logprob_absolute_error"] == 0
+        assert end_identity["logprob_comparison"] == "informational_only"
+        changed = json.loads(json.dumps(record))
+        changed["records"][0]["greedy_logprob"] -= 0.001
+        monkeypatch.setattr(server, "record_identity_probes", lambda: changed)
+        end_identity = server.verify_end_identity()
+        assert end_identity["verified"] is True
+        assert end_identity["max_logprob_absolute_error"] == pytest.approx(0.001)
+        assert guarded.loaded_identity()["served_model_identity_verified"] is True
+        assert guarded.loaded_identity()["identity_probe_evidence"]["observed_record"] == record
+        changed["records"][0]["greedy_token_id"] += 1
+        with pytest.raises(UnsupportedModel, match="greedy tokens differ"):
+            server.verify_end_identity()
+        assert server._identity_evidence["end_of_session"]["verified"] is False
+        changed["records"][0]["greedy_token_id"] -= 1
+        guarded = server._adapter(server._files)
+        with pytest.raises(UnsupportedModel, match="max_error"):
+            guarded.loaded_identity()
+        assert server._identity_verified is False
+        assert server._identity_evidence["verified"] is False
+        assert server._identity_evidence["observed_record"] == changed
+        assert server._identity_evidence["expected_record"] == record
         completion["finish_reason"] = "length"
         with pytest.raises(GymJobError, match="incomplete"):
             adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})
@@ -81,6 +109,8 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
     assert "VLLM_ALLOW_INSECURE_SERIALIZATION=1" not in create
     assert "--disable-uvicorn-access-log" in create and "--no-enable-log-outputs" in create
     assert "--no-enable-log-requests" in create and "VLLM_USE_FLASHINFER_SAMPLER=0" in create
+    assert "--no-enable-prefix-caching" in create
+    assert create[create.index("--max-num-seqs") + 1] == "1"
     assert calls[-2][0][1:] == ["stop", "--timeout", "20", container_id]
     assert calls[-1][0][1:] == ["rm", container_id]
     with pytest.raises(GymJobError, match="not running"):

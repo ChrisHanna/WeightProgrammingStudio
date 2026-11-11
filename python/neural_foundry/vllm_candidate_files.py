@@ -23,7 +23,7 @@ def verify_vllm_candidate_files(reference: CandidateRef, *, revision: str) -> di
         digest = _document_digest({"model_id": reference.model_id, "revision": revision, "files": files})
         if reference.base_digest != digest or reference.model_digest != digest or reference.artifact_digest != digest:
             raise GymJobError("vLLM base checkpoint files differ from the candidate reference")
-    elif reference.method_id in {"sft", "weight_edit"}:
+    elif reference.method_id in {"sft", "weight_edit", "lora"}:
         files = artifact_files(directory)
         try:
             receipt = json.loads((directory / "training_receipt.json").read_bytes())
@@ -33,6 +33,15 @@ def verify_vllm_candidate_files(reference: CandidateRef, *, revision: str) -> di
         if (not isinstance(request_digest, str) or receipt.get("model_digest") != reference.model_digest
             or _document_digest({"training_request": request_digest, "files": files}) != reference.artifact_digest):
             raise GymJobError("vLLM trained artifact files differ from the candidate reference")
+        if reference.method_id == "lora":
+            from .gym_job import _is_digest
+
+            if (reference.kind != "full" or receipt.get("export_kind") != "peft_merged_full_v1"
+                or receipt.get("reload_state_digest") != reference.model_digest
+                or not _is_digest(receipt.get("source_adapter_digest"))
+                or not _is_digest(receipt.get("source_candidate_model_digest"))
+                or "adapter_config.json" in files):
+                raise GymJobError("vLLM LoRA requires a reloaded merged full-model export")
         manifest = read_candidate_manifest(directory, request_digest)
         candidate = manifest["metadata"].get("candidate")
         if (reference.base_digest is None or manifest["model_id"] != reference.model_id

@@ -18,7 +18,7 @@ from .gym_service import ExecutionResponse, _document_digest
 from .provenance import parse_strict_json
 
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_DEFAULT_MODEL = "gpt-4o-mini-2024-07-18"
+OPENAI_DEFAULT_MODEL = "gpt-6-luna"
 _FRONTIER_ENV_NAMES = frozenset({
     "NF_FRONTIER_URL", "NF_FRONTIER_MODEL", "NF_FRONTIER_API_KEY", "OPENAI_API_KEY",
 })
@@ -31,6 +31,8 @@ def frontier_proof_configuration() -> dict[str, Any]:
     document = {"kind": "nf_json_frontier_configuration_v1", "provider": "openai",
                 "endpoint": OPENAI_CHAT_COMPLETIONS_URL, "model": OPENAI_DEFAULT_MODEL,
                 "temperature": 0, "max_new_tokens": 128,
+                "reasoning_effort": "none", "immutable_snapshot_verified": False,
+                "maximum_api_attempts": 80, "maximum_cost_microusd": 50000,
                 "prompt_template": project({"text": "{text}"}, None),
                 "projection": task.projection.document(),
                 "scorer": {"id": task.job.scorer.component_id, "version": task.job.scorer.version,
@@ -91,11 +93,13 @@ class JsonFrontierModel:
         self._host, self._max_new_tokens = parsed.hostname, max_new_tokens
         self._response_receipts: list[dict[str, Any]] = []
         self._proof_configuration: dict[str, Any] | None = None
+        self._api_attempts = 0
+        self._reserved_cost_microusd = 0
 
     def require_proof_configuration(self) -> None:
         if (self._endpoint != OPENAI_CHAT_COMPLETIONS_URL or self._model != OPENAI_DEFAULT_MODEL
             or self._max_new_tokens != 128):
-            raise GymJobError("frontier proof requires the pinned OpenAI endpoint, model snapshot and token cap")
+            raise GymJobError("frontier proof requires the approved OpenAI endpoint, model ID and token cap")
         configuration = frontier_proof_configuration()
         if self._proof_configuration is not None and self._proof_configuration != configuration:
             raise GymJobError("frontier prompt or scorer changed after configuration was frozen")
@@ -148,8 +152,16 @@ class JsonFrontierModel:
                 or interaction != project({"text": content[len(prefix):]}, None)):
                 raise GymJobError("frontier proof interaction differs from the shared frozen prompt")
         payload = {"model": self._model, "messages": interaction["messages"], "temperature": 0,
-                   "max_tokens": self._max_new_tokens, "response_format": {"type": "json_schema", "json_schema": {
+                   "max_completion_tokens": self._max_new_tokens, "response_format": {"type": "json_schema", "json_schema": {
                        "name": "nf_output", "strict": True, "schema": interaction["output_schema"]}}}
+        if self._model == OPENAI_DEFAULT_MODEL:
+            payload["reasoning_effort"] = "none"
+            input_token_bound = len(json.dumps(payload, allow_nan=False).encode()) + 1024
+            reserved_cost = (input_token_bound + 7) // 8 + (self._max_new_tokens + 1) // 2
+            if self._api_attempts >= 80 or self._reserved_cost_microusd + reserved_cost > 50000:
+                raise GymJobError("approved frontier API attempt or cost ceiling reached")
+            self._api_attempts += 1
+            self._reserved_cost_microusd += reserved_cost
         requested_at_ns = time.time_ns()
         started = time.monotonic_ns()
         request = urllib.request.Request(
@@ -184,6 +196,8 @@ class JsonFrontierModel:
             parsed_response = text
         receipt = {"kind": "nf_openai_response_receipt_v1", "provider": "openai" if self._endpoint == OPENAI_CHAT_COMPLETIONS_URL else "openai_compatible",
                    "response_id": document["id"], "reported_model": document["model"],
+                   "immutable_snapshot_verified": False, "usage": document.get("usage"),
+                   "api_attempts": self._api_attempts, "reserved_cost_microusd": self._reserved_cost_microusd,
                    "system_fingerprint": document.get("system_fingerprint"), "response_created": document["created"],
                    "requested_at_unix_ns": requested_at_ns, "latency_ns": time.monotonic_ns() - started,
                    "request_digest": _document_digest(payload), "interaction_digest": _document_digest(interaction),

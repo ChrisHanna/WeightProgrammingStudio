@@ -57,7 +57,7 @@ def verify_identity(expected: Mapping[str, Any], observed: Mapping[str, Any]) ->
             raise UnsupportedModel(f"identity {name} differs")
     difference = compare_records(expected, observed)
     if difference > IDENTITY_LOGPROB_ATOL:
-        raise UnsupportedModel("same-runtime identity log probabilities differ")
+        raise UnsupportedModel(f"same-runtime identity log probabilities differ: max_error={difference:.12g}, tolerance={IDENTITY_LOGPROB_ATOL}")
     return {"kind": "nf_vllm_identity_verification_v2", "verified": True, "fixed_prompts": 16,
             "max_logprob_absolute_error": difference, "logprob_atol": IDENTITY_LOGPROB_ATOL,
             "precision": expected["precision"]}

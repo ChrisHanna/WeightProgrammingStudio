@@ -73,18 +73,19 @@ def test_synthetic_holdout_compares_three_models_with_common_scorer(scoring_only
     assert "reference" not in str(report) and "responses" not in report
 
 
-def test_public_validation_allows_base_sft_frontier_without_weight_edit(scoring_only) -> None:
+@pytest.mark.parametrize("roles", [("base", "sft", "frontier"), ("base", "sft", "lora", "frontier")])
+def test_public_validation_allows_base_sft_frontier_without_weight_edit(scoring_only, roles) -> None:
     task = reference_task(rows_per_template=1)
     rows = generate_scenarios(split="validation", seed=31, parameters={"rows_per_template": 1})
     required = json_proof_loop.public_required_rows(seed=31)
     correct = [row["reference"] for row in [*rows, *required]]
     models = {role: _factory(list(correct), identity=_reported_identity(role))
-              for role in ("base", "sft", "frontier")}
+              for role in roles}
 
     report = json_proof_loop.compare_public_validation(task, seed=31, models=models)
 
     assert report["complete"] is True
-    assert set(report["scorecards"]) == {"base", "sft", "frontier"}
+    assert set(report["scorecards"]) == set(roles)
     assert report["holdout_accessed"] is False
     assert report["release_authorized"] is False
 

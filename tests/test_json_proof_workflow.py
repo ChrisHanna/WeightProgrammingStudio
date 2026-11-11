@@ -82,7 +82,7 @@ def test_frontier_env_file_reads_allowlisted_names_without_exposing_key(tmp_path
     assert frontier._endpoint == OPENAI_CHAT_COMPLETIONS_URL
     assert frontier.loaded_identity()["provider_reported_model"] == "gpt-4.1-mini"
     assert secret not in json.dumps(frontier.loaded_identity())
-    assert OPENAI_DEFAULT_MODEL == "gpt-4o-mini-2024-07-18"
+    assert OPENAI_DEFAULT_MODEL == "gpt-6-luna"
     monkeypatch.setenv("NF_FRONTIER_MODEL", "gpt-4.1-nano")
     overridden = JsonFrontierModel.from_env(env_file=env_file)
     assert overridden.loaded_identity()["provider_reported_model"] == "gpt-4.1-nano"
@@ -95,6 +95,17 @@ def test_weight_edit_preservation_panel_respects_backend_limit() -> None:
     panel = bound_preservation_panel(interactions)
     assert len(panel) == 128
     assert panel == interactions[:128]
+
+
+def test_training_execution_rejects_tampered_preparation_before_loading(tmp_path) -> None:
+    import runpy
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_gym_lifecycle_real.py"))
+    document = module["prepare_json_training_request"](rows_per_template=1)
+    document["training_rows"][0]["input"]["text"] = "tampered"
+    with pytest.raises(GymJobError, match="digest differs"):
+        module["execute_json_training_request"](document, output=tmp_path / "must-not-exist", method="sft",
+            automodel_python="/missing/python", reload_python="/missing/reload")
+    assert not (tmp_path / "must-not-exist").exists()
 
 
 def test_training_preparation_freezes_only_train_without_loading_or_dispatch(tmp_path, monkeypatch) -> None:

@@ -33,16 +33,21 @@ def test_base_candidate_file_digest_is_verified(tmp_path) -> None:
         verify_vllm_candidate_files(reference, revision=revision)
 
 
-def test_full_sft_candidate_is_bound_to_receipt_and_files(tmp_path) -> None:
+@pytest.mark.parametrize("method", ["sft", "lora"])
+def test_full_sft_candidate_is_bound_to_receipt_and_files(tmp_path, method) -> None:
     root = _checkpoint(tmp_path / "candidate")
     state, base, request = ("sha256:" + char * 64 for char in "123")
-    (root / "training_receipt.json").write_text(json.dumps({"training_request_digest": request, "model_digest": state}))
+    receipt = {"training_request_digest": request, "model_digest": state}
+    if method == "lora":
+        receipt.update({"export_kind": "peft_merged_full_v1", "reload_state_digest": state,
+                        "source_adapter_digest": base, "source_candidate_model_digest": state})
+    (root / "training_receipt.json").write_text(json.dumps(receipt))
     files = artifact_files(root)
     artifact = _document_digest({"training_request": request, "files": files})
-    reference = CandidateRef("test/model", "full", base, state, artifact, str(root), "sft", "sft", "qwen3")
+    reference = CandidateRef("test/model", "full", base, state, artifact, str(root), method, method, "qwen3")
     write_candidate_manifest(root, model_id=reference.model_id, kind=reference.kind, base_digest=base,
                              model_digest=state, request_digest=request,
-                             metadata={"candidate": {"candidate_id": "sft", "method_id": "sft", "base_model_digest": base,
+                             metadata={"candidate": {"candidate_id": method, "method_id": method, "base_model_digest": base,
                                                      "candidate_model_digest": state, "artifact_digest": artifact}})
     assert verify_vllm_candidate_files(reference, revision="a" * 40) == files
     with pytest.raises(GymJobError, match="differ"):

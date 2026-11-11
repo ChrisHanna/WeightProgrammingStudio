@@ -82,7 +82,9 @@ def test_frontier_configuration_pins_shared_prompt_scorer_and_decoding(monkeypat
     from neural_foundry.gym_service import _document_digest
 
     configuration = json_frontier_model.frontier_proof_configuration()
-    assert configuration["model"] == "gpt-4o-mini-2024-07-18"
+    assert configuration["model"] == "gpt-6-luna"
+    assert configuration["reasoning_effort"] == "none"
+    assert configuration["immutable_snapshot_verified"] is False
     assert configuration["temperature"] == 0 and configuration["max_new_tokens"] == 128
     assert configuration["prompt_template"] == reference_task().project({"text": "{text}"}, None)
     assert configuration["scorer"]["implementation_digest"] == reference_task().job.scorer.implementation_digest
@@ -102,4 +104,18 @@ def test_pinned_frontier_refuses_prompt_drift_before_network(monkeypatch) -> Non
     interaction = reference_task().project({"text": "Order for Aster: 2 lamps."}, None)
     interaction["messages"][0]["content"] = "Use a different extraction prompt"
     with pytest.raises(GymJobError, match="prompt"):
+        model.infer(interaction)
+
+
+def test_luna_budget_refuses_request_before_network(monkeypatch) -> None:
+    model = JsonFrontierModel(endpoint=OPENAI_CHAT_COMPLETIONS_URL, model=OPENAI_DEFAULT_MODEL, api_key="test-only")
+    model.require_proof_configuration()
+    interaction = reference_task().project({"text": "Order for Aster: 2 lamps."}, None)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: pytest.fail("must not contact provider"))
+    model._api_attempts = 80
+    with pytest.raises(GymJobError, match="ceiling"):
+        model.infer(interaction)
+    model._api_attempts = 0
+    model._reserved_cost_microusd = 50000
+    with pytest.raises(GymJobError, match="ceiling"):
         model.infer(interaction)

@@ -131,6 +131,7 @@ def _require_response_evidence(model: Any, interaction: Mapping[str, Any], resul
 def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[str, Callable]) -> dict[str, Any]:
     if set(models) not in (
         {"base", "sft", "frontier"},
+        {"base", "sft", "lora", "frontier"},
         {"base", "sft", "weight_edit"},
         {"base", "sft", "weight_edit", "frontier"},
     ):

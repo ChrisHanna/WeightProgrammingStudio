@@ -221,6 +221,48 @@ def prepare_json_training_request(*, seed: int = 17, rows_per_template: int = 32
     return document
 
 
+def execute_json_training_request(document: Mapping[str, Any], *, output: Path, method: str,
+                                  automodel_python: str, reload_python: str) -> dict[str, Any]:
+    from neural_foundry.backends.automodel.config import AutoModelBackendConfig
+    from neural_foundry.gym_service import GymStudioService
+    from neural_foundry.reference_json_extraction import reference_task
+
+    if method not in {"sft", "lora"}:
+        raise GymJobError("only approved SFT and LoRA training can be dispatched")
+    if document.get("preparation_digest") != _document_digest({key: value for key, value in document.items() if key != "preparation_digest"}):
+        raise GymJobError("training preparation digest differs")
+    recipe = document["intents"][method]["lifecycle_request"]["recipe"]
+    rows = document["training_rows"]
+    rows_per_template = len(rows) // 10
+    expected = prepare_json_training_request(seed=recipe["seed"], rows_per_template=rows_per_template, steps=recipe["steps"])
+    if document != expected:
+        raise GymJobError("training preparation differs from the frozen train-only contract")
+    for interpreter in (automodel_python, reload_python):
+        if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
+            raise GymJobError("approved runtime interpreter is missing")
+    task = reference_task(rows_per_template=rows_per_template)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
+    base = transformers_model(document["base_model"]["model_id"], document["base_model"]["revision"],
+        device="cuda:0", precision="bfloat16", context_tokens=512, max_new_tokens=128, seed=recipe["seed"])
+    lifecycle = GymLifecycle(GymStudioService(state_dir=output / "state"))
+    evaluator = EvaluatorAdapter(AdapterIdentity("public", "1", task.identity.implementation_digest),
+        lambda *args: {"split": "validation", "complete": False, "metrics": {}, "status": "deferred_to_verified_vllm"})
+    for adapter in (task, base, evaluator):
+        lifecycle.register(adapter)
+    lifecycle.register_backend("nemo_automodel.sft@1", config=AutoModelBackendConfig(
+        automodel_python, timeout_seconds=1800, reload_python_executable=reload_python))
+    run = lifecycle.run(document["intents"][method]["lifecycle_request"])
+    result = {"kind": "nf_json_train_only_result_v1", "preparation_digest": document["preparation_digest"],
+        "method": method, "base": vars(base.reference), "revision": document["base_model"]["revision"],
+        "candidate_record": run["candidate_record"], "training_request": run["training_request"],
+        "dataset_digest": run["dataset"]["dataset_digest"], "evaluation_status": run["evaluation_status"],
+        "weight_edit_dispatched": False, "holdout_accessed": False, "provider_called": False, "release_authorized": False}
+    result["result_digest"] = _document_digest(result)
+    with (output / "training-result.json").open("x", encoding="utf-8") as stream:
+        json.dump(result, stream, indent=2, allow_nan=False)
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -233,10 +275,23 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--rows-per-template", type=int, default=32)
     parser.add_argument("--training-steps", type=int, default=32)
+    parser.add_argument("--execute-json-training", type=Path, help="Execute one approved frozen train-only preparation")
+    parser.add_argument("--training-method", choices=("sft", "lora"))
+    parser.add_argument("--automodel-python", type=Path)
+    parser.add_argument("--reload-python", type=Path)
     parser.add_argument("--tool-only", action="store_true", help="Run only the bounded one-call task without training")
     parser.add_argument("--resume", action="store_true", help="Resume the exact run from its durable state directory")
     parser.add_argument("--interrupt-training-after-step", type=int, help="Test fault injection after a committed optimizer step")
     args = parser.parse_args()
+    if args.execute_json_training is not None:
+        if (args.allow_download or args.prepare_json_training or args.resume or args.tool_only
+            or args.training_method is None or args.automodel_python is None or args.reload_python is None):
+            parser.error("execution requires a frozen preparation, method and existing runtime paths; downloads are forbidden")
+        document = json.loads(args.execute_json_training.read_bytes())
+        result = execute_json_training_request(document, output=args.output_dir.resolve(), method=args.training_method,
+            automodel_python=str(args.automodel_python), reload_python=str(args.reload_python))
+        print("NF_JSON_TRAIN_ONLY=" + json.dumps(result, allow_nan=False))
+        return
     if args.prepare_json_training:
         if args.allow_download or args.resume or args.tool_only or args.interrupt_training_after_step is not None:
             parser.error("preparation cannot download, resume, train, or inject runtime faults")
