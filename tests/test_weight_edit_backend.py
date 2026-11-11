@@ -242,6 +242,72 @@ def test_logged_gpu_runner_records_timeout_and_launch_error(tmp_path):
     assert b"FileNotFoundError" in (tmp_path / "launch" / "stderr.log").read_bytes()
 
 
+@pytest.mark.parametrize("code", [0, 7])
+def test_receipt_wait_cli_retains_exit_and_updates_status(tmp_path, code):
+    import json
+    import subprocess
+    import sys
+    from neural_foundry.execution_runner import run_logged_worker
+
+    logs = tmp_path / "logs"
+    result = run_logged_worker([sys.executable, "-c", f"raise SystemExit({code})"],
+                              cwd=tmp_path, log_dir=logs, timeout_seconds=10)
+    status_path = tmp_path / "artifacts" / "STATUS.json"
+    waited = subprocess.run([sys.executable, "-m", "neural_foundry.execution_runner", "--wait",
+        "--log-dir", str(logs), "--timeout-seconds", "2", "--status-file", str(status_path),
+        "--step", "merged LoRA export", "--next", "identity probes"], capture_output=True, timeout=10)
+    assert waited.returncode == code
+    receipt = json.loads(waited.stdout)
+    assert receipt == result.receipt
+    status = json.loads(status_path.read_text())
+    assert status["state"] == ("done" if code == 0 else "blocked")
+    assert status["step"] == "merged LoRA export" and status["next"] == "identity probes"
+    assert status["job_receipt"] == str(logs / "receipt.json")
+    assert status["started"] <= status["updated"]
+
+
+def test_receipt_wait_handles_partial_writes_and_timeout(tmp_path, monkeypatch):
+    import json
+    from neural_foundry import execution_runner
+
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"status":')
+    expected = {"kind": "nf_logged_worker_receipt_v1", "status": "completed", "returncode": 0,
+                "timed_out": False, "duration_seconds": 1.25}
+    now = [0.0]
+    waits = []
+    monkeypatch.setattr(execution_runner.time, "monotonic", lambda: now[0])
+
+    def complete(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+        receipt_path.write_text(json.dumps(expected))
+
+    monkeypatch.setattr(execution_runner.time, "sleep", complete)
+    assert execution_runner.wait_for_receipt(tmp_path, timeout_seconds=90) == expected
+    assert waits == [30]
+    receipt_path.unlink()
+    monkeypatch.setattr(execution_runner.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    with pytest.raises(TimeoutError):
+        execution_runner.wait_for_receipt(tmp_path, timeout_seconds=1)
+
+
+def test_status_atomic_write_validates_state_and_preserves_previous_file(tmp_path):
+    import json
+    from neural_foundry.execution_runner import write_status
+
+    target = tmp_path / "artifacts" / "STATUS.json"
+    first = write_status(target, state="working", step="prepare export")
+    second = write_status(target, state="waiting_on_job", step="merge LoRA", started=first["started"],
+                          job_receipt="export/receipt.json", next_step="identity probes")
+    assert json.loads(target.read_text()) == second
+    assert second["started"] == first["started"]
+    assert not list(target.parent.glob(".status-*"))
+    with pytest.raises(ValueError):
+        write_status(target, state="unknown", step="invalid")
+    assert json.loads(target.read_text()) == second
+
+
 def test_token_diagnostic_observer_does_not_change_capture(numerical_fixture):
     from neural_foundry.backends.weight_edit.capture import capture
     from neural_foundry.backends.weight_edit.demonstrations import prepare_demonstration
