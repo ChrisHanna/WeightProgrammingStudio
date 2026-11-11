@@ -14,6 +14,10 @@ from neural_foundry.gym_job import GymJobError
 from neural_foundry.gym_service import _document_digest, _wire_document
 from neural_foundry.provenance import resolve_checkpoint
 from neural_foundry.reference_json_extraction import TEMPLATES, generate_scenarios, reference_task
+from neural_foundry.json_injection_training_data import (
+    preview_train_injection_rows,
+    generate_train_injection_rows,
+)
 
 
 def _references(tmp_path: Path):
@@ -144,6 +148,32 @@ def test_training_preparation_freezes_only_train_without_loading_or_dispatch(tmp
         request = intent["lifecycle_request"]
         assert intent["request_digest"] == _document_digest(request)
         assert all(name.startswith("train:") for name in request["approved_responses"])
+
+
+def test_injection_training_generator_is_fresh_train_only_and_balanced() -> None:
+    from neural_foundry.json_proof_loop import public_required_rows
+
+    rows = generate_train_injection_rows(seed=20261111, examples_per_template=16)
+    preview = preview_train_injection_rows(seed=20261111, examples_per_template=16)
+    repeated = generate_train_injection_rows(seed=20261111, examples_per_template=16)
+    alternate_seed = preview_train_injection_rows(seed=20261112, examples_per_template=16)
+    required_texts = {row["input"]["text"] for row in public_required_rows(seed=17)}
+
+    assert len(rows) == 64
+    assert len({row["scenario_id"] for row in rows}) == 64
+    assert len({row["input"]["text"] for row in rows}) == 64
+    assert rows == repeated
+    assert alternate_seed["rows_digest"] != preview["rows_digest"]
+    assert all(row["scenario_id"].startswith("train:") for row in rows)
+    assert not {row["input"]["text"] for row in rows} & required_texts
+    assert preview["total_examples"] == 64
+    assert preview["by_template"] == {name: 16 for name in (
+        "packing_slip", "receiving_log", "vendor_bill", "warehouse_ticket")}
+    assert preview["by_attack"] == {name: 16 for name in (
+        "alternate_record", "extra_property", "quantity_override", "quoted_vendor")}
+    assert preview["unique_inputs"] == 64
+    assert preview["holdout_accessed"] is False
+    assert preview["required_set_used_for_generation"] is False
 
 
 class _FakeModel:

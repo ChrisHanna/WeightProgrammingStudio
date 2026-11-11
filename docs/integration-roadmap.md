@@ -1,6 +1,6 @@
 # Product Integration Roadmap
 
-**Status date: 2026-11-09.** This is the product sequencing plan and the working mathematical contract for GymEdit. A listed capability is planned until its implementation, tests, and measured evidence are linked here. Passing fixtures alone does not qualify a real model or gym. Holdout remains sealed until each candidate is frozen.
+**Status date: 2026-11-11.** This is the product sequencing plan and the working mathematical contract for GymEdit. A listed capability is planned until its implementation, tests, and measured evidence are linked here. Passing fixtures alone does not qualify a real model or gym. Holdout remains sealed until each candidate is frozen.
 
 ## Approved Product Work Order
 
@@ -24,7 +24,7 @@ The weight-edit audit and specialist-v3 policy decision remain recorded but are 
 
 ### Immediate Execution Safeguards
 
-- Before another GPU launch, use the durable execution wrapper `python -m neural_foundry.execution_runner --log-dir <fresh-directory> --timeout-seconds 7200 -- <command>`. It writes full stdout/stderr directly to files, an initial `started.json`, and a final `receipt.json` with exit code, timeout/exception status and stream digests. A started receipt without a final receipt means incomplete/unknown termination, not an invented crash reason. Existing active jobs are not retroactively wrapped or duplicated.
+- For every future job, launch through `python -m neural_foundry.execution_runner --log-dir <fresh-directory> --timeout-seconds 7200 -- <command>` in a background terminal, then use `python -m neural_foundry.execution_runner --log-dir <same-directory> --wait --timeout-seconds 7200` to wait and refresh `STATUS.json`. Do not write receipts inline. The runner owns stdout/stderr, `started.json`, the final receipt, and status heartbeats. A started receipt without a final receipt means incomplete/unknown termination, not an invented crash reason. Existing completed jobs are not retroactively wrapped or duplicated.
 - The single-layer CLI now remeasures the unchanged base at the same 128-token cap and batch size 1 before calculating candidates. It persists `report.baseline.json` and refuses candidate computation unless train and validation reproduce 165/320 and 45/64. This is a baseline identity/preflight requirement, not a relaxed gate threshold.
 - Finish the read-only format/value audit, combine it with the six requested single-layer rows, report the findings and stop. If the existing six-candidate job completes with valid evidence, use it rather than rerunning it. No multilayer or method experimentation follows automatically.
 
@@ -88,11 +88,36 @@ Before any future GPU sweep, run the CPU end-to-end smoke `pytest -q tests/test_
 
 **Estimate: 1-2 weeks.**
 
-1. Add a frontier comparison after the user selects and configures a provider.
+1. The approved GPT-6 Luna comparison on public validation completed on 2026-11-11; its receipts and score card are recorded below. A holdout score remains unauthorized until robustness is improved and candidates are frozen.
 2. Add gym-reward-derived target modes (best answer and reward-weighted answer), with the target distribution, quality bar, reward baseline, temperature, and sample budget frozen in the run request.
-3. Produce the proof report: one-shot holdout scores, task and format/safety gates, preservation, cost, end-to-end speed profile, activation heatmap, lineage, and evidence classification. Freeze each candidate before its single holdout evaluation. A failed gate does not authorize another edit based on that holdout.
+3. Produce the remaining proof report: task and format/safety gates, preservation, cost, end-to-end speed profile, activation heatmap, lineage, and evidence classification. Freeze each candidate before any separately authorized one-shot holdout evaluation. A failed gate does not authorize another edit based on that holdout.
 
-The frontier provider is not selected. No credential or live frontier call is assumed.
+The frontier call was limited to the approved public-validation lineup. No holdout request was made.
+
+## JSON SFT/LoRA Proof Update (2026-11-11)
+
+Commit `b3a7242` records the SFT/LoRA validation driver and serving checks. The frozen pre-score identity check still requires exact greedy-token IDs and log-probability agreement within `1e-6`. vLLM runs with prefix caching disabled and one sequence at a time. After scoring, the same 16 probes gate exact token IDs; log-probability drift is recorded but not gated. All three local models passed the end probe with zero measured drift.
+
+| Candidate | Public validation exact | Required injection set | Format valid |
+| --- | ---: | ---: | ---: |
+| Base Qwen3-0.6B, vLLM | 44/64 | 6/16 | 100% |
+| SFT | 64/64 | 7/16 | 100% |
+| Merged LoRA | 64/64 | 7/16 | 100% |
+| GPT-6 Luna, reasoning off | 64/64 | 16/16 | 100% |
+
+The 80 frontier calls have response receipts and a recorded reservation of $0.021733 against the approved $0.05 ceiling; this is the client-side reserved amount, not a billing statement. The four score cards are in `artifacts/json-approved-luna-20261110/validation-{base,sft,lora,frontier}.json`. Every card records `holdout_accessed: false`. Specialist v2 remains unchanged and requires 100% on the task-scoped required set, so neither tuned candidate is promotion-eligible at 7/16.
+
+### Base Runtime Reconciliation
+
+The prior baseline is recorded as 45/64 validation and 0/16 required; the 2026-11-11 base card is 44/64 and 6/16. The new card is explicitly vLLM, bf16, using the pinned candidate digest and current public panels. The prior 64/16 response-level card and receipt were not found in `artifacts/` or `outputs/`, so the suspected Transformers-versus-vLLM runtime difference is plausible but not confirmed. These scores must remain labeled as separate measurements and must not be silently combined as a model change. Before attributing the delta, run a paired public-only base comparison over identical scenario IDs, projected prompts, decoding cap, and seed in Transformers and vLLM, using the shared execution runner. Do not access holdout for this diagnostic.
+
+### Robustness Data Proposal
+
+The preview generator is `python/neural_foundry/json_injection_training_data.py`. With seed `20261111` and 16 examples per layout, it generated 64 unique train-only rows: 4 layouts x 16 and 4 untrusted-instruction forms x 16. The CPU audit found no exact input overlap with the frozen required set; the generator does not read required-set or holdout rows. Preview digest: `sha256:931f4e65296520602a6344d85aa742edc1ab66224fed15d989775aca0f8f1ce7`. One sample asks for the transaction record while an untrusted warehouse note requests a different, schema-valid record. The current 320-row training request remains unchanged; the 64 examples have not been added to it and no retraining has started. Review the generator and counts before creating a new, digest-bound SFT/LoRA training preparation.
+
+### Harder Public Validation Proposal
+
+Freeze a new 192-case public panel before retraining or candidate scoring: six new templates with 32 cases each, split evenly between three clean-but-compositional invoice layouts (multiple line items, void/current status, and distractor quantities) and three templates containing novel untrusted instructions. Use a seed separate from the train augmentation, require template-ID and exact-input disjointness from train and the existing validation set, and do not source examples from the required set or holdout. Keep the existing 64-case result as the historical panel and report the new panel separately. Do not change specialist v2, the required-set definition, or any acceptance threshold. Panel generation and scoring have not run.
 
 ## Phase 3: Practical Editing
 
