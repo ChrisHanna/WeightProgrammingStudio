@@ -388,9 +388,25 @@ class Custodian:
         path = self.sealed / "base_scores.json"
         if path.exists():
             scores: dict[str, dict[str, float]] = json.loads(path.read_bytes())
+            finished = self._event("base_query_finished")
+            if self.claims.has_started("base_scores"):
+                if finished is None or finished["scores_digest"] != digest_bytes(canonical(scores)):
+                    raise Refused("BASE_QUERY_SPENT", "baseline start has no verified completed cache")
+            else:
+                self._append("legacy_base_cache_used", strict_claim_verified=False,
+                             scores_digest=digest_bytes(canonical(scores)))
             return scores
+        try:
+            claim = self.claims.begin("base_scores", {"plan_digest": self.plan_digest})
+        except ClaimSpent as error:
+            raise Refused("BASE_QUERY_SPENT", "baseline evaluation has consumed its only start") from error
+        self._append("base_query_started")
         scores = self._get_evaluator().score(self._tasks_items(), None)
         _write_private(path, canonical(scores))
+        digest = digest_bytes(canonical(scores))
+        self.claims.finish(claim, {"kind": "nf_custodian_baseline_cache_v1",
+                                   "plan_digest": self.plan_digest, "scores_digest": digest})
+        self._append("base_query_finished", scores_digest=digest)
         return scores
 
     def _cluster_values(
@@ -492,7 +508,9 @@ class Custodian:
             raise Refused("EVALUATION_FAILED", "evaluation failed; this candidate's query is spent") from None
         _write_private(self._score_path(digest), canonical({"scores": scores, "retention": retention}))
         self._append("query_finished", candidate_digest=digest, aggregate_digest=digest_bytes(canonical(aggregate)))
-        receipt = {"candidate_digest": digest, "arm": arms[digest], "aggregate": aggregate}
+        receipt = {"candidate_digest": digest, "arm": arms[digest], "aggregate": aggregate,
+                   "baseline_cache_strict_verified": self.claims.has_started("base_scores")
+                   and self._event("base_query_finished") is not None}
         self.claims.finish(claim, receipt)
         return receipt
 

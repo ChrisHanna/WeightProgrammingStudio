@@ -80,6 +80,9 @@ class StrictClaims:
         self.root = state / "claims"
         self.root.mkdir(mode=0o700, exist_ok=True)
 
+    def has_started(self, scope: str) -> bool:
+        return (self.root / (hashlib.sha256(scope.encode()).hexdigest() + ".json")).exists()
+
     def begin(self, scope: str, request: Mapping[str, Any]) -> Path:
         path = self.root / (hashlib.sha256(scope.encode()).hexdigest() + ".json")
         try:

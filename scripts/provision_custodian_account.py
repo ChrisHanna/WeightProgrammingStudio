@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import pwd
 import shlex
 import shutil
 import subprocess
@@ -40,6 +39,8 @@ def main() -> None:
     args = parser.parse_args()
     if os.name != "posix" or os.geteuid() != 0:
         parser.error("run explicitly as the Linux administrator; no privilege escalation is attempted")
+    import pwd
+
     source = args.package_root.resolve(strict=True)
     if source.name != "neural_foundry" or not (source / "study" / "custodian.py").is_file():
         parser.error("expected the neural_foundry package directory")

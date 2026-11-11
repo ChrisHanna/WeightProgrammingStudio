@@ -175,3 +175,34 @@ def test_simultaneous_processes_have_only_one_strict_start(tmp_path: Path) -> No
         outputs.append(child.stdout.read().strip())
         assert child.wait(timeout=30) == 0
     assert sorted(outputs) == ["REFUSED", "STARTED"]
+
+
+@pytest.mark.parametrize("fail_after_cache", [False, True])
+def test_baseline_cannot_be_recomputed_or_used_after_incomplete_start(tmp_path: Path, monkeypatch,
+                                                                   fail_after_cache: bool) -> None:
+    study, _ = audit_study(tmp_path)
+    with client_for(study) as client:
+        client.freeze(study["manifest"])
+    custodian = Custodian(study["plan_path"], study["digest"], study["state"])
+
+    class FixtureEvaluator:
+        calls = 0
+
+        def score(self, items, artifact):
+            self.calls += 1
+            if not fail_after_cache:
+                raise ValueError("software fixture baseline failure")
+            return {item.item_id: {"forced_choice_accuracy": 0.0, "top1_accuracy": 0.0} for item in items}
+
+    evaluator = FixtureEvaluator()
+    monkeypatch.setattr(custodian, "_get_evaluator", lambda: evaluator)
+    if fail_after_cache:
+        def interrupted_finish(_claim, _receipt):
+            raise OSError("software fixture crash after cache write")
+        monkeypatch.setattr(custodian.claims, "finish", interrupted_finish)
+    for candidate in study["manifest"]["candidates"]:
+        with pytest.raises(Refused) as refused:
+            custodian.query(candidate["candidate_digest"])
+        assert refused.value.code == "EVALUATION_FAILED"
+    assert evaluator.calls == 1
+    assert (custodian.sealed / "base_scores.json").exists() is fail_after_cache
