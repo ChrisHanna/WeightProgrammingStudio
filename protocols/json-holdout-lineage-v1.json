@@ -1,0 +1,21 @@
+{
+  "kind": "nf_json_holdout_lineage_v1",
+  "retired_split": {
+    "generator": "reference_invoice_generator",
+    "seed": 17,
+    "rows_per_template": 32,
+    "historical_panel_digest": "sha256:79b36aae23e81adc2609e61165fd0989bf8dd61b64e9cb54c5ffef2d034fccc2",
+    "grade": "development_only",
+    "proof_report_eligible": false,
+    "reason": "previous overlap-only read outside custody; exposure cannot be undone"
+  },
+  "replacement_final_split": {
+    "status": "not_drawn",
+    "must_be_generated_inside_approved_custody": true,
+    "separate_os_account_required": true,
+    "strict_one_shot_after_start": true,
+    "stage1_current_execution_scope": "software_fixtures_only",
+    "real_final_draw_requires_completed_public_gates": true,
+    "frontier_provider_disclosure_requires_explicit_customer_approval": true
+  }
+}

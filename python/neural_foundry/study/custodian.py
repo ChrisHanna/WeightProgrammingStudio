@@ -22,16 +22,35 @@ import hashlib
 import json
 import os
 import secrets
+import stat
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import asdict
+from functools import wraps
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from .analysis import Interval, cluster_bootstrap_ci, holm_adjust, sign_flip_p_value
+from .audits import get_audit_plugin, validate_aggregate
+from .claims import (
+    ClaimSpent,
+    StateBusy,
+    StrictClaims,
+    _sync_directory,
+    exclusive_state,
+    write_private,
+)
 from .decision import ControlEffect, PromotionDecision, RetentionGate, TaskEffect, decide
 from .evaluators import Evaluator, build_evaluator
-from .generators import RETENTION_TASK, GeneratorContractError, Item, check_clusters, get_item_generator, render
+from .generators import (
+    RETENTION_TASK,
+    GeneratorContractError,
+    Item,
+    check_clusters,
+    get_item_generator,
+    render,
+)
 from .plan import (
     BASE_ARM,
     PLACEBO_ARM,
@@ -60,11 +79,21 @@ def canonical(doc: Any) -> bytes:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_private(path, data)
+
+
+def _serialized(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    @wraps(method)
+    def locked(self: Custodian, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        try:
+            with exclusive_state(self.state):
+                self.events = self._read_ledger()
+                if self._event("freeze") and self.items is None:
+                    self._load_items()
+                return method(self, *args, **kwargs)
+        except StateBusy as error:
+            raise Refused("CUSTODIAN_BUSY", "another custodian operation owns this state") from error
+    return locked
 
 
 def draw_sealed_holdout(
@@ -123,21 +152,24 @@ class Custodian:
         self.sealed = state_dir / "sealed"
         self.ledger_path = state_dir / "ledger.jsonl"
         self.plan = load_frozen_plan(plan_path, plan_digest)
-        self.events = self._read_ledger()
         self.evaluator: Evaluator | None = None
         self.items: list[Item] | None = None
         self.prompts: list[str] = []
-        if self.events:
-            if self.events[0]["plan_digest"] != plan_digest:
-                raise Refused("PLAN_CHANGED", "this state directory is bound to a different plan digest")
-        else:
-            self.sealed.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chmod(self.sealed, 0o700)
-            (self.sealed / "candidates").mkdir(mode=0o700, exist_ok=True)
-            _write_private(state_dir / "plan.json", plan_path.read_bytes())
-            self._append("registered", plan_digest=plan_digest)
-        if self._event("freeze"):
-            self._load_items()
+        self.account_boundary = "same_user_process_only"
+        with exclusive_state(self.state):
+            self.claims = StrictClaims(self.state)
+            self.events = self._read_ledger()
+            if self.events:
+                if self.events[0]["plan_digest"] != plan_digest:
+                    raise Refused("PLAN_CHANGED", "this state directory is bound to a different plan digest")
+            else:
+                self.sealed.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.chmod(self.sealed, 0o700)
+                (self.sealed / "candidates").mkdir(mode=0o700, exist_ok=True)
+                _write_private(state_dir / "plan.json", plan_path.read_bytes())
+                self._append("registered", plan_digest=plan_digest)
+            if self._event("freeze"):
+                self._load_items()
 
     # Ledger ---------------------------------------------------------------------------------
 
@@ -161,6 +193,7 @@ class Custodian:
             handle.write(canonical(event) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
+        _sync_directory(self.state)
         self.events.append(event)
 
     def _event(self, kind: str) -> dict[str, Any] | None:
@@ -202,7 +235,26 @@ class Custodian:
             raise Refused("BAD_MANIFEST", "exposed_operands must declare every task, even if empty")
         self._validate_controls(controls)
         self._validate_tuning(manifest.get("tuning", {}), exposed)
+        if "audit" in manifest:
+            self._validate_audit_spec(manifest["audit"])
         return candidates
+
+    @staticmethod
+    def _validate_audit_spec(spec: Any) -> None:
+        if (not isinstance(spec, dict)
+            or set(spec) != {"plugin", "config", "training_rows_digest", "artifact_path"}
+            or not isinstance(spec["plugin"], str)
+            or not isinstance(spec["config"], dict)
+            or not isinstance(spec["artifact_path"], str)
+            or not 1 <= len(spec["artifact_path"]) <= 4096
+            or "\0" in spec["artifact_path"]
+            or not Path(spec["artifact_path"]).is_absolute()
+            or not isinstance(spec["training_rows_digest"], str)):
+            raise Refused("BAD_AUDIT", "audit requires a frozen bounded artifact and registry configuration")
+        try:
+            get_audit_plugin(spec["plugin"]).validate(spec["config"])
+        except ValueError as error:
+            raise Refused("BAD_AUDIT", "unknown or invalid audit plugin configuration") from error
 
     def _validate_controls(self, controls: list[dict[str, Any]]) -> None:
         """Every planned arm must be present, for every seed: a control can't be left out of a study."""
@@ -265,6 +317,7 @@ class Custodian:
             if not matches:
                 raise Refused("PLACEBO_MISMATCH", f"the placebo for seed {placebo['synthesis_seed']} doesn't match")
 
+    @_serialized
     def freeze(self, manifest: dict[str, Any]) -> dict[str, Any]:
         self._check_plan()
         if self._event("freeze"):
@@ -403,6 +456,7 @@ class Custodian:
     def _score_path(self, digest: str) -> Path:
         return self.sealed / f"scores_{digest.removeprefix('sha256:')}.json"
 
+    @_serialized
     def query(self, digest: Any) -> dict[str, Any]:
         self._check_plan()
         freeze = self._event("freeze")
@@ -414,6 +468,10 @@ class Custodian:
             raise Refused("UNKNOWN_CANDIDATE", "this digest is not in the frozen manifest")
         if any(event["kind"] == "query_started" and event["candidate_digest"] == digest for event in self.events):
             raise Refused("ALREADY_QUERIED", "this candidate has already used its only query")
+        try:
+            claim = self.claims.begin(f"query:{digest}", {"plan_digest": self.plan_digest, "candidate_digest": digest})
+        except ClaimSpent as error:
+            raise Refused("ALREADY_QUERIED", "this candidate has already consumed its only start") from error
         # Consumed before any evaluation: failure or a crash past this line can't be retried.
         self._append("query_started", candidate_digest=digest)
         try:
@@ -434,7 +492,79 @@ class Custodian:
             raise Refused("EVALUATION_FAILED", "evaluation failed; this candidate's query is spent") from None
         _write_private(self._score_path(digest), canonical({"scores": scores, "retention": retention}))
         self._append("query_finished", candidate_digest=digest, aggregate_digest=digest_bytes(canonical(aggregate)))
-        return {"candidate_digest": digest, "arm": arms[digest], "aggregate": aggregate}
+        receipt = {"candidate_digest": digest, "arm": arms[digest], "aggregate": aggregate}
+        self.claims.finish(claim, receipt)
+        return receipt
+
+    @_serialized
+    def audit(self, spec: dict[str, Any]) -> dict[str, Any]:
+        self._check_plan()
+        frozen = self._event("freeze")
+        if frozen is None:
+            raise Refused("NOT_FROZEN", "no audit manifest has been frozen")
+        manifest = json.loads((self.state / "manifest.json").read_bytes())
+        if digest_bytes(canonical(manifest)) != frozen["manifest_digest"]:
+            raise Refused("MANIFEST_CHANGED", "the audit manifest differs from its frozen digest")
+        self._validate_audit_spec(spec)
+        if spec != manifest.get("audit"):
+            raise Refused("AUDIT_CHANGED", "the audit request differs from the frozen manifest")
+        try:
+            claim = self.claims.begin("audit", {"plan_digest": self.plan_digest, **spec})
+        except ClaimSpent as error:
+            raise Refused("ALREADY_AUDITED", "this manifest has consumed its only audit start") from error
+        self._append("audit_started", request_digest=digest_bytes(canonical(spec)))
+        try:
+            descriptor = os.open(spec["artifact_path"], os.O_RDONLY
+                                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
+                    raise ValueError("audit requires a bounded regular training artifact")
+                raw = stream.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                raise ValueError("training artifact exceeds the audit bound")
+            from ..provenance import parse_strict_json
+
+            document = parse_strict_json(raw)
+            if (set(document) != {"rows"} or not isinstance(document["rows"], list)
+                or not all(isinstance(row, dict) for row in document["rows"])
+                or digest_bytes(canonical(document)) != spec["training_rows_digest"]):
+                raise ValueError("training artifact differs from its frozen rows digest")
+            _write_private(self.sealed / "audit-training.json", raw)
+            plugin = get_audit_plugin(spec["plugin"])
+            if self.items is None:
+                raise ValueError("sealed audit items are unavailable")
+            result = plugin.audit(document["rows"], self.items, spec["config"])
+            validate_aggregate(result)
+            if result["thresholds"] != spec["config"]["thresholds"]:
+                raise ValueError("audit plugin changed the frozen thresholds")
+            module_file = getattr(sys.modules.get(plugin.__class__.__module__), "__file__", None)
+            if not isinstance(module_file, str):
+                raise TypeError("audit plugin has no verifiable implementation file")
+            receipt = {
+                "kind": "nf_custodian_audit_receipt_v1",
+                "plan_digest": self.plan_digest,
+                "manifest_digest": frozen["manifest_digest"],
+                "holdout_commitment": frozen["holdout_commitment"],
+                "training_rows_digest": spec["training_rows_digest"],
+                "training_artifact_digest": digest_bytes(raw),
+                "plugin": spec["plugin"],
+                "config_digest": digest_bytes(canonical(spec["config"])),
+                "plugin_implementation_digest": digest_bytes(Path(module_file).read_bytes()),
+                "aggregate": result,
+                "exposure_journal": "custodian_local_only",
+                "native_ledger_bridge": False,
+                "signed": False,
+                "account_boundary": self.account_boundary,
+            }
+            receipt["receipt_digest"] = digest_bytes(canonical(receipt))
+            self.claims.finish(claim, receipt)
+            self._append("audit_finished", receipt_digest=receipt["receipt_digest"])
+            return receipt
+        except (OSError, ValueError, TypeError):
+            traceback.print_exc()
+            self._append("audit_failed")
+            raise Refused("AUDIT_FAILED", "audit failed; this manifest's audit start is spent") from None
 
     # Decision -------------------------------------------------------------------------------
 
@@ -563,6 +693,7 @@ class Custodian:
             controls=controls,
         )
 
+    @_serialized
     def decide(self) -> dict[str, Any]:
         self._check_plan()
         freeze = self._event("freeze")
@@ -590,9 +721,11 @@ class Custodian:
             return self.freeze(request.get("manifest") or {})
         if operation == "query":
             return self.query(request.get("candidate_digest"))
+        if operation == "audit":
+            return self.audit(request.get("audit") or {})
         if operation == "decide":
             return self.decide()
-        raise Refused("UNKNOWN_OPERATION", "the custodian answers only freeze, query and decide")
+        raise Refused("UNKNOWN_OPERATION", "the custodian answers only freeze, audit, query and decide")
 
     def egress(self, payload: dict[str, Any]) -> bytes:
         """Final check on everything leaving the process: no holdout prompt may appear."""
@@ -614,18 +747,48 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--plan-digest", required=True)
     parser.add_argument("--state-dir", required=True, type=Path)
+    parser.add_argument("--required-uid", type=int,
+                        help="Require a dedicated non-root deployment account and admin-owned code")
+    parser.add_argument("--software-fixtures-only", action="store_true",
+                        help="Refuse real-model/confirmatory plans in Stage 1 deployment")
     args = parser.parse_args(argv)
 
     # Take over stdout so nothing but protocol frames can reach the proposer.
     wire = os.fdopen(os.dup(1), "wb")
     requests = os.fdopen(os.dup(0), "rb")
-    args.state_dir.mkdir(parents=True, exist_ok=True)
+    args.state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if args.required_uid is not None:
+        if os.name == "nt" or args.required_uid == 0 or os.getuid() != args.required_uid:
+            _send(wire, json.dumps({"ok": False, "code": "ACCOUNT_BOUNDARY_FAILED",
+                                   "message": "dedicated account required"}).encode())
+            return 2
+        state_info = args.state_dir.stat()
+        path = Path(__file__).resolve()
+        while True:
+            info = path.stat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                _send(wire, json.dumps({"ok": False, "code": "DEPLOYMENT_NOT_PROTECTED",
+                                       "message": "admin-owned immutable deployment required"}).encode())
+                return 2
+            if path.parent == path:
+                break
+            path = path.parent
+        if state_info.st_uid != args.required_uid or state_info.st_mode & 0o077:
+            _send(wire, json.dumps({"ok": False, "code": "STATE_NOT_PRIVATE",
+                                   "message": "private account-owned state required"}).encode())
+            return 2
     log = os.open(args.state_dir / "custodian.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(log, 1)
     os.dup2(log, 2)
 
     try:
+        if args.software_fixtures_only:
+            fixture_plan = load_frozen_plan(args.plan, args.plan_digest)
+            if fixture_plan.label != "harness_test" or fixture_plan.evaluator != "synthetic_bernoulli":
+                raise Refused("FIXTURE_ONLY", "this Stage 1 deployment accepts software fixtures only")
         custodian = Custodian(args.plan, args.plan_digest, args.state_dir)
+        if args.required_uid is not None:
+            custodian.account_boundary = "separate_os_account"
     except PlanTamperedError:
         _send(wire, json.dumps({"ok": False, "code": "PLAN_TAMPERED", "message": "plan digest mismatch"}).encode())
         return 2
@@ -636,7 +799,8 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         _send(wire, json.dumps({"ok": False, "code": "STARTUP_FAILED", "message": "see the custodian log"}).encode())
         return 2
-    _send(wire, json.dumps({"ok": True, "ready": True, "plan_digest": args.plan_digest}).encode())
+    _send(wire, json.dumps({"ok": True, "ready": True, "plan_digest": args.plan_digest,
+                           "account_boundary": custodian.account_boundary}).encode())
 
     for line in requests:
         request_id = hashlib.sha256(line).hexdigest()[:12]

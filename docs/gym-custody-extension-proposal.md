@@ -1,6 +1,18 @@
 # Gym custody extension proposal
 
-**Design only.** Extend the existing custodian rather than introducing a second custody service. No code change, holdout read, new threshold, claim migration, or deployment is authorized by this document. The separately approved [contamination policy](../protocols/json-contamination-v1.json) supplies thresholds; this proposal chooses none.
+**Direction approved; staged implementation.** This document preserves the original design, not an assertion that every component is implemented. Stage 1 is the aggregate-only `audit` request, a shared strict one-shot claim for audits/queries, and a separate OS account, tested with software fixtures only. Stage 2 native ledger bridging, signing and container deployment wait for Phase C. The separately approved [contamination policy](../protocols/json-contamination-v1.json) supplies thresholds; this proposal chooses none.
+
+## Stage 1 execution
+
+The existing custodian now accepts a manifest-bound audit registry name, config, training rows digest and artifact location. The `text_overlap_v1` software plugin returns only bounded aggregate counts, explicit thresholds and pass/fail checks through a closed release schema. Input bytes are snapshotted privately and digest-checked; invalid data spends the start and does not create a successful receipt.
+
+`study/claims.py` supplies one strict owner for audit/query starts, fsynced exclusive-creation claims, atomic private receipts and OS state locking. The local journal is refreshed under the lock, so stale processes cannot double-query. A started or torn claim is never retried, even when the process exits before appending its journal event. Legacy frontier retry semantics are not used by this custody route.
+
+The operator-approved `nf-custodian` account has a non-login shell and private state. The [bootstrap](../scripts/provision_custodian_account.py) exports admin-owned code and an immutable snapshot of the **already installed** CPU runtime; it performs no dependency installation or download. The launcher clears inherited environment variables, uses isolated system Python and requires the dedicated UID, protected deployment and private state. It is forcibly software-fixture-only and refuses real-model/confirmatory evaluator plans before any sealed draw.
+
+The [separate-account fixture receipt](../artifacts/proof-phase-ab-20261111/custodian-separate-account-fixture.json) records an actual audit inside the account, aggregate-only output, `ALREADY_AUDITED` and `ALREADY_QUERIED` refusals, and verified permission denial when the proposer UID tried to open the software fixture's sealed state. The account UID differs from the proposer UID; this is not merely two processes under one user. Ordinary proposer access is denied, but root, the Windows/WSL administrator and the trusted operator remain outside this boundary.
+
+The first protected launch failed explicitly because system Python had no Torch; the service was not declared ready. The corrected deployment snapshots the existing CPU Torch runtime and its exercised dependencies read-only instead of importing proposer-writable packages or installing anything. Stage 2 features remain explicitly false in receipts. No real JSON final holdout has been drawn or read; the old split is [retired to development grade](../protocols/json-holdout-lineage-v1.json).
 
 ## Current implementation, not a future guarantee
 
@@ -74,4 +86,4 @@ Separate process/same user remains a development-only boundary. A separate accou
 
 Confirmatory custody requires an explicitly qualified deployment, access policy, authenticated exposure bridge, artifact transfer path, protected logs and signing/verification ownership. The previously public synthetic holdout cannot become secretly unexposed through deployment changes; any fresh confirmation set must be independently drawn and frozen, with known aliases/exposures excluded.
 
-**Awaiting design approval:** manifest compatibility, registry contracts, pretraining audit freeze, aggregate release/recipient policy, native-ledger bridge, strict claim ownership/recovery, API data handling, and deployment qualification. Only after approval implement contract and crash/concurrency tests, then qualify a deployment. No real holdout may be read to test this design; use newly generated software fixtures only.
+**Remaining scope:** real Gym evaluator/final-manifest integration and fresh final-draw qualification still require their own measured acceptance. The native-ledger bridge, signing and container deployment are Stage 2/Phase C, not Stage 1 acceptance claims. API data handling requires explicit customer permission before sending any final holdout prompts to a provider. No real holdout may be read to test this design; use newly generated software fixtures only.

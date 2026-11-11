@@ -100,6 +100,10 @@ class CustodianClient:
         result: dict[str, Any] = self._call({"op": "query", "candidate_digest": candidate_digest})
         return result
 
+    def audit(self, spec: Mapping[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = self._call({"op": "audit", "audit": dict(spec)})
+        return result
+
     def decide(self) -> dict[str, Any]:
         result: dict[str, Any] = self._call({"op": "decide"})
         return result
