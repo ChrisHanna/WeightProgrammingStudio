@@ -1,0 +1,27 @@
+{
+  "kind": "nf_public_proof_policy",
+  "version": 1,
+  "policy": {
+    "version": 1,
+    "context_tokens": 512,
+    "max_new_tokens": 128,
+    "temperature": 0,
+    "reasoning_effort": "none",
+    "identity": {"version": 1, "probe_count": 16, "logprob_atol": 0.000001, "shutdown_logprobs": "informational_only"},
+    "api": {
+      "version": 1,
+      "calls_authorized": false,
+      "maximum_api_attempts": 192,
+      "maximum_cost_microusd": 100000,
+      "input_overhead_token_bound": 1024,
+      "model_rates": {
+        "gpt-6-luna": {"input_microusd_per_million_tokens": 125000, "output_microusd_per_million_tokens": 500000}
+      },
+      "reservation_rule": "utf8_payload_bytes_plus_overhead_and_output_cap_rounded_up_v1",
+      "failures_spend_reservations": true,
+      "budget_scope": "durable_frozen_run"
+    },
+    "report_only": true,
+    "adaptive_retraining": false
+  }
+}

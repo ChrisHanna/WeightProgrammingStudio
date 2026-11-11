@@ -12,7 +12,7 @@ from neural_foundry.execution_runner import run_logged_worker, write_status
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("train", "export", "identity", "score", "audit"))
+    parser.add_argument("stage", choices=("train", "export", "identity", "score", "audit", "budget-init"))
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)

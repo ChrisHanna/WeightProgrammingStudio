@@ -20,8 +20,10 @@ The retired synthetic holdout is not read or rehabilitated by this work.
 The runner resolves the Gym's own scorer through `GymComponentRegistry`.
 No invoice scorer, provider name, candidate method/role branch or custody import
 is present in the generic runner. Local identity uses the existing 16-probe,
-`1e-6` same-runtime policy. The first provider wraps the existing OpenAI client,
-preserving receipts, reservations and decoding identity; it never reads `.env`.
+`1e-6` same-runtime policy. At measured commit `240c9b1`, the first provider wrapped
+the legacy OpenAI client. The offline hardening below replaces that active
+plugin with a Gym-neutral provider while preserving the legacy transport API.
+Neither active plugin reads `.env`.
 The current approved spec forbids new API calls. A separate recorded-response
 plugin verifies original receipt/configuration/interaction/response digests and
 preserves v2-to-identical-input-v3 lineage without issuing requests.
@@ -37,9 +39,11 @@ lineage. Other artifact kinds require another exporter plugin. Serving identity
 is frozen before scoring, rechecked on scoring and checked at shutdown.
 Public score stages have exclusive started claims and bounded failure receipts;
 they cannot silently repeat an API budget after a failed/previous attempt.
-An explicit `--retry-of-failure` can link an incomplete local-server
-infrastructure attempt to its preserved failed receipt. Provider retries are
-not allowed by this path, and completed public scorecards cannot be replaced.
+Current `--retry-of-failure` requires a preserved local startup/pre-inference
+failure with explicit zero dispatch/returned/scored counters. Provider retries
+are not allowed by this path, and completed public scorecards cannot be replaced.
+The historical measured retry predates this stricter failure-receipt schema;
+its original artifacts are retained, not made executable by inventing counters.
 
 `scripts/run_json_validation.py --spec ...` delegates to this runner. Calls
 without `--spec` retain historical behavior in `json_validation_compat.py`.
@@ -264,3 +268,122 @@ Acceptance artifacts:
 
 `model_quality_accepted`, `final_proof_eligible`, `training_dispatched`,
 `holdout_accessed` and `release_authorized` are all false; new API calls are zero.
+
+## Offline hardening after measured commit `240c9b1`
+
+The real-run source/results above remain historical evidence from `240c9b1`.
+No model was trained, loaded for quality inference, or re-scored in this pass.
+No live provider requests, real credentials, downloads, native builds or commits
+were used. New scorecards below are **software fixtures**, never relabelled
+versions of the old SFT/LoRA scores.
+
+### Retry boundary
+
+Failure receipt schema 2 records `failed_stage`,
+`public_inference_dispatches`, `public_responses_returned`, `scored_responses`,
+and the preserved started-claim name/digest. Authorization requires:
+
+- Local server, API dispatch disabled, same frozen run and candidate.
+- Stage `server_startup` or `pre_inference`, with all three counters exactly zero.
+- A matching intact started claim and no completed scorecard.
+
+The first attempted inference increments the dispatch counter **before**
+calling the provider. First-inference exceptions, partial panels, failures
+classified as `identity_verification`, and old receipts lacking explicit counters
+cannot authorize retry.
+Claims and failures are not removed or overwritten.
+
+### Gym-neutral provider and reusable policy
+
+`openai_provider.py` implements the structured-text `PublicProvider` protocol.
+The selected `TaskAdapter` supplies interaction format, messages/output schema,
+projection identity, Gym/job identity and scorer context. There is no invoice
+prompt or scorer pin. Unsupported multimodal/tool payloads are refused before
+reservation because this policy does not price their hidden input costs.
+
+`openai_transport.py` is shared with the legacy `JsonFrontierModel`: endpoint
+validation, no redirects, response size limit, exact reported model ID, normal
+completion, strict response parsing and per-response receipt fields retain
+their transport behavior. Legacy direct clients remain compatibility APIs with
+their historical per-instance limits; they are **not** registered as the active
+run-authorized OpenAI provider.
+
+The tracked active policy is `protocols/public-proof-policy-v1.json`. New specs
+bind its file SHA-256 through `policy_reference`; duplicated inline values must
+match. Current supported values are cap **128**, local context **512**, probes
+**16**, startup tolerance **1e-6**, and **192 attempts / 100,000 microUSD**.
+Only the explicit per-run calls-authorization boolean overrides the default
+disabled authorization. Shutdown logprobs remain **informational only**.
+
+The active API provider requires the referenced policy, not a legacy inline
+policy alone. Request decoding/cap, reservation prices, ceilings and startup
+probe checks consume those values. Configuration and response receipts bind
+the run, policy, selected Gym/projection/scorer, request and response.
+
+### Durable public authorization
+
+`public_budget.py` provides an explicitly initialized SQLite ledger plus
+exclusive initialization anchor. A frozen `public_budget` reference supplies
+one absolute path and ledger identity for **all roles/clients/processes** in the
+run. The ledger binds the unsigned run-spec digest, complete effective policy
+digest and provider-role/model configurations. A digest-bearing document and
+its unsigned spec resolve to the same budget.
+
+`proof_pipeline budget-init` initializes only fresh state; providers never
+recreate missing/corrupt state. Existing/partial initialization, absent anchors,
+binding mismatches, malformed state, counter divergence and reservation-chain
+corruption fail closed. SQLite `BEGIN IMMEDIATE`, full synchronous commits and
+read transactions serialize concurrent reservations. Dispatch occurs only after
+the reservation commits. Network failures, incomplete responses and model-ID
+mismatches spend their attempt/cost reservation; no refunds/reset occur.
+
+Cost authorization uses the policy's configured price bounds: UTF-8 serialized
+payload bytes plus 1,024 overhead tokens, and the 128-token output cap, rounded
+up separately at 125,000 input / 500,000 output microUSD per million tokens.
+This is conservative configured reservation accounting, **not verification of
+vendor tariffs, invoices or hidden provider behavior**. The store assumes a
+trusted local filesystem/operator; it is not signed, privileged-operator
+rollback-resistant custody. It neither owns nor replaces the study service's
+strict final claim.
+
+### Declared plugin dependencies
+
+Built-in plugin references are version 2. Each binds its factory module plus
+declared helper roots, their bounded static repository-Python import closure,
+explicit worker entrypoints and applicable policy files. Resolution checks the
+complete frozen dependency map and current file hashes; reference mutation,
+helper edits/removal or policy drift refuse before factory dispatch.
+
+The resulting conservative union contains **86 source/config/runner files**.
+There is no `sys.modules` hashing, third-party source copying or study-custody
+dependency. Installed third-party/native runtimes remain governed by their
+existing runtime/image/backend qualification contracts, not this source map.
+External plugins still use explicit registry composition; discovery is not
+required.
+
+### Revised software acceptance and receipts
+
+All new artifacts are under `artifacts/phase-b-offline-hardening-20261111`:
+
+- `final-contract-tests-command/receipt.json`: **68 passed**, including spawned
+  process races for both attempt and cost ceilings, restart/failure spending,
+  corrupt/missing state, policy drift, exact mock receipts and retry refusal.
+- `lint-command/receipt.json`: scoped lint passed.
+- `generic-contract-v2.json`, frozen **after** those tests:
+  `sha256:4abbf18d5ab9aa24c7a2b3d315703846d18e2b8c1edb7cc2e10df4c98d13a144`.
+- `company-software-run/modularity-acceptance.json`:
+  `sha256:3cccada7b468566e39c639c43c1906d352d4f1524deb5005ac1df7e124f84ab0`.
+- `company-mock-provider-run/mock-provider-conformance.json`:
+  `sha256:6afe2bd9ddbc9ca0c35515f54e0e00a0603acbf9a284cb682741dad3b703eee7`.
+
+Both second-Gym executions passed with the complete frozen generic source map
+unchanged. The mock provider uses explicit test credentials and a patched HTTP
+opener only: **four simulated dispatches**, durably reserving **1,044 microUSD**,
+and zero real network/model calls. Its composition root delegates to the same
+registered OpenAI provider and generic scorer; no company-facts core branch or
+second scoring pipeline was added.
+
+The legacy transport unit test previously generated a seed7 `holdout` fixture;
+it now uses `validation`. That corrects the earlier exposure disclosure to
+include seed7 as well as seed31 development fixtures. This pass performs no
+holdout draw/read and grants no final-proof eligibility.

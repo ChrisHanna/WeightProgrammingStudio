@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 import shlex
-import time
-import urllib.error
-import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
-from urllib.parse import urlsplit
+from typing import Any, Self
 
 from .gym_job import GymJobError
 from .gym_service import ExecutionResponse, _document_digest
-from .provenance import parse_strict_json
+from .openai_transport import (
+    OPENAI_CHAT_COMPLETIONS_URL,
+    OPENAI_DEFAULT_MODEL,
+    completion,
+    validate_endpoint,
+)
+from .openai_transport import (
+    NoRedirect as _NoRedirect,
+)
 
-OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_DEFAULT_MODEL = "gpt-6-luna"
+__all__ = [
+    "OPENAI_CHAT_COMPLETIONS_URL",
+    "OPENAI_DEFAULT_MODEL",
+    "JsonFrontierModel",
+    "_NoRedirect",
+    "frontier_proof_configuration",
+]
+
 _FRONTIER_ENV_NAMES = frozenset({
     "NF_FRONTIER_URL", "NF_FRONTIER_MODEL", "NF_FRONTIER_API_KEY", "OPENAI_API_KEY",
 })
@@ -75,22 +85,10 @@ def _frontier_environment(env_file: str | os.PathLike[str] | None = None) -> dic
     return values
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request: Any, file: Any, code: int, message: str, headers: Any, new_url: str) -> None:
-        return None
-
-
 class JsonFrontierModel:
     def __init__(self, *, endpoint: str, model: str, api_key: str, max_new_tokens: int = 128,
                  maximum_api_attempts: int = 80, maximum_cost_microusd: int = 50000) -> None:
-        parsed = urlsplit(endpoint)
-        try:
-            loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
-        except ValueError:
-            loopback = False
-        if (parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or (parsed.scheme == "http" and not loopback)):
-            raise GymJobError("frontier endpoint requires HTTPS or literal loopback HTTP without URL credentials")
+        host = validate_endpoint(endpoint)
         if not isinstance(model, str) or not model.strip() or not isinstance(api_key, str) or not api_key:
             raise GymJobError("frontier requires an explicit model and API credential")
         if type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 4096:
@@ -99,7 +97,7 @@ class JsonFrontierModel:
             or type(maximum_cost_microusd) is not int or maximum_cost_microusd < 1):
             raise GymJobError("frontier proof limits must be positive integers")
         self._endpoint, self._model, self._api_key = endpoint, model, api_key
-        self._host, self._max_new_tokens = parsed.hostname, max_new_tokens
+        self._host, self._max_new_tokens = host, max_new_tokens
         self._maximum_api_attempts = maximum_api_attempts
         self._maximum_cost_microusd = maximum_cost_microusd
         self._response_receipts: list[dict[str, Any]] = []
@@ -140,10 +138,10 @@ class JsonFrontierModel:
             maximum_cost_microusd=maximum_cost_microusd,
         )
 
-    def __enter__(self) -> JsonFrontierModel:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         pass
 
     def loaded_identity(self) -> Mapping[str, Any]:
@@ -180,50 +178,13 @@ class JsonFrontierModel:
                 raise GymJobError("approved frontier API attempt or cost ceiling reached")
             self._api_attempts += 1
             self._reserved_cost_microusd += reserved_cost
-        requested_at_ns = time.time_ns()
-        started = time.monotonic_ns()
-        request = urllib.request.Request(
-            self._endpoint,
-            data=json.dumps(payload, allow_nan=False).encode(),
-            headers={"Authorization": "Bearer " + self._api_key, "Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=60) as response:
-                raw = response.read(1_048_577)
-            if len(raw) > 1_048_576:
-                raise ValueError("response too large")
-            document = parse_strict_json(raw)
-            if (not isinstance(document.get("id"), str) or not document["id"].strip()
-                or type(document.get("created")) is not int or document["created"] <= 0
-                or (document.get("system_fingerprint") is not None
-                    and not isinstance(document["system_fingerprint"], str))):
-                raise ValueError("response receipt fields missing")
-            choices = document["choices"]
-            if (document.get("model") != self._model or not isinstance(choices, list) or len(choices) != 1
-                or choices[0].get("finish_reason") != "stop"):
-                raise ValueError("model or completion status differs")
-            text = choices[0]["message"]["content"]
-            if not isinstance(text, str):
-                raise ValueError("completion has no text")
-        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-            raise GymJobError("frontier request failed or returned an incomplete response") from exc
-        try:
-            parsed_response = parse_strict_json(text.encode("utf-8"))
-        except ValueError:
-            parsed_response = text
-        receipt = {"kind": "nf_openai_response_receipt_v1", "provider": "openai" if self._endpoint == OPENAI_CHAT_COMPLETIONS_URL else "openai_compatible",
-                   "response_id": document["id"], "reported_model": document["model"],
-                   "immutable_snapshot_verified": False, "usage": document.get("usage"),
-                   "api_attempts": self._api_attempts, "reserved_cost_microusd": self._reserved_cost_microusd,
-                   "system_fingerprint": document.get("system_fingerprint"), "response_created": document["created"],
-                   "requested_at_unix_ns": requested_at_ns, "latency_ns": time.monotonic_ns() - started,
-                   "request_digest": _document_digest(payload), "interaction_digest": _document_digest(interaction),
-                   "response_digest": _document_digest(parsed_response), "wire_response_digest": _document_digest(document)}
+        fields: dict[str, Any] = {"api_attempts": self._api_attempts,
+                                  "reserved_cost_microusd": self._reserved_cost_microusd}
         if self._proof_configuration is not None:
-            receipt["configuration_digest"] = self._proof_configuration["configuration_digest"]
-            receipt["scorer_digest"] = self._proof_configuration["scorer"]["implementation_digest"]
-        receipt["receipt_digest"] = _document_digest(receipt)
+            fields["configuration_digest"] = self._proof_configuration["configuration_digest"]
+            fields["scorer_digest"] = self._proof_configuration["scorer"]["implementation_digest"]
+        result = completion(endpoint=self._endpoint, api_key=self._api_key, payload=payload,
+                            interaction=interaction, receipt_fields=fields)
+        receipt = dict(result.interaction["api_response_receipt"])
         self._response_receipts.append(receipt)
-        return ExecutionResponse(parsed_response, {"served_model_identity_verified": False,
-                                                   "api_response_receipt": dict(receipt)})
+        return result

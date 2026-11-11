@@ -20,6 +20,7 @@ from .gym_job import (
 from .gym_lifecycle import AdapterIdentity, TaskAdapter
 from .gym_service import ExecutionResponse, _document_digest
 from .proof_pipeline import audit, read_document, score, validate_spec, write_document
+from .proof_policy import load_policy
 from .proof_registry import ProofRegistry, builtin_registry
 from .provenance import sha256_file
 
@@ -141,10 +142,20 @@ def public_audit(*, spec: Mapping[str, Any]) -> dict[str, Any]:
 
 def compose(configuration: Mapping[str, Any]) -> tuple[dict[str, Any], ProofRegistry]:
     if (configuration.get("kind") != "nf_company_facts_public_fixture_config"
-        or configuration.get("version") != 1
+        or configuration.get("version") not in {1, 2}
         or configuration.get("evidence_class") != "software_fixture"):
         raise GymJobError("unsupported company fixture configuration")
     registry, references = builtin_registry()
+    bound_reference = None
+    if configuration["version"] == 2:
+        bound_reference = dict(configuration["policy_reference"])
+        policy_path = Path(bound_reference["path"])
+        if not policy_path.is_absolute():
+            policy_path = Path(__file__).resolve().parents[2] / policy_path
+        bound_reference["path"] = str(policy_path)
+        policy = load_policy(bound_reference)
+    else:
+        policy = configuration["policy"]
     custom = {}
     for kind, factory in (("gym", company_task), ("provider", provider),
                           ("evidence", evidence), ("public_audit", public_audit)):
@@ -171,10 +182,12 @@ def compose(configuration: Mapping[str, Any]) -> tuple[dict[str, Any], ProofRegi
                          "rows_digest": _document_digest({"rows": rows})}],
         "gates": [{"name": "software-contract", "set": "company-public",
                    "metric": "supported_fact", "minimum": len(rows)}],
-        "policy": configuration["policy"], "download_allowed": False,
+        "policy": policy, "download_allowed": False,
         "holdout_accessed": False, "release_authorized": False,
         "configuration_digest": _document_digest(configuration),
     }
+    if bound_reference is not None:
+        spec["policy_reference"] = bound_reference
     validate_spec(spec, registry)
     return spec, registry
 

@@ -12,6 +12,7 @@ from typing import Any
 from .gym_job import GymJobError
 from .gym_service import _document_digest
 from .proof_pipeline import audit, read_document, validate_spec, write_document
+from .proof_policy import load_policy, policy_reference
 from .proof_registry import builtin_registry
 from .provenance import sha256_file
 
@@ -59,13 +60,7 @@ def decontaminate_base_rows(base_rows: list[dict[str, Any]], public_sets: list[d
 
 
 def public_policy() -> dict[str, Any]:
-    return {
-        "version": 1, "context_tokens": 512, "max_new_tokens": 128,
-        "identity": {"version": 1, "probe_count": 16, "logprob_atol": 1e-6},
-        "api": {"version": 1, "calls_authorized": False, "maximum_api_attempts": 192,
-                "maximum_cost_microusd": 100000},
-        "report_only": True, "adaptive_retraining": False,
-    }
+    return load_policy(policy_reference())
 
 
 def preparation_spec(document: Mapping[str, Any], *, policy_path: Path) -> dict[str, Any]:
@@ -99,6 +94,7 @@ def preparation_spec(document: Mapping[str, Any], *, policy_path: Path) -> dict[
         "audit": {"policy_path": str(policy_path), "policy_file_digest": sha256_file(policy_path),
                   "public_sets": ["required16"]},
         "policy": public_policy(), "preparation_digest": document["preparation_digest"],
+        "policy_reference": policy_reference(),
         "download_allowed": False, "holdout_accessed": False, "release_authorized": False,
     }
     return spec

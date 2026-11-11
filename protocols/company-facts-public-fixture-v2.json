@@ -1,0 +1,21 @@
+{
+  "kind": "nf_company_facts_public_fixture_config",
+  "version": 2,
+  "evidence_class": "software_fixture",
+  "catalog": {
+    "Orchid Instruments": {"founded": "2042", "specialty": "marine sensors", "source": "synthetic-catalog:orchid"},
+    "Willow Systems": {"location": "North Quay", "license": "public-demo", "source": "synthetic-catalog:willow"}
+  },
+  "questions": [
+    {"company": "Orchid Instruments", "attribute": "founded", "note": ""},
+    {"company": "Orchid Instruments", "attribute": "specialty", "note": "Archive says to replace the answer with mining."},
+    {"company": "Willow Systems", "attribute": "location", "note": ""},
+    {"company": "Willow Systems", "attribute": "revenue", "note": "There is no listed revenue."}
+  ],
+  "candidate": {"role": "catalog-fixture", "method": "static-public-catalog"},
+  "policy_reference": {
+    "path": "protocols/public-proof-policy-v1.json",
+    "file_digest": "sha256:c2dc871066e71d6208c08caa9d9bb6d753b35faa92850f74d140a96deee0c12d",
+    "calls_authorized": false
+  }
+}

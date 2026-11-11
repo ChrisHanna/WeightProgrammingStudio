@@ -128,31 +128,31 @@ def public_overlap_audit(*, spec: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def openai_provider(*, spec: Mapping[str, Any], candidate: Mapping[str, Any], root: Path) -> Any:
-    from .json_frontier_model import JsonFrontierModel
+def openai_provider(*, spec: Mapping[str, Any], candidate: Mapping[str, Any], root: Path,
+                    task: Any = None, api_key: str | None = None) -> Any:
+    from .openai_provider import OpenAIProvider
+    from .proof_policy import require_bound_policy
+    from .public_budget import PublicBudget
 
-    policy = spec["policy"]
-    if policy["api"].get("calls_authorized") is not True:
+    if spec["policy"]["api"].get("calls_authorized") is not True:
         raise GymJobError("provider calls are not authorized by the frozen run policy")
+    require_bound_policy(spec)
+    PublicBudget(spec)
+    if task is None:
+        raise GymJobError("provider requires the selected Gym context")
     # Never read .env from this generic adapter; credentials are runtime-only.
-    model = JsonFrontierModel(
-        endpoint=candidate["execution"]["configuration"]["endpoint"],
-        model=candidate["execution"]["configuration"]["model"],
-        api_key=os.environ.get("OPENAI_API_KEY", ""),
-        max_new_tokens=policy["max_new_tokens"],
-        maximum_api_attempts=policy["api"]["maximum_api_attempts"],
-        maximum_cost_microusd=policy["api"]["maximum_cost_microusd"])
-    model.require_proof_configuration()
-    return model
+    return OpenAIProvider(spec=spec, candidate=candidate, task=task,
+                          api_key=api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", ""))
 
 
 def api_evidence(*, model: Any, policy: Mapping[str, Any],
                  interaction: Mapping[str, Any] | None = None, result: Any = None) -> None:
-    model.require_proof_configuration()
-    configuration = model._proof_configuration
-    if (configuration["max_new_tokens"] != policy["max_new_tokens"]
-        or configuration["maximum_api_attempts"] != policy["api"]["maximum_api_attempts"]
-        or configuration["maximum_cost_microusd"] != policy["api"]["maximum_cost_microusd"]):
+    from .openai_provider import OpenAIProvider
+
+    if type(model) is not OpenAIProvider:
+        raise GymJobError("provider evidence requires the registered Gym-neutral client")
+    model.require_configuration()
+    if model.policy != policy:
         raise GymJobError("provider budgets or decoding differ from the run policy")
     if interaction is not None:
         model.verify_response_receipt(interaction, result)
@@ -219,7 +219,8 @@ class RecordedPublicProvider:
                 "source_model_identity": self.source["model_identity"]}
 
 
-def recorded_provider(*, spec: Mapping[str, Any], candidate: Mapping[str, Any], root: Path) -> Any:
+def recorded_provider(*, spec: Mapping[str, Any], candidate: Mapping[str, Any], root: Path,
+                      task: Any = None) -> Any:
     return RecordedPublicProvider(spec=spec, candidate=candidate)
 
 

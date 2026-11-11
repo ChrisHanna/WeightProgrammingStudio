@@ -38,6 +38,10 @@ def validate_spec(spec: Mapping[str, Any], registry: ProofRegistry) -> None:
         raise GymJobError("unsupported public proof run spec")
     if spec.get("download_allowed") is not False or spec.get("holdout_accessed") is not False:
         raise GymJobError("public proof forbids downloads and holdout access")
+    if "policy_reference" in spec:
+        from .proof_policy import require_bound_policy
+
+        require_bound_policy(spec)
     model = spec.get("base_model", {})
     if not all(isinstance(model.get(key), str) and model[key] for key in ("model_id", "revision")):
         raise GymJobError("run spec requires an explicit pinned base model")
@@ -207,7 +211,8 @@ def train(spec: Mapping[str, Any], *, role: str, root: Path, automodel_python: s
         "holdout_accessed": False, "provider_called": False, "release_authorized": False}, "result_digest")
 
 
-def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]], *,
+                      progress: dict[str, int] | None = None) -> dict[str, Any]:
     """Resolve the Gym's own scorer rather than importing a task-specific scorer."""
     from .gym_service import ExecutionResponse
 
@@ -220,7 +225,11 @@ def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]]) -> dict
     for row in rows:
         validate_task_instance(task.job.task_input_schema, row["input"], field="input")
         interaction = task.project(row["input"], None)
+        if progress is not None:
+            progress["public_inference_dispatches"] += 1
         output = model.infer(interaction)
+        if progress is not None:
+            progress["public_responses_returned"] += 1
         response = output.response if isinstance(output, ExecutionResponse) else output
         evidence = dict(output.interaction) if isinstance(output, ExecutionResponse) else {}
         try:
@@ -238,6 +247,8 @@ def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]]) -> dict
         records.append({"scenario_id": row["scenario_id"], "response": response,
                         "format_valid": bool(valid), "execution_evidence": evidence,
                         "metrics": dict(metrics)})
+        if progress is not None:
+            progress["scored_responses"] += 1
     names = records[0]["metrics"].keys()
     if any(record["metrics"].keys() != names for record in records):
         raise GymJobError("Gym scorer changed metric names within a public set")
@@ -269,15 +280,41 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
             or failure.get("role") != role or failure.get("complete") is not False
             or failure.get("run_spec_digest") != _document_digest(spec)):
             raise GymJobError("explicit local infrastructure retry requires the matching failed receipt")
+        counters = ("public_inference_dispatches", "public_responses_returned", "scored_responses")
+        if (failure.get("attempt_evidence_version") != 2
+            or failure.get("failed_stage") not in {"server_startup", "pre_inference"}
+            or any(type(failure.get(key)) is not int or failure[key] != 0 for key in counters)):
+            raise GymJobError("infrastructure retry requires explicit pre-inference failure and zero responses")
+        claim_name = failure.get("attempt_claim_name")
+        if (not isinstance(claim_name, str) or Path(claim_name).name != claim_name
+            or not claim_name.startswith(f"public-score-{role}") or not claim_name.endswith(".started.json")
+            or (root / claim_name).is_symlink()):
+            raise GymJobError("infrastructure retry requires a preserved attempt claim")
+        try:
+            previous_claim = read_document(root / claim_name)
+        except OSError as error:
+            raise GymJobError("infrastructure retry attempt claim is missing") from error
+        if (previous_claim["document_digest"] != failure.get("attempt_claim_digest")
+            or previous_claim.get("run_spec_digest") != _document_digest(spec)
+            or previous_claim.get("role") != role):
+            raise GymJobError("infrastructure retry attempt claim differs")
         retry_digest = failure["document_digest"]
     attempt = "" if retry_digest is None else "-retry-" + retry_digest[7:23]
     stage = "server_startup"
+    progress = {"public_inference_dispatches": 0, "public_responses_returned": 0,
+                "scored_responses": 0}
+    claim_name = f"public-score-{role}{attempt}.started.json"
+    claim_digest = None
     try:
-        write_document(root / f"public-score-{role}{attempt}.started.json", {
+        claim = write_document(root / claim_name, {
             "role": role, "run_spec_digest": _document_digest(spec), "report_only": True,
             "retry_of_failure_digest": retry_digest,
             "holdout_accessed": False, "provider_calls_authorized": spec["policy"]["api"].get("calls_authorized", False)})
-        server = factory(spec=spec, candidate=selected, root=root)
+        claim_digest = claim["document_digest"]
+        if execution["kind"] == "provider":
+            server = factory(spec=spec, candidate=selected, root=root, task=task)
+        else:
+            server = factory(spec=spec, candidate=selected, root=root)
         with server as model:
             stage = "identity_verification"
             evidence(model=model, policy=spec["policy"])
@@ -287,7 +324,7 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
                     continue
                 rows = panel["rows"]
                 stage = "public_inference"
-                result = score_public_rows(task, model, rows)
+                result = score_public_rows(task, model, rows, progress=progress)
                 for row, response in zip(rows, result["responses"], strict=True):
                     evidence(model=model, policy=spec["policy"], interaction=task.project(row["input"], None),
                              result=ExecutionResponse(response["response"], response["execution_evidence"]))
@@ -324,6 +361,8 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
         write_document(root / f"public-score-{role}-failure-{uuid4().hex}.json", {
             "role": role, "run_spec_digest": _document_digest(spec),
             "failed_stage": stage, "retry_of_failure_digest": retry_digest,
+            "attempt_evidence_version": 2, "attempt_claim_name": claim_name,
+            "attempt_claim_digest": claim_digest, **progress,
             "complete": False, "failure_type": type(error).__name__,
             "holdout_accessed": False, "release_authorized": False})
         raise
@@ -331,7 +370,7 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("train", "export", "identity", "score", "audit"))
+    parser.add_argument("stage", choices=("train", "export", "identity", "score", "audit", "budget-init"))
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--role")
@@ -341,7 +380,7 @@ def main() -> None:
     args = parser.parse_args()
     args.spec = args.spec.resolve()
     args.root = args.root.resolve()
-    if args.stage != "audit" and not args.role:
+    if args.stage not in {"audit", "budget-init"} and not args.role:
         parser.error("this stage requires a manifest candidate --role")
     if args.stage == "train" and (not args.automodel_python or not args.reload_python):
         parser.error("training requires existing --automodel-python and --reload-python runtimes")
@@ -349,7 +388,11 @@ def main() -> None:
     spec.pop("document_digest")
     registry, _ = builtin_registry()
     validate_spec(spec, registry)
-    if args.stage == "train":
+    if args.stage == "budget-init":
+        from .public_budget import initialize_public_budget
+
+        result = initialize_public_budget(spec)
+    elif args.stage == "train":
         result = train(spec, role=args.role, root=args.root, automodel_python=args.automodel_python,
                        reload_python=args.reload_python, registry=registry)
     elif args.stage == "export":

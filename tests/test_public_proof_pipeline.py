@@ -464,3 +464,56 @@ def test_local_infrastructure_retry_preserves_failed_claim_and_cannot_replace_sc
     with pytest.raises(GymJobError, match="cannot be replaced"):
         score(spec, role=candidate["role"], root=tmp_path, registry=registry,
               retry_of_failure=failure)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_local_retry_refuses_first_inference_failure_and_partial_panel(tmp_path, partial) -> None:
+    spec, registry = _custom_spec()
+    candidate = spec["candidates"][0]
+    reference = spec["public_sets"][0]["rows"][0]["reference"]
+    if partial:
+        second = deepcopy(spec["public_sets"][0]["rows"][0])
+        second["scenario_id"] += ":second"
+        spec["public_sets"][0]["rows"].append(second)
+        spec["public_sets"][0]["rows_digest"] = _document_digest({"rows": spec["public_sets"][0]["rows"]})
+    calls = []
+
+    class Server:
+        def __enter__(self):
+            def infer(_interaction):
+                calls.append(True)
+                if not partial or len(calls) > 1:
+                    raise OSError("fake inference failure")
+                return ExecutionResponse(reference, {"receipt": "custom"})
+            return SimpleNamespace(infer=infer, loaded_identity=dict)
+
+        def __exit__(self, *_args):
+            pass
+
+    candidate["execution"] = {"kind": "server", "plugin": registry.register(
+        "server", AdapterIdentity("partial-server", "1", _document_digest({"partial": partial})),
+        lambda **_: Server())}
+    with pytest.raises(OSError):
+        score(spec, role=candidate["role"], root=tmp_path, registry=registry)
+    failure = next(tmp_path.glob("*failure*.json"))
+    record = read_document(failure)
+    assert record["public_inference_dispatches"] == (2 if partial else 1)
+    assert record["scored_responses"] == (1 if partial else 0)
+    with pytest.raises(GymJobError, match="pre-inference"):
+        score(spec, role=candidate["role"], root=tmp_path, registry=registry, retry_of_failure=failure)
+    assert len(list(tmp_path.glob("*.started.json"))) == 1
+    assert not list(tmp_path.glob("public-score-arbitrary-candidate.json"))
+
+
+def test_retry_refuses_old_failure_without_explicit_zero_progress_evidence(tmp_path) -> None:
+    spec, registry = _custom_spec()
+    candidate = spec["candidates"][0]
+    factory = registry.resolve("provider", candidate["execution"]["plugin"])
+    candidate["execution"] = {"kind": "server", "plugin": registry.register(
+        "server", AdapterIdentity("old-failure", "1", _document_digest({"old": True})), factory)}
+    failure = tmp_path / "old-failure.json"
+    write_document(failure, {"role": candidate["role"], "complete": False,
+                             "run_spec_digest": _document_digest(spec), "failed_stage": "server_startup"})
+    with pytest.raises(GymJobError, match="pre-inference"):
+        score(spec, role=candidate["role"], root=tmp_path, registry=registry, retry_of_failure=failure)
+    assert not list(tmp_path.glob("*.started.json"))
