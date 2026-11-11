@@ -1,0 +1,77 @@
+# Gym custody extension proposal
+
+**Design only.** Extend the existing custodian rather than introducing a second custody service. No code change, holdout read, new threshold, claim migration, or deployment is authorized by this document. The separately approved [contamination policy](../protocols/json-contamination-v1.json) supplies thresholds; this proposal chooses none.
+
+## Current implementation, not a future guarantee
+
+- [Custodian](../python/neural_foundry/study/custodian.py) is a separate OS process. CLI inputs are a plan path, its digest and a state directory. It verifies the frozen `StudyPlan`, starts or recovers its private hash-chained JSON-lines ledger, and emits a ready frame. The wire uses one JSON request per line on stdin and one response on stdout; stdout/stderr from evaluation are redirected to the private custodian log.
+- `freeze` accepts a manifest containing `plan_digest`, candidate artifacts/digests and synthesis seeds, planned controls, `exposed_operands`, and tuning declarations. Candidates must exactly cover the plan's synthesis seeds; controls must cover its arms. It checks artifact bytes against digests, copies them privately, checks placebo rank/norm when applicable, draws holdout from OS-entropy seeds excluding declared operands, writes the sealed seeds and commitment, persists the manifest, and fsyncs a `freeze` ledger event. A second freeze is refused.
+- `query` accepts only `candidate_digest`. It must name a frozen candidate or control. A fsynced `query_started` event consumes the digest **before** artifact loading, evaluator creation, baseline scoring or candidate scoring. Any prior started query is refused, including after process restart. Candidate evaluation failure produces `query_failed`; a process crash can leave only `query_started`. Neither buys another evaluation. Per-item scores stay sealed; the response contains the arm and aggregate task/retention statistics.
+- `decide` requires a started query for every frozen candidate and control. Started-but-unfinished entries count as failed; they cannot be omitted from the study. It calculates the study-specific effects/controls and retention decision, writes the decision and ledger event, and returns a stored decision on subsequent calls.
+- Unknown operations, including `audit`, are refused. Expected refusals return a code and bounded message. Unexpected exceptions return `INTERNAL_ERROR` with a request reference, not a traceback. Tracebacks go to the private log. `egress()` rejects payloads containing any full held-out prompt; it is a final guard, **not** a structural aggregate-schema validator or a complete data-loss-prevention mechanism.
+- `audit_sealed_state()` is an **offline post-study auditor helper**, not a protocol operation. It regenerates and checks the commitment and returns raw items/exposure/manifest to that auditor. The proposer must not call it before a decision. This proposal never invokes it.
+- The [client](../python/neural_foundry/study/client.py) launches this process under the same OS user, inherits environment variables, and records the wire transcript. A private file mode is not protection against the same user. `_write_private()` writes/truncates and fsyncs files; it is not the atomic replace plus directory-fsync protocol used by the frontier claim. The JSON ledger currently has no shared cross-process lease around concurrent custodian instances. Crash-safety at the query-consumption point must not be overstated as complete multi-process or freeze-transaction qualification.
+
+## What Gym execution is missing
+
+The current plan, generator, evaluator and decision types are controlled-study-specific. Holdout items are study `Item` objects with clusters, operands and forced-choice targets; evaluation expects in-process candidate tensor artifacts, not arbitrary Gym Job inputs, vLLM model directories or remote provider identities. The core assumes planned synthesis seeds and controls and computes its own bootstrap/Holm study decision. It does not import Gym Job scorer contracts, arbitrary candidate rosters, serving identity probes, provider receipts, budgets, or a training-overlap request.
+
+Existing named evaluator and item-generator factories are useful prior art, but not a Gym plugin API. The [Rust exposure ledger](../crates/nf-experiments/src/coordinator/exposure.rs) is distinct from the custodian's JSON ledger. There is no existing bridge that makes the Python custodian's events authenticated native disclosures. The JSON proof's local overlap read cannot be retroactively represented as an independently witnessed native access.
+
+## Versioned manifest and allowlisted registries
+
+Add a separately versioned Gym mode while preserving the controlled-study protocol. The frozen manifest binds:
+
+- Gym plugin name/version/implementation digest and typed config; source and split identities, commitment and prior exposure records.
+- Scorer and evaluator registry references with independent implementation/config digests; projection and decoding policy digests.
+- Any declared candidate list, each with a unique ID, method, artifact identity or provider identity, evidence type and required checks. Names such as `sft`, `lora` and `frontier` are data, not branches in custodian core.
+- Audit plugin reference/config, approved audit-policy digest, training artifact identity, allowed audit count and release schema.
+- Frozen run/decision policy, budgets, role permissions, provider egress authorization and claim namespace.
+
+Only administrator-approved registry names resolve to code. Reject module paths, executable commands, arbitrary imports, mutable plugin versions, unknown config keys, incompatible protocols, or a changed implementation digest. Resolve gym, scorer, evaluator and audit through typed registries; no invoice schema or JSON-specific branching belongs in the custodian core. Plugin conformance does not itself qualify secrecy or a model.
+
+## Proposed `audit` request and aggregate receipt
+
+Proposed request fields: `op: audit`, protocol version, frozen manifest digest, request/operation ID, `training_rows_digest`, a custodian-readable training artifact location, and the manifest-bound audit registry reference/config and policy digest. No caller-supplied holdout location or inline holdout material is accepted.
+
+Before any split read, verify the manifest/policy/plugin identities, snapshot training bytes into custodian-controlled storage, verify their canonical digest, validate schemas and resolve only the already-committed holdout. Enforce location allowlists, symlink/TOCTOU protections, size bounds and a read-only training mount. A path is a transfer locator, not artifact identity. Do not execute code from a training artifact.
+
+Separate a bounded **pretraining audit freeze** from the later **candidate freeze**: the audit binds the fixed training artifact, holdout commitment and policy without requiring not-yet-trained candidate artifacts. Candidate freeze must reference its completed audit receipt and the same training lineage. This avoids either training before the required audit or evaluating unfrozen candidates. A changed training artifact requires a new explicitly approved audit operation and retains the old exposure.
+
+Persist `audit_started` and acquire its authoritative native operation ticket before touching sealed rows. Run the allowlisted plugin internally against training and the committed split. The plugin may inspect rows inside custody but may not emit row-level output or change thresholds. Validate its result against a closed aggregate-only schema before release.
+
+Receipt fields: protocol/receipt version, operation ID, manifest identity, training artifact digest, audit plugin/config and policy digests, opaque split commitment reference, row counts, aggregate exact/normalized n-gram overlap counts, aggregate family/attack-form overlap counts, thresholds **copied from the approved policy**, each check's result, custody qualification, exposure-event references, outcome, and receipt digest/signing identity. No training locator, prompt, reference, matched phrase, scenario ID, per-row hash or nearest-match score may leave custody. `passed` requires every required scope and boundary check; failed or unavailable checks cannot become zero counts.
+
+Exact replay of a completed audit returns its verified stored receipt without reading holdout again and records a cached disclosure. A changed request under an operation ID is refused. A started audit with no durable completed receipt remains spent/incomplete and blocks training acceptance; do not silently repeat queries or infer success from absent output. Recovery/re-audit requires a separately approved policy and preserves prior access. Do not export per-candidate overlap feedback for repeated adaptive data editing.
+
+## Exposure ledger bridge
+
+Use the existing native [exposure protocol](../protocols/exposure-v1.md), including exact registered task/source identities, recipient roles, Requested/Started before availability, and Completed/Failed/Incomplete outcomes. Keep raw split-read events private. Record input availability to the qualified custodian worker, not to the proposer, then separately record aggregate-feedback availability to its authorized recipient. An overlap-only read is still exposure; include the existing out-of-custody synthetic read as declared historical exposure, never as a verified native witness.
+
+The current `Ledger::disclose_score` accepts a **bounded finite scalar artifact only**, not a JSON aggregate receipt. It also refuses holdout feedback into proposal/search. Do not pass an audit receipt through it or disguise an audit as development scoring. The proposed bridge therefore needs an explicitly reviewed aggregate-release operation and authorized audit-review role/phase, or a compatible set of individually bounded disclosures under an approved release contract. Its exact API/schema requires approval; the existing endpoint cannot be claimed to support it.
+
+Link native operation/ticket identity to the Python audit/query event before access. If either durable journal transition fails, fail closed. Native restart reconciliation retains pending attempts as Incomplete; it cannot clear them or manufacture a successful disclosure. Keep signing keys/leases out of plugin workers and public receipts; public references must not expose guessable per-row identities.
+
+## vLLM and API evaluation
+
+Local evaluator plugins resolve a frozen `CandidateRef` and verify artifact/file/state digests, export lineage, pinned server image, prompt renderer and decoding policy. Start serving only a read-only custodian-owned snapshot. Run the existing before/after weight and log-probability identity probes with versioned policy tolerances. Per-item responses, prompts and errors stay private; only schema-checked score aggregates and approved identity summaries leave custody. SFT/LoRA/merged export are trainer/export-plugin concerns, not core evaluation branches.
+
+API evaluator plugins resolve an approved provider registry entry and immutable request configuration. Credentials come from custodian-owned secret injection, never the manifest or transcript. Outbound access is separately approved and endpoint-allowlisted; network isolation of the rest of the worker is retained. The API provider **receives held-out prompts**: log that disclosure and require policy authorization for the provider's data-handling boundary. Calling a remote provider through a custodian does not make the provider unaware of holdout. Verify response/model receipts and account for attempts/costs before transmission. Provider-reported model identity is not served-weight identity or an immutable snapshot. No automatic provider retry after a started one-shot query.
+
+## One authoritative one-shot claim
+
+The [frontier lease and claim](../python/neural_foundry/frontier_evaluation.py) already supply OS-level locking, atomic replace/fsync persistence, request binding and verified completed-report caching. However, `_begin_evaluation_claim()` currently allows bounded resumption of `in_progress`/`retryable` evaluations, and `_finish_evaluation_claim()` marks an incomplete report retryable. That is **not** the custodian's query-once-after-start rule.
+
+For Gym holdout, propose the custodian/native ledger as the authoritative claim owner. Reuse the frontier persistence/lease mechanism under a new explicit strict-one-shot policy, not its retry semantics. The compatibility wrapper delegates to the same claim owner rather than maintaining a second independent counter. Bind claims to run/manifest, candidate/evidence identity, split commitment, projection/scorer/decoding policy and request digest. A new role name, output directory or caller must not reset a consumed candidate query.
+
+Required state machine: durable `reserved` before any access; `started` before any model request; then `complete` with atomically stored, digest-verified aggregate receipt, or `failed`/`incomplete_spent`. A crash after reservation is conservatively spent unless proof of no access is supplied under an approved recovery protocol; no automatic retry. Completed replay returns the verified receipt only, not a new inference. Audit claims use a separate operation kind/budget but the same authoritative ledger and recovery discipline.
+
+Qualify concurrent starts, kill/restart at each write boundary, directory/file fsync, missing/corrupt reports, changed requests, incomplete provider responses, lost responses after API transmission, and exposure-journal failures. Do not reset existing frontier retryable claims or silently migrate old studies to strict one-shot semantics.
+
+## Isolation and approval gates
+
+Separate process/same user remains a development-only boundary. A separate account with exclusive state/key permissions prevents the proposer from reading or deleting custodian files; it still depends on administrator trust and correctly mediated artifacts/logs. A container adds process/filesystem/network/resource boundaries only with restricted mounts, credentials, capabilities and daemon access. A user controlling the Docker daemon or host account can defeat that container boundary. Neither setup alone proves independent scientific custody.
+
+Confirmatory custody requires an explicitly qualified deployment, access policy, authenticated exposure bridge, artifact transfer path, protected logs and signing/verification ownership. The previously public synthetic holdout cannot become secretly unexposed through deployment changes; any fresh confirmation set must be independently drawn and frozen, with known aliases/exposures excluded.
+
+**Awaiting design approval:** manifest compatibility, registry contracts, pretraining audit freeze, aggregate release/recipient policy, native-ledger bridge, strict claim ownership/recovery, API data handling, and deployment qualification. Only after approval implement contract and crash/concurrency tests, then qualify a deployment. No real holdout may be read to test this design; use newly generated software fixtures only.
