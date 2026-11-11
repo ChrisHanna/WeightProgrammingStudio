@@ -262,6 +262,57 @@ def test_prior_overlap_audit_annotation_never_reads_holdout(tmp_path, monkeypatc
         assert json.loads(source.read_text(encoding="utf-8")) == prior
 
 
+@pytest.mark.parametrize("wrong_label", [False, True])
+def test_public_label_audit_preserves_panel_or_refuses_bad_labels(wrong_label) -> None:
+    import runpy
+    from neural_foundry.json_injection_training_data import generate_public_validation_v2_rows
+
+    audit = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "audit_json_public_panel.py"))
+    rows = generate_public_validation_v2_rows(seed=20261112)
+    if wrong_label:
+        rows[0]["reference"] = {"customer": "Wrong", "product": "Wrong", "quantity": 1}
+    panel = {"kind": "nf_json_public_validation_panel_v2", "rows": rows,
+             "rows_digest": _document_digest({"rows": rows})}
+    panel["document_digest"] = _document_digest(panel)
+    card = {"complete": True, "panel_digest": panel["document_digest"],
+            "panel_rows_digest": panel["rows_digest"],
+            "task": {"responses": [{"scenario_id": row["scenario_id"], "response": row["reference"]}
+                                  for row in rows]}}
+    card["document_digest"] = _document_digest(card)
+    result = audit["audit_panel"](panel, card)
+    assert result["clean_cases"] == 96
+    assert result["label_mismatches"] == int(wrong_label)
+    if wrong_label:
+        with pytest.raises(GymJobError, match="unresolved public labels"):
+            audit["freeze_v3"](panel, result)
+    else:
+        frozen = audit["freeze_v3"](panel, result)
+        assert frozen["rows"] == rows
+        assert frozen["rows_digest"] == panel["rows_digest"]
+        assert frozen["independent_confirmation_panel"] is False
+        assert frozen["prior_public_exposure_retained"] is True
+        assert frozen["document_digest"] == _document_digest({
+            key: value for key, value in frozen.items() if key != "document_digest"})
+
+
+def test_public_contamination_audit_cannot_materialize_holdout(monkeypatch) -> None:
+    import runpy
+
+    root = Path(__file__).resolve().parents[1]
+    lifecycle = runpy.run_path(str(root / "scripts" / "run_gym_lifecycle_real.py"))
+    audit = runpy.run_path(str(root / "scripts" / "audit_json_contamination.py"))
+    preparation = lifecycle["prepare_json_robustness_v2_training_request"]()
+    monkeypatch.setitem(audit["build_audit"].__globals__, "generate_scenarios",
+                        lambda **kwargs: pytest.fail("public audit must not generate holdout"))
+    report = audit["build_audit"](preparation)
+    assert report["kind"] == "nf_json_contamination_audit_v2"
+    assert report["injection_vs_required"]["exact_input_matches"] == 0
+    assert report["injection_vs_synthetic_holdout"] is None
+    assert report["synthetic_holdout"]["holdout_accessed"] is False
+    assert report["synthetic_holdout"]["status"] == "not_checked_pending_approved_custodian_interface"
+    assert report["audit_passed"] is False
+
+
 def test_injection_training_generator_is_fresh_train_only_and_balanced() -> None:
     from neural_foundry.json_proof_loop import public_required_rows
 

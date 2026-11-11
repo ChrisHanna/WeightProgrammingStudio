@@ -1,4 +1,4 @@
-"""Write a counts-only overlap audit for synthetic JSON extraction splits."""
+"""Audit public JSON training overlap or annotate a prior read; never materialize holdout."""
 
 from __future__ import annotations
 
@@ -6,14 +6,13 @@ import argparse
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from neural_foundry.gym_service import _document_digest
 from neural_foundry.json_proof_loop import public_required_rows
 from neural_foundry.provenance import parse_strict_json
-from neural_foundry.reference_json_extraction import generate_scenarios
-
 
 _ATTACK_FORMS = {
     "alternate_record": "full_record_substitution",
@@ -111,7 +110,6 @@ def build_audit(preparation: Mapping[str, Any], *, seed: int = 17) -> dict[str, 
         raise ValueError("training rows digest differs")
     injection_rows = [row for row in rows if row.get("scenario_id", "").startswith("train:injection-v1:")]
     required = public_required_rows(seed=seed)
-    holdout = generate_scenarios(split="holdout", seed=seed, parameters={"rows_per_template": 32})
 
     training_forms: Counter[str] = Counter()
     phrase_families: Counter[str] = Counter()
@@ -131,7 +129,7 @@ def build_audit(preparation: Mapping[str, Any], *, seed: int = 17) -> dict[str, 
     }
     shared_phrase_families = sorted(set(phrase_families) & set(required_phrases))
     report = {
-        "kind": "nf_json_contamination_audit_v1",
+        "kind": "nf_json_contamination_audit_v2",
         "training_preparation_digest": preparation.get("preparation_digest"),
         "training_rows_digest": preparation.get("training_rows_digest"),
         "required_set_digest": _document_digest({"rows": required}),
@@ -145,26 +143,20 @@ def build_audit(preparation: Mapping[str, Any], *, seed: int = 17) -> dict[str, 
         "shared_phrasing_families": shared_phrase_families,
         "injection_vs_required": _overlap_counts(injection_rows, required),
         "all_training_vs_required": _overlap_counts(rows, required),
-        "injection_vs_synthetic_holdout": _overlap_counts(injection_rows, holdout),
+        "injection_vs_synthetic_holdout": None,
         "synthetic_holdout": {
-            "split": "holdout",
-            "seed": seed,
-            "rows": len(holdout),
-            "panel_digest": _document_digest({"rows": holdout}),
+            "status": "not_checked_pending_approved_custodian_interface",
             "content_emitted": False,
-            "holdout_accessed": True,
-            "access_purpose": "overlap_only",
-            "access_boundary": "outside_independent_custody",
+            "holdout_accessed": False,
             "model_scoring_performed": False,
             "independent_custody_verified": False,
-            "reason": "the holdout generator and seed are available in the repository; this is a counts-only local audit, not an independently custodied holdout check",
+            "reason": "holdout overlap checks must execute through the approved custodian, not this public audit",
         },
         "raw_examples_emitted": False,
         "matched_ngrams_emitted": False,
-        "holdout_accessed": True,
-        "holdout_access_purpose": "overlap_only",
+        "holdout_accessed": False,
         "audit_passed": False,
-        "audit_passed_reason": "no accepted overlap thresholds or independent holdout custody contract are defined",
+        "audit_passed_reason": "public counts only; a qualified custody overlap receipt is still required",
     }
     report["report_digest"] = _document_digest(report)
     return report
@@ -174,7 +166,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--preparation", type=Path,
-                        help="Run a local overlap audit; this reads synthetic holdout outside custody")
+                        help="Run public overlap checks only; holdout checks require approved custody")
     source.add_argument("--annotate-prior-audit", type=Path,
                         help="Record a prior overlap-only holdout read without reading holdout again")
     parser.add_argument("--output", type=Path, required=True)

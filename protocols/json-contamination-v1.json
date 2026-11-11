@@ -1,0 +1,34 @@
+{
+  "kind": "nf_contamination_policy",
+  "version": 1,
+  "approval": "user-approved 2026-11-11; custody implementation requires separate design approval",
+  "normalization": {
+    "case": "casefold",
+    "word_pattern": "[a-z0-9]+",
+    "exact_match": "unmodified input text equality"
+  },
+  "injection_vs_required": {
+    "maximum_exact_input_matches": 0,
+    "maximum_distinct_shared_5grams": 0,
+    "phrasing_families_must_be_disjoint": true,
+    "shared_3grams": "report_only",
+    "shared_4grams": "report_only",
+    "shared_attack_forms": "report_only; do not claim unseen attack types"
+  },
+  "all_training_vs_required": {
+    "maximum_exact_input_matches": 0,
+    "maximum_distinct_shared_5grams": 0,
+    "shared_3grams": "report_only",
+    "shared_4grams": "report_only"
+  },
+  "holdout": {
+    "maximum_exact_input_matches": 0,
+    "maximum_distinct_shared_5grams": 0,
+    "execution_boundary": "approved_custodian_only",
+    "release": "aggregate_counts_only",
+    "independent_custody_required_for_pass": true,
+    "prior_local_overlap_read_must_be_retained": true
+  },
+  "audit_pass_requires_all_scopes_and_verified_custody": true,
+  "model_scoring_authorized": false
+}
