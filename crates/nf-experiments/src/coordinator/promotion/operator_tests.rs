@@ -423,7 +423,7 @@ fn issuer_and_consumer_race_cannot_admit_partial_authorization() {
 }
 #[test]
 fn actual_writer_crashes_leave_only_complete_authority_and_readable_history() {
-    if isolated_registry_test() { return; }
+    // Crash children must return their own exit code, not an isolation wrapper's.
     if let Ok(path) = std::env::var("NF_OPERATOR_CRASH_ROOT") {
         test_registry(std::path::Path::new(&path));
         let point = WRITE_POINTS
@@ -454,6 +454,7 @@ fn actual_writer_crashes_leave_only_complete_authority_and_readable_history() {
         }
         panic!("writer did not reach crash point");
     }
+    if isolated_registry_test() { return; }
     for action in ["issue", "revoke", "consume"] {
         for point in WRITE_POINTS {
             let registry = Registry::new();
