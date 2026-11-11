@@ -92,7 +92,7 @@ def test_frontier_configuration_pins_shared_prompt_scorer_and_decoding(monkeypat
         key: value for key, value in configuration.items() if key != "configuration_digest"})
     model = JsonFrontierModel(endpoint=OPENAI_CHAT_COMPLETIONS_URL, model=OPENAI_DEFAULT_MODEL, api_key="test-only")
     model.require_proof_configuration()
-    monkeypatch.setattr(json_frontier_model, "frontier_proof_configuration", lambda: {**configuration, "scorer": {}})
+    monkeypatch.setattr(json_frontier_model, "frontier_proof_configuration", lambda **kwargs: {**configuration, "scorer": {}})
     with pytest.raises(GymJobError, match="changed"):
         model.require_proof_configuration()
 
@@ -119,3 +119,13 @@ def test_luna_budget_refuses_request_before_network(monkeypatch) -> None:
     model._reserved_cost_microusd = 50000
     with pytest.raises(GymJobError, match="ceiling"):
         model.infer(interaction)
+
+
+def test_frontier_panel_budget_is_explicit_and_does_not_change_default() -> None:
+    from neural_foundry.json_frontier_model import frontier_proof_configuration
+
+    default = frontier_proof_configuration()
+    panel = frontier_proof_configuration(maximum_api_attempts=192, maximum_cost_microusd=100000)
+    assert (default["maximum_api_attempts"], default["maximum_cost_microusd"]) == (80, 50000)
+    assert (panel["maximum_api_attempts"], panel["maximum_cost_microusd"]) == (192, 100000)
+    assert panel["model"] == "gpt-6-luna" and panel["reasoning_effort"] == "none"

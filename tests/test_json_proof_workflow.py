@@ -150,6 +150,59 @@ def test_training_preparation_freezes_only_train_without_loading_or_dispatch(tmp
         assert all(name.startswith("train:") for name in request["approved_responses"])
 
 
+def test_robustness_v2_preparation_freezes_and_consumes_all_injection_rows(tmp_path) -> None:
+    import runpy
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_gym_lifecycle_real.py"))
+    document = module["prepare_json_robustness_v2_training_request"]()
+    contract = document["data_contract"]
+    rows = document["training_rows"]
+    injected = [row for row in rows if row["scenario_id"].startswith("train:injection-v1:")]
+
+    assert document["kind"] == "nf_json_training_preparation_v2"
+    assert contract["base_rows"] == 320 and contract["injection_rows"] == 64
+    assert document["training_cases"] == 384 and contract["ordered_steps"] == 384
+    assert contract["injection_rows_consumed_by_ordered_steps"] == len(injected) == 64
+    assert all(row["scenario_id"].startswith("train:")
+               and not row["scenario_id"].startswith("train:injection-v1:") for row in rows[:128:2])
+    assert all(rows[index + 1]["scenario_id"].startswith("train:injection-v1:") for index in range(0, 128, 2))
+    assert all(intent["lifecycle_request"]["recipe"]["steps"] == 384
+               for intent in document["intents"].values())
+    assert document["preparation_digest"] == _document_digest({
+        key: value for key, value in document.items() if key != "preparation_digest"})
+    assert document["holdout_accessed"] is False and document["ready_to_train"] is False
+
+    document["training_rows"][0]["input"]["text"] = "tampered"
+    with pytest.raises(GymJobError, match="digest differs"):
+        module["execute_json_training_request"](document, output=tmp_path / "must-not-exist", method="sft",
+            automodel_python="/missing/python", reload_python="/missing/reload")
+    assert not (tmp_path / "must-not-exist").exists()
+
+
+def test_public_validation_v2_panel_is_frozen_and_disjoint(tmp_path) -> None:
+    import runpy
+    lifecycle = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_gym_lifecycle_real.py"))
+    validation = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_json_validation.py"))
+    preparation = lifecycle["prepare_json_robustness_v2_training_request"]()
+    prep_path = tmp_path / "preparation" / "training-preparation.json"
+    prep_path.parent.mkdir()
+    prep_path.write_text(json.dumps(preparation), encoding="utf-8")
+
+    panel = validation["freeze_public_validation_v2"](tmp_path)
+
+    assert panel["kind"] == "nf_json_public_validation_panel_v2"
+    assert len(panel["rows"]) == panel["disjointness_audit"]["panel_cases"] == 192
+    assert panel["disjointness_audit"]["by_category"] == {"clean_compositional": 96, "injection": 96}
+    assert panel["disjointness_audit"]["by_template"] == {
+        "ap_posted_table": 32, "forwarded_mail_conflict": 32, "goods_receipt_crosscheck": 32,
+        "portal_annotation_conflict": 32, "remittance_reconciliation": 32, "scan_footer_conflict": 32,
+    }
+    assert panel["disjointness_audit"]["passed"] is True
+    assert panel["holdout_accessed"] is False
+    assert panel["rows_digest"] == _document_digest({"rows": panel["rows"]})
+    assert panel["document_digest"] == _document_digest({
+        key: value for key, value in panel.items() if key != "document_digest"})
+
+
 def test_injection_training_generator_is_fresh_train_only_and_balanced() -> None:
     from neural_foundry.json_proof_loop import public_required_rows
 

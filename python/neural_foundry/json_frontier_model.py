@@ -24,15 +24,20 @@ _FRONTIER_ENV_NAMES = frozenset({
 })
 
 
-def frontier_proof_configuration() -> dict[str, Any]:
+def frontier_proof_configuration(*, maximum_api_attempts: int = 80,
+                                 maximum_cost_microusd: int = 50000) -> dict[str, Any]:
     from .reference_json_extraction import project, reference_task
 
+    if (type(maximum_api_attempts) is not int or maximum_api_attempts < 1
+        or type(maximum_cost_microusd) is not int or maximum_cost_microusd < 1):
+        raise GymJobError("frontier proof limits must be positive integers")
     task = reference_task()
     document = {"kind": "nf_json_frontier_configuration_v1", "provider": "openai",
                 "endpoint": OPENAI_CHAT_COMPLETIONS_URL, "model": OPENAI_DEFAULT_MODEL,
                 "temperature": 0, "max_new_tokens": 128,
                 "reasoning_effort": "none", "immutable_snapshot_verified": False,
-                "maximum_api_attempts": 80, "maximum_cost_microusd": 50000,
+                "maximum_api_attempts": maximum_api_attempts,
+                "maximum_cost_microusd": maximum_cost_microusd,
                 "prompt_template": project({"text": "{text}"}, None),
                 "projection": task.projection.document(),
                 "scorer": {"id": task.job.scorer.component_id, "version": task.job.scorer.version,
@@ -76,7 +81,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class JsonFrontierModel:
-    def __init__(self, *, endpoint: str, model: str, api_key: str, max_new_tokens: int = 128) -> None:
+    def __init__(self, *, endpoint: str, model: str, api_key: str, max_new_tokens: int = 128,
+                 maximum_api_attempts: int = 80, maximum_cost_microusd: int = 50000) -> None:
         parsed = urlsplit(endpoint)
         try:
             loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
@@ -89,8 +95,13 @@ class JsonFrontierModel:
             raise GymJobError("frontier requires an explicit model and API credential")
         if type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 4096:
             raise GymJobError("frontier output token budget is invalid")
+        if (type(maximum_api_attempts) is not int or maximum_api_attempts < 1
+            or type(maximum_cost_microusd) is not int or maximum_cost_microusd < 1):
+            raise GymJobError("frontier proof limits must be positive integers")
         self._endpoint, self._model, self._api_key = endpoint, model, api_key
         self._host, self._max_new_tokens = parsed.hostname, max_new_tokens
+        self._maximum_api_attempts = maximum_api_attempts
+        self._maximum_cost_microusd = maximum_cost_microusd
         self._response_receipts: list[dict[str, Any]] = []
         self._proof_configuration: dict[str, Any] | None = None
         self._api_attempts = 0
@@ -100,7 +111,9 @@ class JsonFrontierModel:
         if (self._endpoint != OPENAI_CHAT_COMPLETIONS_URL or self._model != OPENAI_DEFAULT_MODEL
             or self._max_new_tokens != 128):
             raise GymJobError("frontier proof requires the approved OpenAI endpoint, model ID and token cap")
-        configuration = frontier_proof_configuration()
+        configuration = frontier_proof_configuration(
+            maximum_api_attempts=self._maximum_api_attempts,
+            maximum_cost_microusd=self._maximum_cost_microusd)
         if self._proof_configuration is not None and self._proof_configuration != configuration:
             raise GymJobError("frontier prompt or scorer changed after configuration was frozen")
         self._proof_configuration = configuration
@@ -115,12 +128,16 @@ class JsonFrontierModel:
             raise GymJobError("frontier response lacks a matching API response receipt")
 
     @classmethod
-    def from_env(cls, *, env_file: str | os.PathLike[str] | None = None) -> JsonFrontierModel:
+    def from_env(cls, *, env_file: str | os.PathLike[str] | None = None,
+                 maximum_api_attempts: int = 80,
+                 maximum_cost_microusd: int = 50000) -> JsonFrontierModel:
         values = _frontier_environment(env_file)
         return cls(
             endpoint=values.get("NF_FRONTIER_URL") or OPENAI_CHAT_COMPLETIONS_URL,
             model=values.get("NF_FRONTIER_MODEL") or OPENAI_DEFAULT_MODEL,
             api_key=values.get("NF_FRONTIER_API_KEY") or values.get("OPENAI_API_KEY", ""),
+            maximum_api_attempts=maximum_api_attempts,
+            maximum_cost_microusd=maximum_cost_microusd,
         )
 
     def __enter__(self) -> JsonFrontierModel:
@@ -158,7 +175,8 @@ class JsonFrontierModel:
             payload["reasoning_effort"] = "none"
             input_token_bound = len(json.dumps(payload, allow_nan=False).encode()) + 1024
             reserved_cost = (input_token_bound + 7) // 8 + (self._max_new_tokens + 1) // 2
-            if self._api_attempts >= 80 or self._reserved_cost_microusd + reserved_cost > 50000:
+            if (self._api_attempts >= self._maximum_api_attempts
+                or self._reserved_cost_microusd + reserved_cost > self._maximum_cost_microusd):
                 raise GymJobError("approved frontier API attempt or cost ceiling reached")
             self._api_attempts += 1
             self._reserved_cost_microusd += reserved_cost

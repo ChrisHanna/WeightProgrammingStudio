@@ -183,8 +183,8 @@ def prepare_json_training_request(*, seed: int = 17, rows_per_template: int = 32
     from neural_foundry.json_frontier_model import frontier_proof_configuration
     from neural_foundry.reference_json_extraction import generate_scenarios, reference_task
 
-    if type(steps) is not int or not 1 <= steps <= 256:
-        raise GymJobError("prepared training steps must be an integer from 1 to 256")
+    if type(steps) is not int or not 1 <= steps <= 512:
+        raise GymJobError("prepared training steps must be an integer from 1 to 512")
     task = reference_task(rows_per_template=rows_per_template)
     rows = generate_scenarios(split="train", seed=seed, parameters={"rows_per_template": rows_per_template})
     approved = {row["scenario_id"]: row["reference"] for row in rows}
@@ -221,6 +221,45 @@ def prepare_json_training_request(*, seed: int = 17, rows_per_template: int = 32
     return document
 
 
+def prepare_json_robustness_v2_training_request() -> dict[str, Any]:
+    from neural_foundry.json_injection_training_data import (
+        generate_train_injection_rows, interleave_train_injection_rows,
+    )
+    from neural_foundry.reference_json_extraction import reference_task
+
+    seed, rows_per_template, injection_seed, injection_examples_per_template = 17, 32, 20261111, 16
+    steps = rows_per_template * 10 + injection_examples_per_template * 4
+    document = prepare_json_training_request(seed=seed, rows_per_template=rows_per_template, steps=steps)
+    base_rows = document["training_rows"]
+    injection_rows = generate_train_injection_rows(seed=injection_seed,
+        examples_per_template=injection_examples_per_template)
+    rows = interleave_train_injection_rows(base_rows, injection_rows)
+    task = reference_task(rows_per_template=rows_per_template)
+    projected = [task.project(row["input"], row["reference"]) for row in rows]
+    for intent in document["intents"].values():
+        intent["lifecycle_request"]["approved_responses"] = {row["scenario_id"]: row["reference"] for row in rows}
+        intent["request_digest"] = _document_digest(intent["lifecycle_request"])
+    document.update({
+        "kind": "nf_json_training_preparation_v2",
+        "training_cases": len(rows),
+        "training_rows_digest": _document_digest({"rows": rows}),
+        "projected_demonstrations_digest": _document_digest({"interactions": projected}),
+        "training_rows": rows,
+        "data_contract": {
+            "version": 2, "base_seed": seed, "base_rows_per_template": rows_per_template,
+            "injection_seed": injection_seed, "injection_examples_per_template": injection_examples_per_template,
+            "base_rows": len(base_rows), "injection_rows": len(injection_rows),
+            "interleaving": "base_then_injection_pairs_v1", "ordered_steps": steps,
+            "base_rows_digest": _document_digest({"rows": base_rows}),
+            "injection_rows_digest": _document_digest({"rows": injection_rows}),
+            "injection_rows_consumed_by_ordered_steps": len(injection_rows),
+        },
+    })
+    document["preparation_digest"] = _document_digest({key: value for key, value in document.items()
+                                                        if key != "preparation_digest"})
+    return document
+
+
 def execute_json_training_request(document: Mapping[str, Any], *, output: Path, method: str,
                                   automodel_python: str, reload_python: str) -> dict[str, Any]:
     from neural_foundry.backends.automodel.config import AutoModelBackendConfig
@@ -233,8 +272,12 @@ def execute_json_training_request(document: Mapping[str, Any], *, output: Path, 
         raise GymJobError("training preparation digest differs")
     recipe = document["intents"][method]["lifecycle_request"]["recipe"]
     rows = document["training_rows"]
-    rows_per_template = len(rows) // 10
-    expected = prepare_json_training_request(seed=recipe["seed"], rows_per_template=rows_per_template, steps=recipe["steps"])
+    if document.get("kind") == "nf_json_training_preparation_v2":
+        expected = prepare_json_robustness_v2_training_request()
+        rows_per_template = expected["data_contract"]["base_rows_per_template"]
+    else:
+        rows_per_template = len(rows) // 10
+        expected = prepare_json_training_request(seed=recipe["seed"], rows_per_template=rows_per_template, steps=recipe["steps"])
     if document != expected:
         raise GymJobError("training preparation differs from the frozen train-only contract")
     for interpreter in (automodel_python, reload_python):
@@ -272,6 +315,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--prepare-json-training", action="store_true", help="Freeze train-only SFT/LoRA intents without loading a model or dispatching work")
+    parser.add_argument("--robustness-v2", action="store_true", help="Freeze the versioned train-only injection-augmented SFT/LoRA preparation")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--rows-per-template", type=int, default=32)
     parser.add_argument("--training-steps", type=int, default=32)
@@ -284,7 +328,7 @@ def main() -> None:
     parser.add_argument("--interrupt-training-after-step", type=int, help="Test fault injection after a committed optimizer step")
     args = parser.parse_args()
     if args.execute_json_training is not None:
-        if (args.allow_download or args.prepare_json_training or args.resume or args.tool_only
+        if (args.allow_download or args.prepare_json_training or args.robustness_v2 or args.resume or args.tool_only
             or args.training_method is None or args.automodel_python is None or args.reload_python is None):
             parser.error("execution requires a frozen preparation, method and existing runtime paths; downloads are forbidden")
         document = json.loads(args.execute_json_training.read_bytes())
@@ -295,7 +339,12 @@ def main() -> None:
     if args.prepare_json_training:
         if args.allow_download or args.resume or args.tool_only or args.interrupt_training_after_step is not None:
             parser.error("preparation cannot download, resume, train, or inject runtime faults")
-        document = prepare_json_training_request(seed=args.seed, rows_per_template=args.rows_per_template, steps=args.training_steps)
+        if args.robustness_v2:
+            if (args.seed != 17 or args.rows_per_template != 32 or args.training_steps != 32):
+                parser.error("robustness-v2 uses its frozen seeds, dataset sizes, and optimizer steps")
+            document = prepare_json_robustness_v2_training_request()
+        else:
+            document = prepare_json_training_request(seed=args.seed, rows_per_template=args.rows_per_template, steps=args.training_steps)
         output = args.output_dir.resolve()
         output.mkdir(parents=True, mode=0o700, exist_ok=False)
         with (output / "training-preparation.json").open("x", encoding="utf-8") as stream:
@@ -304,6 +353,8 @@ def main() -> None:
         print(json.dumps({"preparation_digest": document["preparation_digest"], "status": document["status"],
                           "training_cases": document["training_cases"], "ready_to_train": False}))
         return
+    if args.robustness_v2:
+        parser.error("--robustness-v2 requires --prepare-json-training")
     output = args.output_dir.resolve()
     if output.exists() and any(output.iterdir()) and not args.resume:
         raise FileExistsError("Choose a fresh output directory")
