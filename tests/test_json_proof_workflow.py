@@ -203,6 +203,65 @@ def test_public_validation_v2_panel_is_frozen_and_disjoint(tmp_path) -> None:
         key: value for key, value in panel.items() if key != "document_digest"})
 
 
+def test_frontier_panel_claim_prevents_budget_reset(tmp_path, monkeypatch) -> None:
+    import runpy
+    from neural_foundry.json_frontier_model import JsonFrontierModel
+
+    lifecycle = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_gym_lifecycle_real.py"))
+    validation = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_json_validation.py"))
+    preparation = lifecycle["prepare_json_robustness_v2_training_request"]()
+    prep_path = tmp_path / "preparation" / "training-preparation.json"
+    prep_path.parent.mkdir()
+    prep_path.write_text(json.dumps(preparation), encoding="utf-8")
+    validation["freeze_public_validation_v2"](tmp_path)
+    monkeypatch.setattr(JsonFrontierModel, "from_env", lambda **kwargs: JsonFrontierModel(
+        endpoint="https://api.openai.com/v1/chat/completions", model="gpt-6-luna",
+        api_key="test-only", **kwargs))
+
+    def fail_before_network(self):
+        raise GymJobError("test interruption before network")
+
+    monkeypatch.setattr(JsonFrontierModel, "__enter__", fail_before_network)
+    with pytest.raises(GymJobError, match="test interruption"):
+        validation["score_frontier_panel"](tmp_path)
+    with pytest.raises(FileExistsError):
+        validation["score_frontier_panel"](tmp_path)
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_prior_overlap_audit_annotation_never_reads_holdout(tmp_path, monkeypatch, tampered) -> None:
+    import runpy
+    import sys
+
+    audit = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "audit_json_contamination.py"))
+    prior = {"kind": "nf_json_contamination_audit_v1", "audit_passed": False,
+             "synthetic_holdout": {"independent_custody_verified": False, "content_emitted": False}}
+    prior["report_digest"] = _document_digest(prior)
+    if tampered:
+        prior["audit_passed"] = True
+    source, output = tmp_path / "prior.json", tmp_path / "correction.json"
+    source.write_text(json.dumps(prior), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["audit", "--annotate-prior-audit", str(source), "--output", str(output)])
+    monkeypatch.setitem(audit["main"].__globals__, "generate_scenarios",
+                        lambda **kwargs: pytest.fail("annotation must not read holdout"))
+    if tampered:
+        with pytest.raises(ValueError, match="digest or kind"):
+            audit["main"]()
+        assert not output.exists()
+    else:
+        audit["main"]()
+        corrected = json.loads(output.read_text(encoding="utf-8"))
+        assert corrected["holdout_accessed"] is True
+        assert corrected["holdout_access_purpose"] == "overlap_only"
+        assert corrected["synthetic_holdout"]["access_boundary"] == "outside_independent_custody"
+        assert corrected["annotation_reads_holdout"] is False
+        assert corrected["audit_passed"] is False
+        assert corrected["supersedes_report_digest"] == prior["report_digest"]
+        assert corrected["report_digest"] == _document_digest({
+            key: value for key, value in corrected.items() if key != "report_digest"})
+        assert json.loads(source.read_text(encoding="utf-8")) == prior
+
+
 def test_injection_training_generator_is_fresh_train_only_and_balanced() -> None:
     from neural_foundry.json_proof_loop import public_required_rows
 

@@ -258,6 +258,8 @@ def score_frontier_panel(root: Path) -> None:
     preparation = read_document(root / "preparation" / "training-preparation.json", "preparation_digest")
     panel = read_document(root / "public-validation-v2" / "panel.json", "document_digest")
     if (preparation.get("kind") != "nf_json_training_preparation_v2"
+        or panel.get("kind") != "nf_json_public_validation_panel_v2"
+        or len(panel.get("rows", [])) != 192
         or panel.get("training_preparation_digest") != preparation["preparation_digest"]
         or panel.get("disjointness_audit", {}).get("passed") is not True
         or panel.get("rows_digest") != _document_digest({"rows": panel.get("rows")})):
@@ -265,6 +267,9 @@ def score_frontier_panel(root: Path) -> None:
     limits = {"maximum_api_attempts": len(panel["rows"]), "maximum_cost_microusd": 100000}
     model_context = JsonFrontierModel.from_env(**limits)
     model_context.require_proof_configuration()
+    claim = root / "frontier-192-one-shot.claim"
+    with claim.open("x", encoding="utf-8") as stream:
+        json.dump({"panel_digest": panel["document_digest"], **limits}, stream, sort_keys=True)
     task = reference_task(rows_per_template=32)
     with model_context as model:
         _require_model_evidence(model, "frontier")
