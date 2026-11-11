@@ -165,6 +165,7 @@ fn budget() -> Budget {
         cpu_ms: 16000,
         wall_ms: 16000,
         storage_bytes: 256 * 1024 * 1024,
+        deadline_policy: None,
     }
 }
 fn runtime(root: &Root) -> QualifiedDocker {
@@ -349,6 +350,7 @@ fn complete_valid_audit_executes_all_six_controls_under_live_deadline() {
             cpu_ms: 24000,
             wall_ms: 24000,
             storage_bytes: 384 * 1024 * 1024,
+            deadline_policy: None,
         },
         &runtime(&root),
         coverage,

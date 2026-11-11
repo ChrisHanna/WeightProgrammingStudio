@@ -76,6 +76,7 @@ fn allowance() -> Budget {
         cpu_ms: 4000,
         wall_ms: 15000,
         storage_bytes: 64 * 1024 * 1024,
+        deadline_policy: None,
     }
 }
 

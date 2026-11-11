@@ -477,6 +477,7 @@ fn complete_native_audit_executes_six_controls_and_durably_charges_family() {
         max_executions: 12,
         cpu_ms: 24000,
         wall_ms: 45000,
+        deadline_policy: None,
         storage_bytes: h.request.resources.storage_bytes,
     };
     let policies: Vec<_> = snapshots

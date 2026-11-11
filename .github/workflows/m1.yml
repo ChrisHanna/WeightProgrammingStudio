@@ -22,10 +22,16 @@ jobs:
           uv venv --python "$(command -v python)" .venv
           UV_CACHE_DIR="$KIROCREW_SCRATCH/uv-cache" uv pip install --python .venv/bin/python \
             --index-strategy unsafe-best-match -r requirements-dev.lock
-      - name: Native gates and executable example without Python
+      - name: Explicit local CPU sandbox runtime (no model weights)
+        run: docker pull python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
+      - name: Qualified native gates and executable example
         run: |
           cargo check --workspace --locked
-          cargo test --workspace --locked
+          cargo build -p nf-python --locked
+          cargo test --workspace --locked --no-run
+          unshare -U --map-current-user --keep-caps \
+            setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+            cargo test --workspace --locked --offline -- --test-threads=2
           cargo build -p nf-cli --locked
           cargo build -p nf-cli --example offline_direct --locked
           cargo build -p nf-experiments --example fixture_broker --locked
@@ -38,8 +44,6 @@ jobs:
         run: |
           cargo build -p nf-weight-ir --example parser_fuzz_smoke --locked
           (ulimit -v 524288; ulimit -t 20; ./target/debug/examples/parser_fuzz_smoke)
-      - name: Explicit local CPU sandbox runtime (no model weights)
-        run: docker pull python@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
       - name: CPU layer-sweep preflight and full pytest suite
         run: |
           VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --locked

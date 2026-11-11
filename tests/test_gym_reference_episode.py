@@ -58,6 +58,7 @@ def audit(gym: Any, plan: dict[str, Any], sandbox: Path, policies: list[Any],
                                  roles or ["valid", "invalid", "constant", "metadata_only"],
                                  "development", json.dumps(budget or {
                                      "max_executions": 24, "cpu_ms": 24000, "wall_ms": 7200,
+                                     "deadline_policy": 2,
                                      "storage_bytes": 512 * 1024 * 1024}),
                                  str(sandbox), enabled=True)
     assert isinstance(handle, _native.GymReferenceAuditHandle)
@@ -65,16 +66,7 @@ def audit(gym: Any, plan: dict[str, Any], sandbox: Path, policies: list[Any],
     return cast(dict[str, Any], json.loads(handle.report_bytes()))
 
 
-@pytest.mark.parametrize("termination", [
-    pytest.param("terminated", marks=pytest.mark.xfail(
-        reason="Known reproduced authority-deadline failure; timing: artifacts/backlog-cleanup-20261109/isolated-episode-timing.json",
-        strict=False,
-    )),
-    pytest.param("truncated", marks=pytest.mark.xfail(
-        reason="Known reproduced authority-deadline failure; timing: artifacts/backlog-cleanup-20261109/isolated-episode-timing.json",
-        strict=False,
-    )),
-])
+@pytest.mark.parametrize("termination", ["terminated", "truncated"])
 def test_episode_native_binding_same_gym_all_controls(tmp_path: Path, termination: str) -> None:
     code = EPISODE if termination == "terminated" else EPISODE.replace(
         "terminated=self.n==2,truncated=False", "terminated=False,truncated=self.n==2")
@@ -96,6 +88,8 @@ def test_episode_native_binding_same_gym_all_controls(tmp_path: Path, terminatio
     assert report["requested_policies"] == [[p.snapshot_id, r] for p, r in zip(
         policies, ("valid", "invalid", "constant", "metadata_only"))]
     assert 0 < report["cpu_ms"] <= 24000 and 0 < report["wall_ms"] <= 7200
+    assert report["budget"]["deadline_policy"] == 2
+    assert 0 < report["lifecycle_wall_ms"] <= 26768
     assert report["native_approval"] is False and report["brokered_model_calls"] == 0
     for digest in report["sandbox_receipts"]:
         raw = (tmp_path / "store" / "blobs" / digest[7:]).read_bytes()
@@ -193,10 +187,6 @@ def test_episode_policy_action_schema_and_error_denied(tmp_path: Path, body: str
     assert report["executions"] == 2
 
 
-@pytest.mark.xfail(
-    reason="Known reproduced authority-deadline failure; timing: artifacts/backlog-cleanup-20261109/isolated-episode-timing.json",
-    strict=False,
-)
 def test_episode_constant_role_means_actions_not_environment_results(tmp_path: Path) -> None:
     gym, plan, sandbox, _, policies, _, _ = setup(
         tmp_path, EPISODE.replace("return self.total", "return self.x*2-1"))
@@ -215,10 +205,6 @@ def test_episode_policy_action_replay_drift_denied_before_step(tmp_path: Path) -
     assert report["executions"] == 2
 
 
-@pytest.mark.xfail(
-    reason="Known reproduced authority-deadline failure; timing: artifacts/backlog-cleanup-20261109/isolated-episode-timing.json",
-    strict=False,
-)
 def test_episode_callback_returns_are_immutable_wire_values(tmp_path: Path) -> None:
     code = EPISODE.replace("self.n+=1; self.total+=action",
         "self.n+=1; self.total+=action\n  "

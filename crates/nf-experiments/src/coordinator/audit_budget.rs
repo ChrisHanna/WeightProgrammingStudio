@@ -64,6 +64,7 @@ pub(crate) mod tests {
                 cpu_ms: 4000,
                 wall_ms: 15000,
                 storage_bytes: 64 * 1024 * 1024,
+                deadline_policy: None,
             };
             let request = Request {
                 schema_version: 1,
@@ -435,7 +436,7 @@ impl Ledger {
             || allocation.resources.device_bytes != 0
             || budget.wall_ms == 0
             || budget.cpu_ms == 0
-            || budget.wall_ms > request.wall_ms
+            || budget.total_wall_ms()? > request.wall_ms
         {
             return Err(failure(
                 ErrorCode::PermissionDenied,
@@ -542,7 +543,7 @@ impl Ledger {
             .deadline_ms
             .min(lease.deadline)
             .saturating_sub(files::moment()?.ms);
-        if remaining <= 0 || (remaining as u64) < budget.wall_ms {
+        if remaining <= 0 || (remaining as u64) < budget.total_wall_ms()? {
             return Err(failure(
                 ErrorCode::LimitExceeded,
                 "insufficient remaining allocation before qualification",
@@ -550,7 +551,7 @@ impl Ledger {
         }
         let deadline = started
             .checked_add(std::time::Duration::from_millis(
-                budget.wall_ms.min(remaining as u64),
+                budget.total_wall_ms()?.min(remaining as u64),
             ))
             .ok_or_else(|| failure(ErrorCode::LimitExceeded, "audit deadline overflow"))?;
         let authority = self.claim_audit(lease, reservation, &budget)?;
@@ -561,7 +562,7 @@ impl Ledger {
         let authorize = || self.check_audit(lease, &authority.reservation, &check_budget);
         let audit = reference::run_authorized_until(
             snapshot, store, plan, policies, exposure, budget, &runtime, coverage, cancel,
-            &authorize, deadline,
+            &authorize, deadline, started.elapsed(),
         )?;
         // Even a completed report has no all-inclusive measured study storage.
         // Keep CPU unknown too: receipts cover cgroups, not controller overhead.

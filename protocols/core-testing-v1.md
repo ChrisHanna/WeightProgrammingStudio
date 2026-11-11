@@ -44,6 +44,16 @@ unshare -U --map-current-user --keep-caps \
 
 The user namespace is only a way to empty the bounding set without root. A plain `cargo test --workspace` does not set this up.
 
+**Cargo acceptance rule:** use exactly two test threads under this documented capability runner:
+
+```sh
+unshare -U --map-current-user --keep-caps \
+  setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+  cargo test --workspace --locked --offline -- --test-threads=2
+```
+
+Default host-wide test concurrency is not the acceptance configuration.
+
 On WSL2 with Docker Desktop (2-2.6 s per `docker run`), `unchanged_gym_runs_good_bad_constant_and_metadata_policies` and `complete_valid_audit_executes_all_six_controls_under_live_deadline` still fail with `insufficient remaining audit wall allowance before staging`. Container latency is the suspected cause, but this has not been confirmed on native Docker.
 
 ## Real PyTorch reference

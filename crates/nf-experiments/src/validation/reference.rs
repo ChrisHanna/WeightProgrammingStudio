@@ -9,6 +9,17 @@ mod episode;
 mod storage;
 
 const SHIM: &[u8] = include_bytes!("reference_worker.py");
+const DEADLINE_POLICY_V2: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"), "/../../protocols/reference-audit-deadline-v2.json"
+));
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeadlineLimits {
+    schema_version: u32,
+    timed_work_ms: u64,
+    lifecycle_ms: u64,
+}
 
 /// Controller declarations are coverage targets, not authenticated provenance.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -75,10 +86,35 @@ pub struct Budget {
     /// Explicit controller-allocated allowance for this invocation. Not a lease
     /// or a new family budget: callers must debit their durable study allocation.
     pub storage_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_policy: Option<u32>,
 }
 impl Budget {
+    fn split_limits(&self) -> Result<Option<DeadlineLimits>> {
+        match self.deadline_policy {
+            None => Ok(None),
+            Some(2) => {
+                let limits: DeadlineLimits = serde_json::from_slice(DEADLINE_POLICY_V2)
+                    .map_err(|_| error(ErrorCode::InvalidValue, "invalid deadline policy v2"))?;
+                if limits.schema_version != 2 || self.wall_ms == 0
+                    || self.wall_ms > limits.timed_work_ms || limits.lifecycle_ms == 0
+                {
+                    return Err(error(ErrorCode::LimitExceeded, "deadline policy v2 limits differ"));
+                }
+                Ok(Some(limits))
+            }
+            Some(_) => Err(error(ErrorCode::InvalidValue, "unsupported deadline policy version")),
+        }
+    }
+
+    pub fn total_wall_ms(&self) -> Result<u64> {
+        self.wall_ms.checked_add(self.split_limits()?.map_or(0, |limits| limits.lifecycle_ms))
+            .ok_or_else(|| error(ErrorCode::LimitExceeded, "audit deadline overflow"))
+    }
+
     /// Run before sandbox qualification (which may recover/write old journals).
     pub fn validate_storage(&self) -> Result<()> {
+        self.total_wall_ms()?;
         storage::Accounting::admit(self.max_executions, self.storage_bytes).map(|_| ())
     }
 }
@@ -127,6 +163,8 @@ pub struct AuditReport {
     pub reserved_asset_bytes: u64,
     pub storage: storage::Accounting,
     pub controller_wall_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_wall_ms: Option<u64>,
     pub preflight_timings: PreflightTimings,
     pub memory_peak_bytes: u64,
     /// Present only for the durable, qualified dedicated controller path.
@@ -154,6 +192,7 @@ pub fn protocol_identity() -> ContentDigest {
             ContentDigest::of_bytes(include_bytes!("reference.rs")),
             ContentDigest::of_bytes(include_bytes!("reference_episode.rs")),
             ContentDigest::of_bytes(include_bytes!("reference_storage.rs")),
+            ContentDigest::of_bytes(DEADLINE_POLICY_V2),
         ))
         .unwrap(),
     )
@@ -181,8 +220,21 @@ fn assets(snapshot: &Snapshot, store: &ArtifactStore) -> Result<BTreeMap<String,
 struct LiveAuthority<'a> {
     deadline: std::time::Instant,
     authorize: &'a dyn Fn() -> Result<()>,
+    started: std::time::Instant,
+    preflight_ns: u64,
+    timed_work_ns: std::cell::Cell<u64>,
+    inflight_work_ns: std::cell::Cell<u64>,
+    split_limits: Option<DeadlineLimits>,
+    timed_limit_ms: u64,
 }
 impl LiveAuthority<'_> {
+    fn lifecycle_ns(&self) -> u64 {
+        let host_ns = self.started.elapsed().as_nanos()
+            .saturating_add(u128::from(self.preflight_ns));
+        host_ns.saturating_sub(u128::from(self.timed_work_ns.get())
+            + u128::from(self.inflight_work_ns.get())).min(u128::from(u64::MAX)) as u64
+    }
+
     fn check(&self) -> Result<()> {
         if std::time::Instant::now() >= self.deadline {
             return Err(error(
@@ -191,6 +243,14 @@ impl LiveAuthority<'_> {
             ));
         }
         (self.authorize)()?;
+        if let Some(limits) = &self.split_limits {
+            if self.timed_work_ns.get() > self.timed_limit_ms * 1_000_000 {
+                return Err(error(ErrorCode::LimitExceeded, "aggregate timed audit work exceeded"));
+            }
+            if self.lifecycle_ns() > limits.lifecycle_ms * 1_000_000 {
+                return Err(error(ErrorCode::LimitExceeded, "aggregate audit lifecycle exceeded"));
+            }
+        }
         if std::time::Instant::now() >= self.deadline {
             return Err(error(
                 ErrorCode::LimitExceeded,
@@ -201,6 +261,12 @@ impl LiveAuthority<'_> {
     }
     fn admit_job(&self, limits: &Limits) -> Result<()> {
         self.check()?;
+        if self.split_limits.is_some()
+            && self.timed_work_ns.get().saturating_add(limits.wall_ms * 1_000_000)
+                > self.timed_limit_ms * 1_000_000
+        {
+            return Err(error(ErrorCode::LimitExceeded, "insufficient remaining timed work allowance"));
+        }
         if self
             .deadline
             .saturating_duration_since(std::time::Instant::now())
@@ -212,6 +278,15 @@ impl LiveAuthority<'_> {
             ));
         }
         Ok(())
+    }
+
+    fn finish_job(&self, wall_ms: u64) -> Result<()> {
+        self.timed_work_ns.set(self.timed_work_ns.get()
+            .checked_add(wall_ms.checked_mul(1_000_000)
+                .ok_or_else(|| error(ErrorCode::LimitExceeded, "audit timing overflow"))?)
+            .ok_or_else(|| error(ErrorCode::LimitExceeded, "audit timing overflow"))?);
+        self.inflight_work_ns.set(0);
+        self.check()
     }
 }
 
@@ -248,6 +323,11 @@ fn execute(
     // errors/cancellation; neither cleanup nor CAS deduplication refunds it.
     let staging_limit = report.storage.claim_job()?;
     let receipt = if let Some(live) = authorize {
+        if live.split_limits.is_some() {
+            // Until the receipt arrives, charge lifecycle against a conservative
+            // lower bound; the exact work/lifecycle counters are checked on return.
+            live.inflight_work_ns.set(limits.wall_ms * 1_000_000);
+        }
         runtime.execute_assets_authorized(
             SHIM,
             request.bytes(),
@@ -270,6 +350,11 @@ fn execute(
     };
     report.executions += 1;
     if let Some(check) = authorize {
+        if check.split_limits.is_some() {
+            let wall = receipt.report.as_ref().and_then(|raw| raw["wall_ms"].as_u64())
+                .ok_or_else(|| error(ErrorCode::LimitExceeded, "guardian work timing unavailable"))?;
+            check.finish_job(wall)?;
+        }
         check.check()?;
     }
     report.storage.observe(&receipt);
@@ -472,8 +557,12 @@ pub(crate) fn run_authorized_until(
     cancel: &AtomicBool,
     authorize: &dyn Fn() -> Result<()>,
     deadline: std::time::Instant,
+    preflight_elapsed: std::time::Duration,
 ) -> Result<Audit> {
-    let mut preflight_timings = PreflightTimings::default();
+    let mut preflight_timings = PreflightTimings {
+        before_audit_ns: preflight_elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
+        ..PreflightTimings::default()
+    };
     run_inner(
         snapshot,
         store,
@@ -488,6 +577,62 @@ pub(crate) fn run_authorized_until(
         Some(deadline),
         &mut preflight_timings,
     )
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn authority(work_ms: u64, lifecycle_ms: u64, elapsed_ms: u64) -> LiveAuthority<'static> {
+        LiveAuthority {
+            deadline: Instant::now() + Duration::from_secs(60),
+            authorize: &|| Ok(()),
+            started: Instant::now() - Duration::from_millis(elapsed_ms),
+            preflight_ns: 0,
+            timed_work_ns: std::cell::Cell::new(0),
+            inflight_work_ns: std::cell::Cell::new(0),
+            split_limits: Some(DeadlineLimits {
+                schema_version: 2, timed_work_ms: work_ms, lifecycle_ms,
+            }),
+            timed_limit_ms: work_ms,
+        }
+    }
+
+    #[test]
+    fn split_deadline_enforces_each_counter_despite_outer_allowance() {
+        let work = authority(10, 1000, 100);
+        assert!(work.finish_job(11).is_err());
+        let lifecycle = authority(1000, 10, 100);
+        assert!(lifecycle.check().is_err());
+        let valid = authority(1000, 1000, 100);
+        valid.finish_job(50).unwrap();
+        assert!(valid.lifecycle_ns() >= 50_000_000);
+    }
+
+    #[test]
+    fn inflight_bound_is_reconciled_against_actual_guardian_work() {
+        let live = authority(1000, 10, 100);
+        live.inflight_work_ns.set(100_000_000);
+        live.check().unwrap();
+        assert!(live.finish_job(1).is_err());
+    }
+
+    #[test]
+    fn split_policy_is_opt_in_and_reserves_both_allowances() {
+        let mut budget = Budget {
+            max_executions: 24, cpu_ms: 24000, wall_ms: 7200,
+            storage_bytes: 512 * 1024 * 1024, deadline_policy: None,
+        };
+        assert_eq!(budget.total_wall_ms().unwrap(), 7200);
+        assert!(serde_json::to_value(&budget).unwrap().get("deadline_policy").is_none());
+        budget.deadline_policy = Some(2);
+        assert_eq!(budget.total_wall_ms().unwrap(), 33968);
+        budget.wall_ms = 7201;
+        assert!(budget.total_wall_ms().is_err());
+        budget.deadline_policy = Some(3);
+        assert!(budget.total_wall_ms().is_err());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,8 +652,13 @@ fn run_inner(
 ) -> Result<Audit> {
     let started = std::time::Instant::now();
     let durable = authorize.is_some();
+    let split_limits = budget.split_limits()?;
+    let preflight_ns = if split_limits.is_some() { preflight_timings.before_audit_ns } else { 0 };
+    let remaining_ns = budget.total_wall_ms()?.checked_mul(1_000_000)
+        .and_then(|total| total.checked_sub(preflight_ns))
+        .ok_or_else(|| error(ErrorCode::LimitExceeded, "preflight exhausted audit deadline"))?;
     let audit_deadline = started
-        .checked_add(std::time::Duration::from_millis(budget.wall_ms))
+        .checked_add(std::time::Duration::from_nanos(remaining_ns))
         .ok_or_else(|| error(ErrorCode::LimitExceeded, "audit deadline overflow"))?;
     // A pre-cancelled invocation is sticky and must never stage. Once running,
     // cancellation is separately polled by the sandbox and produces an
@@ -525,6 +675,12 @@ fn run_inner(
     let live = LiveAuthority {
         deadline: deadline.unwrap_or(audit_deadline).min(audit_deadline),
         authorize: &check,
+        started,
+        preflight_ns,
+        timed_work_ns: std::cell::Cell::new(0),
+        inflight_work_ns: std::cell::Cell::new(0),
+        split_limits,
+        timed_limit_ms: budget.wall_ms,
     };
     let authorize = Some(&live);
     live.check()?;
@@ -643,7 +799,7 @@ fn run_inner(
         brokered_model_calls: 0, native_approval: false,
         scope: "finite_exposed_reference_audit_not_validation_approval_or_scientific_acceptance".into(),
         audit_complete: false, missing_prerequisites, coverage, reserved_asset_bytes, storage,
-        controller_wall_ms: 0, memory_peak_bytes: 0,
+        controller_wall_ms: 0, lifecycle_wall_ms: None, memory_peak_bytes: 0,
         preflight_timings: preflight_timings.clone(),
         controller_hard_address_space_bytes: if durable {
             rustix::process::getrlimit(rustix::process::Resource::As).maximum
@@ -846,11 +1002,15 @@ fn run_inner(
         };
     }
     report.controller_wall_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    if live.split_limits.is_some() {
+        report.lifecycle_wall_ms = Some(live.lifecycle_ns().div_ceil(1_000_000));
+    }
     // Account for the report's own CAS publication before serializing it.
     if let Some(check) = authorize {
         check.check()?;
     }
     report.storage.claim_publication()?;
     let id = store.put(document(&report)?.bytes())?.digest;
+    live.check()?;
     Ok(Audit { report, id })
 }
