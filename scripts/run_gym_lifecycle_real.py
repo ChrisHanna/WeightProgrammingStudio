@@ -262,9 +262,8 @@ def prepare_json_robustness_v2_training_request() -> dict[str, Any]:
 
 def execute_json_training_request(document: Mapping[str, Any], *, output: Path, method: str,
                                   automodel_python: str, reload_python: str) -> dict[str, Any]:
-    from neural_foundry.backends.automodel.config import AutoModelBackendConfig
-    from neural_foundry.gym_service import GymStudioService
-    from neural_foundry.reference_json_extraction import reference_task
+    from neural_foundry.json_public_run import preparation_spec
+    from neural_foundry.proof_pipeline import train
 
     if method not in {"sft", "lora"}:
         raise GymJobError("only approved SFT and LoRA training can be dispatched")
@@ -283,27 +282,13 @@ def execute_json_training_request(document: Mapping[str, Any], *, output: Path, 
     for interpreter in (automodel_python, reload_python):
         if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise GymJobError("approved runtime interpreter is missing")
-    task = reference_task(rows_per_template=rows_per_template)
-    output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    base = transformers_model(document["base_model"]["model_id"], document["base_model"]["revision"],
-        device="cuda:0", precision="bfloat16", context_tokens=512, max_new_tokens=128, seed=recipe["seed"])
-    lifecycle = GymLifecycle(GymStudioService(state_dir=output / "state"))
-    evaluator = EvaluatorAdapter(AdapterIdentity("public", "1", task.identity.implementation_digest),
-        lambda *args: {"split": "validation", "complete": False, "metrics": {}, "status": "deferred_to_verified_vllm"})
-    for adapter in (task, base, evaluator):
-        lifecycle.register(adapter)
-    lifecycle.register_backend("nemo_automodel.sft@1", config=AutoModelBackendConfig(
-        automodel_python, timeout_seconds=1800, reload_python_executable=reload_python))
-    run = lifecycle.run(document["intents"][method]["lifecycle_request"])
-    result = {"kind": "nf_json_train_only_result_v1", "preparation_digest": document["preparation_digest"],
-        "method": method, "base": vars(base.reference), "revision": document["base_model"]["revision"],
-        "candidate_record": run["candidate_record"], "training_request": run["training_request"],
-        "dataset_digest": run["dataset"]["dataset_digest"], "evaluation_status": run["evaluation_status"],
-        "weight_edit_dispatched": False, "holdout_accessed": False, "provider_called": False, "release_authorized": False}
-    result["result_digest"] = _document_digest(result)
-    with (output / "training-result.json").open("x", encoding="utf-8") as stream:
-        json.dump(result, stream, indent=2, allow_nan=False)
-    return result
+    spec = preparation_spec(document, policy_path=Path(__file__).resolve().parents[1]
+                            / "protocols" / "json-contamination-v1.json")
+    selected = next(row for row in spec["candidates"] if row["method"] == method)
+    selected["role"] = output.name
+    spec["candidates"] = [selected]
+    return train(spec, role=output.name, root=output.parent,
+                 automodel_python=automodel_python, reload_python=reload_python)
 
 
 def main() -> None:

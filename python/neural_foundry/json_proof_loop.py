@@ -129,13 +129,8 @@ def _require_response_evidence(model: Any, interaction: Mapping[str, Any], resul
 
 
 def compare_public_validation(task: TaskAdapter, *, seed: int, models: Mapping[str, Callable]) -> dict[str, Any]:
-    if set(models) not in (
-        {"base", "sft", "frontier"},
-        {"base", "sft", "lora", "frontier"},
-        {"base", "sft", "weight_edit"},
-        {"base", "sft", "weight_edit", "frontier"},
-    ):
-        raise GymJobError("specialist comparison requires the complete declared roster")
+    if not isinstance(models, Mapping) or "base" not in models or not all(callable(factory) for factory in models.values()):
+        raise GymJobError("specialist comparison requires a declared roster with a base")
     rows = generate_scenarios(split="validation", seed=seed, parameters=task.job.scenario_sources[0].parameters)
     required = public_required_rows(seed=seed)
     report = {"kind": "nf_specialist_public_comparison_v2", "split": "validation", "complete": False,

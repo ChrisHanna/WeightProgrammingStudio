@@ -103,6 +103,7 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
             adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})
     create = calls[0][0]
     assert "--init" in create
+    assert create[create.index("--pull") + 1] == "never"
     assert create[create.index("--network") + 1] == "none"
     assert create[create.index("--log-driver") + 1] == "none"
     assert "VLLM_ALLOW_INSECURE_SERIALIZATION=0" in create
@@ -124,6 +125,23 @@ def test_tampered_checkpoint_never_starts_docker(tmp_path, monkeypatch) -> None:
     with pytest.raises(GymJobError, match="differ"):
         with VllmCandidateServer(reference, revision="a" * 40):
             pass
+
+
+def test_docker_recovers_working_directory_after_mount_refresh(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    server = VllmCandidateServer(_reference(tmp_path), revision="a" * 40)
+    transient = tmp_path / "detached-cwd"
+    transient.mkdir()
+    os.chdir(transient)
+
+    def docker(command, **kwargs):
+        assert kwargs["cwd"] == tmp_path
+        transient.rmdir()
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", docker)
+    assert server._docker(["version"]).returncode == 0
+    assert Path("src").resolve() == tmp_path / "src"
 
 
 def test_cleanup_accepts_only_confirmed_absence(tmp_path, monkeypatch) -> None:

@@ -37,7 +37,8 @@ class VllmCandidateServer:
     def __init__(self, reference: CandidateRef, *, revision: str, image: str = VLLM_IMAGE,
                  context_tokens: int = 512, max_new_tokens: int = 64, timeout_seconds: float = 240,
                  precision: str = "bfloat16", gpu_memory_utilization: float = 0.25,
-                 identity_record: Mapping[str, Any] | None = None) -> None:
+                 identity_record: Mapping[str, Any] | None = None,
+                 snapshot_root: Path | None = None) -> None:
         if os.name == "nt":
             raise GymJobError("network-isolated vLLM serving requires a Linux Docker runtime")
         if (not isinstance(image, str) or len(image) != 71 or not image.startswith("sha256:")
@@ -64,10 +65,18 @@ class VllmCandidateServer:
         self._renderer: PromptRenderer | None = None
         self._files: dict[str, str] = {}
         self._expected_identity = identity_record
+        self._snapshot_root = snapshot_root
+        self._working_directory = Path.cwd().resolve()
 
     def _docker(self, arguments: list[str], *, data: bytes | None = None, timeout: float = 30) -> subprocess.CompletedProcess[bytes]:
         try:
-            return subprocess.run(["docker", *arguments], input=data, capture_output=True, timeout=timeout, check=False)
+            result = subprocess.run(["docker", *arguments], input=data, capture_output=True,
+                                    timeout=timeout, check=False, cwd=self._working_directory)
+            try:
+                os.getcwd()
+            except FileNotFoundError:
+                os.chdir(self._working_directory)
+            return result
         except (OSError, subprocess.SubprocessError) as exc:
             raise GymJobError("vLLM Docker command failed or timed out") from exc
 
@@ -113,7 +122,7 @@ class VllmCandidateServer:
                 or self._expected_identity["precision"] != self.precision
                 or self._expected_identity["context_tokens"] != self.context_tokens):
                 raise GymJobError("frozen vLLM identity differs from candidate files or runtime")
-        self._temporary = tempfile.TemporaryDirectory(prefix="nf-vllm-candidate-")
+        self._temporary = tempfile.TemporaryDirectory(prefix="nf-vllm-candidate-", dir=self._snapshot_root)
         self._snapshot = Path(self._temporary.name)
         try:
             for name in files:
@@ -125,7 +134,7 @@ class VllmCandidateServer:
                 raise GymJobError("vLLM mounted snapshot differs from verified candidate files")
             if "," in str(self._snapshot):
                 raise GymJobError("vLLM snapshot path cannot contain a comma")
-            create = ["create", "--init", "--name", self._name, "--label", f"nf.owner={self._owner}", "--network", "none",
+            create = ["create", "--pull", "never", "--init", "--name", self._name, "--label", f"nf.owner={self._owner}", "--network", "none",
                       "--read-only", "--gpus", "all", "--log-driver", "none", "--shm-size", "1g",
                       "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--mount",
                       f"type=bind,src={self._snapshot},dst=/model,readonly"]
