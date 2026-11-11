@@ -45,6 +45,12 @@ def _sft_rows(examples: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _is_final_checkpoint_output(path: Path, *, method: str, final_step: int) -> bool:
+    checkpoint_directory = path.parent if method in {"lora", "qlora"} else path.parent.parent
+    step = checkpoint_directory.name.rsplit("_step_", 1)[-1]
+    return step.isdecimal() and int(step) == final_step
+
+
 def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
     python = Path(config.python_executable)
     executable = python.parent / "automodel"
@@ -227,11 +233,25 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
                 raise GymJobError("AutoModel training log does not contain the exact finite step roster")
             if recipe.method in {"lora", "qlora"}:
                 outputs = [path for path in checkpoint_dir.glob("epoch_*_step_*/model")
-                           if (path / "adapter_model.safetensors").is_file()]
+                           if (path / "adapter_model.safetensors").is_file()
+                           and _is_final_checkpoint_output(path, method=recipe.method, final_step=recipe.steps - 1)]
             else:
-                outputs = list(checkpoint_dir.glob("epoch_*_step_*/model/consolidated"))
+                outputs = [path for path in checkpoint_dir.glob("epoch_*_step_*/model/consolidated")
+                           if _is_final_checkpoint_output(path, method=recipe.method, final_step=recipe.steps - 1)]
             if len(outputs) != 1 or not artifact_files(outputs[0]):
-                raise GymJobError("AutoModel did not produce one verified consolidated checkpoint")
+                failure_dir = Path(tempfile.mkdtemp(prefix=".nf-automodel-checkpoint-failure-", dir=directory.parent))
+                (failure_dir / "stdout.log").write_bytes(execution.stdout)
+                (failure_dir / "stderr.log").write_bytes(execution.stderr)
+                inventory = [{"path": path.relative_to(checkpoint_dir).as_posix(),
+                              "bytes": path.stat().st_size if path.is_file() else None}
+                             for path in sorted(checkpoint_dir.rglob("*"))]
+                (failure_dir / "checkpoint-inventory.json").write_bytes(_wire_document({
+                    "expected_output_count": 1,
+                    "matched_outputs": [str(path.relative_to(checkpoint_dir)) for path in outputs],
+                    "checkpoint_files": inventory,
+                    "execution_receipt": execution.receipt,
+                }))
+                raise GymJobError(f"AutoModel did not produce one verified consolidated checkpoint; private diagnostics: {failure_dir}")
             shutil.copytree(outputs[0], directory)
             if recipe.method in {"lora", "qlora"}:
                 model_info = inspect(recipe.method, str(checkpoint.path), str(directory), settings["precision"],

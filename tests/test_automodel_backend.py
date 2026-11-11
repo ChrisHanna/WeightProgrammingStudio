@@ -28,6 +28,18 @@ def test_automodel_recipe_and_runtime_config_are_frozen(tmp_path: Path) -> None:
             AutoModelSFTRecipe.from_document({**recipe, **changed})
 
 
+def test_automodel_checkpoint_selection_uses_final_committed_step(tmp_path: Path) -> None:
+    from neural_foundry.backends.automodel.adapter import _is_final_checkpoint_output
+
+    intermediate = tmp_path / "epoch_0_step_319" / "model"
+    final = tmp_path / "epoch_1_step_383" / "model"
+    consolidated_final = final / "consolidated"
+
+    assert not _is_final_checkpoint_output(intermediate, method="lora", final_step=383)
+    assert _is_final_checkpoint_output(final, method="lora", final_step=383)
+    assert _is_final_checkpoint_output(consolidated_final, method="sft", final_step=383)
+
+
 @pytest.mark.parametrize("method", ["sft", "lora", "qlora"])
 def test_automodel_real_lifecycle_publication_and_retry(tmp_path: Path, method: str) -> None:
     gpu_python = os.environ.get("NF_GPU_PYTHON")
