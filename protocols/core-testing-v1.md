@@ -54,6 +54,8 @@ unshare -U --map-current-user --keep-caps \
 
 Default host-wide test concurrency is not the acceptance configuration.
 
+If WSL/DrvFS loses its cwd or reports `/proc` executable paths without their mounted-drive prefix, retain that failed run and use a committed-source worktree and build directory on the native Linux filesystem. Reuse an existing pinned CPU runtime; do not install a different version or relax path/cleanup checks. Record the source commit and verify its native tree/policy against the branch being accepted. The deadline-v2 [accepted run](../artifacts/proof-phase-ab-20261111/native-acceptance-summary.json) followed this rule.
+
 On WSL2 with Docker Desktop (2-2.6 s per `docker run`), `unchanged_gym_runs_good_bad_constant_and_metadata_policies` and `complete_valid_audit_executes_all_six_controls_under_live_deadline` still fail with `insufficient remaining audit wall allowance before staging`. Container latency is the suspected cause, but this has not been confirmed on native Docker.
 
 ## Real PyTorch reference

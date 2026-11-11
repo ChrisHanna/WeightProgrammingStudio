@@ -1,6 +1,8 @@
 # JSON Extraction Proof Sprint
 
-## Current Sprint
+Current execution is the [parallel Phase A/B public proof work](json-proof-phase-a.md) using the [generic run spec and registries](public-proof-phase-b.md). The legacy synthetic holdout is development-grade; no final holdout is opened during iteration. Stage 1 custody is software-fixture-qualified only, and the competitive public gates must pass before any fresh final draw.
+
+## Original Sprint (historical)
 
 1. Commit and push independently tested work.
 2. Finish backlog cleanup, reproduce the 13 review findings, and get green full Python/native acceptance.

@@ -6,6 +6,7 @@
     "rows_per_template": 32,
     "historical_panel_digest": "sha256:79b36aae23e81adc2609e61165fd0989bf8dd61b64e9cb54c5ffef2d034fccc2",
     "grade": "development_only",
+    "all_seeds_of_legacy_source_are_development_grade": true,
     "proof_report_eligible": false,
     "reason": "previous overlap-only read outside custody; exposure cannot be undone"
   },
