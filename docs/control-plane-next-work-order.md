@@ -73,6 +73,87 @@ Run completion, gate outcome and release authorization are separate concepts.
 A completed experiment can fail its quality gates. Passing those gates must
 not automatically authorize shipment or a final-test query.
 
+## 3a. Proposed MVP data and execution contract
+
+These are design proposals to finalize in CP-01, not already implemented APIs.
+
+### Supported run shapes from the first delivery
+
+| Shape | Required behavior |
+| --- | --- |
+| Local evaluation | Evaluate one or several cached candidates against frozen panels. |
+| Provider evaluation | Evaluate bounded API candidates with explicit transfer/cost approval. |
+| Training | Materialize -> train -> export -> verify -> evaluate -> compare. |
+| Mixed comparison | Local and provider candidates share a frozen evaluation definition and metric policy. |
+| Offline analysis | Import receipts, rescore with an explicit scorer version, compare without inference. |
+
+Candidate model references must be candidate-specific: a comparison can contain
+different base models, not only different methods sharing one global base.
+Legacy run-level `base_model` becomes a compatibility default, not a limitation
+of the new logical model.
+
+Plans use registered operation types and explicit dependencies, not arbitrary
+untrusted shell commands or one script per task. Optional approved asset
+acquisition is a predecessor; cached/offline execution remains the default.
+
+### Minimum records
+
+| Record | Purpose |
+| --- | --- |
+| RunDefinition | Immutable requested candidates, assets, panels, policies and purpose. |
+| CompiledPlan | Resolved plugin/runtime identities, operation graph, limits and approval requirements. |
+| Candidate | Its own base/model/artifact references, method, prompt/projection, schema and decoding identity. |
+| Stage | One operation with immutable inputs, dependencies and expected result type. |
+| Attempt | One claimed dispatch with operation ID, worker/lease, timestamps and receipt/error references. |
+| Event | Append-only ordered run transition/progress/approval/evidence record. |
+| Approval | Actor, exact plan digest, permitted operations/destinations, limits, expiry and recovery scope. |
+| ArtifactReference | Content digest, type, producer attempt, byte size, permitted locations/access and availability. |
+| Outcome | Execution completion, versioned measurements, gate result and separate release eligibility. |
+| AuthorityReference | Bound budget/custody/exposure-ledger identity and safe verified state reference. |
+
+Store large payloads in the artifact backing, not database rows. Keep original
+specs/receipts immutable when importing historical runs. Migrations version the
+metadata schema without rewriting evidence or resetting authoritative ledgers.
+
+### State and recovery rules
+
+Proposed run progression:
+
+`draft -> planned -> awaiting_approval -> queued -> running -> verifying -> completed`
+
+Failures, cancellation, blocked dependencies and uncertain started operations
+have explicit states/reasons. A quality rejection is an outcome of a completed
+measurement, not an infrastructure failure.
+
+The coordinator writes dispatch intent and claims ownership before executing.
+Results are persisted and verified before the completion event. On restart:
+
+- verified committed receipts may be adopted, not recomputed;
+- definitely unstarted work may become ready again within its approval;
+- ambiguous training/API dispatch stops in `needs_attention`;
+- a custodian's started final claim remains consumed under its stricter rules.
+
+Do not promise exactly-once execution at an external provider after a network
+timeout. Prevent blind duplicate dispatch; preserve uncertainty, spending
+reservations and operator decisions. Checkpoint resume is not implicit MVP
+retry support: it requires an explicitly qualified backend continuation contract.
+
+### Local runtime and artifact approach
+
+Use the existing Python application/stage adapters and Rust enforcement
+primitives. Begin with one local coordinator service, SQLite and filesystem
+artifacts, not a new microservice topology.
+
+Logical specs reference runtime-profile IDs and content-addressed assets.
+Worker receipts record resolved executable/image, device, versions and actual
+placement. Secrets are runtime references resolved immediately before launch;
+they never enter run definitions or evidence payloads.
+
+Coordinator, trainer, reload and serving processes have separate resource
+requirements. Resource admission prevents incompatible co-residency and
+limits are enforced in the allocating process. The system reports estimates,
+reservations, measured usage and unknown values distinctly.
+
 ## 4. Proposed work orders
 
 ### CP-01 — Run/plan contracts, plugin descriptors and preflight
@@ -191,6 +272,25 @@ Depends on CP-03; catalog descriptors originate in CP-01.
 **Acceptance:** API and CLI show the same state and enforce the same approvals;
 restart preserves reads; repeated start requests do not duplicate work.
 
+Proposed initial API surface:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /v1/catalog` | Describe plugin/config/capability metadata without executing factories. |
+| `POST /v1/runs` | Create/validate a run definition; does not start work. |
+| `POST /v1/runs/{id}/plan` | Compile and return an immutable plan/preflight result. |
+| `POST /v1/approvals` | Record a bounded authenticated decision for an exact plan. |
+| `POST /v1/runs/{id}/start` | Claim approved work idempotently. |
+| `POST /v1/runs/{id}/cancel` | Request owned-work cancellation and retain evidence. |
+| `GET /v1/runs` / `GET /v1/runs/{id}` | Query current authoritative state and outcomes. |
+| `GET /v1/runs/{id}/events?after=sequence` | Read/stream ordered events with a reconnect cursor. |
+| `GET /v1/artifacts/{id}` | Read authorized artifact metadata/content by reference. |
+| `POST /v1/rescores` | Create an explicitly offline derived run from existing outputs. |
+
+Local binding and operator authentication precede any remotely reachable service.
+Error/status contracts distinguish validation, approval, capacity, budget,
+execution, evidence and quality outcomes.
+
 ### CP-05 — Thin operator dashboard
 
 Depends on CP-04. Build this **before waiting for all Stage2 custody work**.
@@ -273,6 +373,42 @@ CORD test use remains a separate future user authorization.
 
 CP-08 runs throughout. Start implementation with the first checkpoint.
 Do not add another receipt-training round to any acceptance criterion.
+
+### Reviewable implementation batches for checkpoint 1
+
+1. **Contracts and capability metadata:** schemas, IDs, operation/plugin
+   descriptors, planner and incompatibility checks. Review the public contracts
+   before persistence code depends on them.
+2. **Persistence and queries:** SQLite migrations, transactional transitions,
+   event ordering, artifact indexing and historical-receipt import.
+3. **Coordinator and approvals:** dependency scheduling over existing stage
+   functions, admission, claims/leases, bounded authorization, progress and
+   cancellation. CLI calls this same application service.
+4. **Recovery and workflow matrix:** failure injection, reconciliation and
+   all five run shapes across multiple gyms/candidate counts.
+
+Completion of these batches must yield a useful local control plane, not only
+schemas and a database. API/dashboard follow without introducing another
+execution implementation.
+
+### Explicit acceptance matrix
+
+- Every supported run shape uses the same coordinator/store/approval paths.
+- At least two distinct Gym plugins execute fixture plans; CORD's existing
+  real receipts can be imported and rescored without new inference.
+- Candidate counts vary and mixed-provider comparisons are configuration-driven.
+- A chat/JSON-schema capability mismatch and a missing internal teacher role
+  fail before dispatch.
+- Materialized data/labels/limits are validated against the actual worker input.
+- A new scorer produces a new outcome linked to old responses; originals remain.
+- Changed plans/plugins/policies invalidate prior approval.
+- Concurrent/repeated start requests do not duplicate attempts.
+- Kill/restart boundaries preserve progress and do not repeat uncertain side effects.
+- API budget reservations survive restart and cannot be reset by a new UI request.
+- Resource/time limits and cancellation apply only to owned processes.
+- Completed runs, passed gates and release authorization remain separate.
+- All mandatory software acceptance is network/GPU/model-download free.
+- No HTTP read, UI refresh or catalog request initiates paid/training work.
 
 Keep parked: synthetic quality runs, the two unscored factorial candidates,
 weight-edit research, full SFT, new datasets/model downloads, fresh holdouts and
