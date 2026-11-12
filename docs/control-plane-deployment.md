@@ -1,6 +1,8 @@
 # Private single-host control plane
 
-This deployment is for **one trusted operator, one host, and CPU fixtures only**.
+This deployment is for **one trusted operator and one host**, with offline
+recorded-output analysis and trusted CPU software previews. Live model/provider
+execution remains disabled unless separately qualified and authorized.
 It is not a public multi-tenant service. The API/coordinator serves the thin UI;
 one worker claims durable PostgreSQL jobs. No provider credentials, models,
 external datasets, existing root `.env`, or unrelated application directories

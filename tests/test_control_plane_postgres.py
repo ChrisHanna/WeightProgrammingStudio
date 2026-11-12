@@ -76,7 +76,7 @@ def test_migration_transaction_crash_restart_and_concurrent_idempotence(database
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda _: store.migrate(), range(2)))
     store.migrate()
-    assert store.health()["schema_version"] == 2
+    assert store.health()["schema_version"] == 3
 
 
 def test_existing_schema_one_is_upgraded_transactionally(database):
@@ -86,7 +86,7 @@ def test_existing_schema_one_is_upgraded_transactionally(database):
         conn.execute(MIGRATION)
         conn.execute("INSERT INTO cp_schema(version) VALUES (1)")
     store.migrate()
-    assert store.health()["schema_version"] == 2
+    assert store.health()["schema_version"] == 3
 
 
 @pytest.mark.parametrize("template", range(6))

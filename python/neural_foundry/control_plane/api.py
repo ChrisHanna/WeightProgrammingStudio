@@ -241,6 +241,34 @@ def create_app(service: Any = None) -> FastAPI:
     def catalog(facade: Any = facade_dependency) -> Any:
         return facade.catalog_document()
 
+    @application.get("/v1/workspace")
+    def workspace(facade: Any = facade_dependency) -> Any:
+        return facade.workspace()
+
+    @application.post("/v1/projects")
+    def create_project(body: dict[str, Any], facade: Any = facade_dependency) -> Any:
+        return facade.create_project(body, actor="operator")
+
+    @application.get("/v1/projects/{project_id}")
+    def project(project_id: str, facade: Any = facade_dependency) -> Any:
+        return facade.get_project(project_id)
+
+    @application.post("/v1/projects/{project_id}/assets")
+    def asset_create(project_id: str, body: dict[str, Any], facade: Any = facade_dependency) -> Any:
+        return facade.create_asset(project_id, body, actor="operator")
+
+    @application.post("/v1/projects/{project_id}/preview")
+    def preview(project_id: str, body: dict[str, Any], facade: Any = facade_dependency) -> Any:
+        return facade.preview_gym(project_id, body)
+
+    @application.post("/v1/projects/{project_id}/experiments")
+    def experiment(project_id: str, body: dict[str, Any], facade: Any = facade_dependency) -> Any:
+        return facade.create_experiment(project_id, body, actor="operator")
+
+    @application.get("/v1/projects/{project_id}/bundle")
+    def bundle(project_id: str, facade: Any = facade_dependency) -> Any:
+        return facade.project_bundle(project_id)
+
     @application.post("/v1/runs")
     def create(body: CreateRun, facade: Any = facade_dependency) -> Any:
         return facade.create_run(body.spec, actor="operator", idempotency_key=body.idempotency_key)
@@ -290,6 +318,10 @@ def create_app(service: Any = None) -> FastAPI:
 
     @application.get("/", include_in_schema=False)
     def index() -> FileResponse:
+        return FileResponse(STATIC / "workspace.html")
+
+    @application.get("/operations", include_in_schema=False)
+    def operations() -> FileResponse:
         return FileResponse(STATIC / "index.html")
 
     application.mount("/static", StaticFiles(directory=STATIC, check_dir=False), name="static")

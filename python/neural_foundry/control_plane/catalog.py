@@ -22,6 +22,24 @@ OPERATIONS: dict[str, dict[str, Any]] = {
         ("software.weight_edit", "experimental_tensor_correctness"),
     )
 }
+OPERATIONS["analysis.saved_json"] = {
+    "id": "analysis.saved_json", "version": "1", "enabled": True,
+    "capabilities": ["recorded_output_analysis"], "side_effect_class": "local_artifact_write",
+    "runtime_profile": "cpu-recorded-analysis-v1", "model_calls": False,
+    "budgets": {"steps": 256, "episodes": 1, "wall_seconds": 20, "recorded_bytes": 262144},
+}
+_analysis_fields: dict[str, Any] = {
+    "metric_policy": {"type": "string", "enum": ["json_exact_v1"]},
+    "example_count": {"type": "integer", "minimum": 1, "maximum": 256},
+}
+for _kind in ("gym", "dataset", "evidence", "model"):
+    _analysis_fields[_kind + "_artifact_id"] = {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    _analysis_fields[_kind + "_asset_id"] = {"type": "string"}
+    _analysis_fields[_kind + "_version"] = {"type": "integer", "minimum": 1}
+OPERATIONS["analysis.saved_json"]["config_schema"] = {
+    "type": "object", "additionalProperties": False,
+    "required": list(_analysis_fields), "properties": _analysis_fields,
+}
 for _id in ("live.proof", "live.provider", "live.training", "proof.train", "proof.export",
             "proof.identity", "proof.score", "proof.offline_cordial_rescore"):
     OPERATIONS[_id] = {"id": _id, "version": "1", "enabled": False,

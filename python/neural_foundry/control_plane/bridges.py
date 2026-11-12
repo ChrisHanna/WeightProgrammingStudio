@@ -6,12 +6,13 @@ The deployment owner must qualify the runtime and cap each capability separately
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from .models import fail, identifier
+from .models import digest, fail, identifier
 
 if TYPE_CHECKING:
     from ..proof_registry import ProofRegistry
@@ -24,6 +25,28 @@ CAPABILITIES = {
 
 
 @dataclass(frozen=True)
+class QualifiedGymBinding:
+    project_id: str
+    gym_asset_id: str
+    gym_version: int
+    gym_artifact_id: str
+    proof_gym_reference_digest: str
+    proof_gym_configuration_digest: str
+    methods: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        identifier(self.project_id, "project ID")
+        identifier(self.gym_asset_id, "gym asset ID")
+        if type(self.gym_version) is not int or self.gym_version < 1:
+            fail("invalid_runtime_profile", "Qualified gym version must be positive.")
+        for value in (self.gym_artifact_id, self.proof_gym_reference_digest, self.proof_gym_configuration_digest):
+            if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+                fail("invalid_runtime_profile", "Qualified gym binding requires content digests.")
+        if not isinstance(self.methods, frozenset) or not self.methods or self.methods - {"lora", "sft"}:
+            fail("invalid_runtime_profile", "Qualified gym methods must explicitly select lora and/or sft.")
+
+
+@dataclass(frozen=True)
 class TrustedRuntimeProfile:
     id: str
     root: Path
@@ -33,11 +56,35 @@ class TrustedRuntimeProfile:
     reload_python: str = ""
     registry: ProofRegistry | None = None
     callbacks: Mapping[str, Callable[[BridgeContext], dict[str, Any]]] = field(default_factory=dict)
+    product_gym_bindings: tuple[QualifiedGymBinding, ...] = ()
 
     def __post_init__(self) -> None:
         identifier(self.id, "runtime profile")
         if set(self.callbacks) - set(CAPABILITIES):
             fail("invalid_runtime_profile", "Runtime callback is not a registered bridge.")
+        if not isinstance(self.product_gym_bindings, tuple) or any(
+                not isinstance(binding, QualifiedGymBinding) for binding in self.product_gym_bindings):
+            fail("invalid_runtime_profile", "Product gym bindings must be trusted immutable qualification records.")
+
+
+def require_product_gym_binding(profile: TrustedRuntimeProfile, *, project_id: str,
+                                gym_asset_id: str, gym_version: int, gym_artifact_id: str,
+                                proof_gym_reference: Any, proof_gym_configuration: Any, method: str) -> None:
+    if not profile.qualified or profile.registry is None:
+        fail("runtime_not_qualified", "Operator must install a qualified proof registry and explicit product gym binding.", 409)
+    from ..gym_job import GymJobError
+    try:
+        profile.registry.resolve("gym", proof_gym_reference)
+    except (GymJobError, TypeError, KeyError):
+        fail("runtime_not_qualified", "The qualified proof gym reference must resolve in the installed registry.", 409)
+    if not any(
+        binding.project_id == project_id and binding.gym_asset_id == gym_asset_id
+        and binding.gym_version == gym_version and binding.gym_artifact_id == gym_artifact_id
+        and binding.proof_gym_reference_digest == digest(proof_gym_reference)
+        and binding.proof_gym_configuration_digest == digest(proof_gym_configuration)
+        and method in binding.methods for binding in profile.product_gym_bindings
+    ):
+        fail("runtime_not_qualified", "Operator must qualify this exact saved gym identity, proof registry reference, configuration and method.", 409)
 
 
 class BridgeContext(TypedDict):
@@ -105,6 +152,16 @@ def dispatch(operation: str, profile: TrustedRuntimeProfile, *, document: dict[s
         fail("runtime_not_authorized", "Bridge requires qualification, deployment capability and exact approval.", 403)
     identifier(run_id, "run ID")
     identifier(role, "candidate role")
+    if "product_binding" in document:
+        binding = document["product_binding"]
+        gyms = [asset for asset in binding["assets"] if asset["kind"] == "gym"]
+        if not gyms or role != binding["role"]:
+            fail("runtime_not_qualified", "Product proof binding requires its exact qualified role and gyms.", 409)
+        for gym in gyms:
+            require_product_gym_binding(
+                profile, project_id=binding["project_id"], gym_asset_id=gym["id"], gym_version=gym["version"],
+                gym_artifact_id=gym["artifact_id"], proof_gym_reference=document["plugins"]["gym"],
+                proof_gym_configuration=document["gym"], method=binding["method"])
     context: BridgeContext = {"profile": profile, "document": document, "role": role,
                "root": profile.root.resolve() / run_id, "limits": limits}
     callback = profile.callbacks.get(operation) or BRIDGES[operation]

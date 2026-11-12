@@ -33,6 +33,18 @@ not the current absence of the newly implemented components.
 
 ## 1. Assessment of the supplied review
 
+**Subsequent product-workspace delivery:** The root UI now organizes persistent
+projects, versioned model/dataset/gym/evidence assets, interactive trusted
+previews, recorded-output evaluation, improvement recipes, and provenance export
+into customer workstreams. PostgreSQL migration v3 adds those records without
+replacing the existing scheduler or separate authorities. The advanced run
+console remains at `/operations`. Recorded evaluation is real offline computation,
+not new inference. Fine-tune execution requires an operator-qualified runtime and
+exact project-gym/proof bindings; weight-edit and merge execution remain
+unqualified by default. Saving their plans never runs a fixture in place of a
+selected model. Live-engine, multi-tenant, custody/signing, and scientific
+weight-edit qualification remain separate work.
+
 The overall diagnosis is right: we have substantial execution/evidence
 building blocks, not yet a cohesive operator-facing control plane. Several
 claims need updating or narrowing.

@@ -79,6 +79,34 @@ class ControlPlaneService:
     def health(self) -> dict[str, Any]:
         return self.store.health()
 
+    def workspace(self) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).workspace()
+
+    def create_project(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).create_project(body, actor=actor)
+
+    def get_project(self, project_id: str) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).get_project(project_id)
+
+    def create_asset(self, project_id: str, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).create_asset(project_id, body, actor=actor)
+
+    def preview_gym(self, project_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).preview(project_id, body)
+
+    def create_experiment(self, project_id: str, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).experiment(project_id, body, actor=actor)
+
+    def project_bundle(self, project_id: str) -> dict[str, Any]:
+        from .product import ProductWorkspace
+        return ProductWorkspace(self).bundle(project_id)
+
     def create_run(self, spec: dict[str, Any], *, actor: str, idempotency_key: str) -> dict[str, Any]:
         actor_name(actor)
         identifier(idempotency_key, "idempotency key")
@@ -88,26 +116,29 @@ class ControlPlaneService:
                 profiles = self._operations()[stage["operation"]]["qualified_profiles"]
                 if stage["config"]["runtime_profile"] not in profiles:
                     fail("runtime_not_authorized", "Stage runtime profile is not qualified for this capability.", 403)
-        spec_digest = digest(spec)
-        run_id = _id("run")
         with self.store.transaction() as conn:
-            # Unique constraint serializes identical simultaneous create requests.
-            row = conn.execute(
-                "INSERT INTO cp_runs(id,actor,create_key,state,spec,spec_digest) "
-                "VALUES (%s,%s,%s,'created',%s,%s) ON CONFLICT(actor,create_key) DO NOTHING RETURNING id",
-                (run_id, actor, idempotency_key, json_value(spec), spec_digest)).fetchone()
-            if row:
-                for stage in spec["stages"]:
-                    conn.execute("INSERT INTO cp_stages(run_id,id,operation,definition) VALUES (%s,%s,%s,%s)",
-                                 (run_id, stage["id"], stage["operation"], json_value(stage)))
-                self.store.event(conn, run_id, "run.created", {"actor": actor, "spec_digest": spec_digest})
-            else:
-                existing = one(conn.execute("SELECT id,spec_digest FROM cp_runs WHERE actor=%s AND create_key=%s",
-                                            (actor, idempotency_key)))
-                if existing["spec_digest"] != spec_digest:
-                    fail("idempotency_conflict", "Idempotency key was already used for a different specification.", 409)
-                run_id = existing["id"]
+            run_id = self._insert_run(conn, spec, actor=actor, idempotency_key=idempotency_key)
         return self.get_run(run_id)
+
+    def _insert_run(self, conn: Connection[dict[str, Any]], spec: dict[str, Any], *,
+                    actor: str, idempotency_key: str) -> str:
+        spec_digest, run_id = digest(spec), _id("run")
+        row = conn.execute(
+            "INSERT INTO cp_runs(id,actor,create_key,state,spec,spec_digest) "
+            "VALUES (%s,%s,%s,'created',%s,%s) ON CONFLICT(actor,create_key) DO NOTHING RETURNING id",
+            (run_id, actor, idempotency_key, json_value(spec), spec_digest)).fetchone()
+        if row:
+            for stage in spec["stages"]:
+                conn.execute("INSERT INTO cp_stages(run_id,id,operation,definition) VALUES (%s,%s,%s,%s)",
+                             (run_id, stage["id"], stage["operation"], json_value(stage)))
+            self.store.event(conn, run_id, "run.created", {"actor": actor, "spec_digest": spec_digest})
+        else:
+            existing = one(conn.execute("SELECT id,spec_digest FROM cp_runs WHERE actor=%s AND create_key=%s",
+                                        (actor, idempotency_key)))
+            if existing["spec_digest"] != spec_digest:
+                fail("idempotency_conflict", "Idempotency key was already used for a different specification.", 409)
+            run_id = existing["id"]
+        return str(run_id)
 
     def list_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -415,6 +446,11 @@ class ControlPlaneService:
                                   document=self.get_artifact(config["artifact_id"])["document"],
                                   role=config["role"], run_id=claim["run_id"],
                                   plan_digest=claim["plan_digest"], approval=claim["approval"], limits=stage["limits"])
+            elif stage["operation"] == "analysis.saved_json":
+                from .product import analyze_saved
+                result = analyze_saved(self, stage["config"], stage["limits"])
+                if claim["candidate_model"] != result["declared_model"]:
+                    fail("invalid_analysis_pins", "Run candidate identity differs from the pinned declared model.")
             else:
                 result = execute(stage, claim["dependencies"])
             result = {**result, "candidate_model": claim["candidate_model"]}

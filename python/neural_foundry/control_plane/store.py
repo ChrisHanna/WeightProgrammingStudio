@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from psycopg import Connection, Cursor
     from psycopg.types.json import Jsonb
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIGRATION = """
 CREATE TABLE IF NOT EXISTS cp_schema(version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE cp_runs(
@@ -91,6 +91,30 @@ CREATE TRIGGER cp_stage_identity_guard BEFORE UPDATE ON cp_stages
 """
 
 
+MIGRATION_3 = """
+CREATE TABLE cp_projects(
+ id text PRIMARY KEY, actor text NOT NULL, create_key text NOT NULL,
+ request_digest text NOT NULL, name text NOT NULL, description text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(actor,create_key));
+CREATE TABLE cp_assets(
+ id text PRIMARY KEY, project_id text NOT NULL REFERENCES cp_projects(id),
+ kind text NOT NULL, name text NOT NULL, version integer NOT NULL,
+ parent_asset_id text REFERENCES cp_assets(id), artifact_id text NOT NULL REFERENCES cp_artifacts(id),
+ create_key text NOT NULL, request_digest text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(project_id,create_key),
+ UNIQUE(project_id,kind,name,version));
+CREATE TABLE cp_project_runs(
+ project_id text NOT NULL REFERENCES cp_projects(id), run_id text NOT NULL UNIQUE REFERENCES cp_runs(id),
+ PRIMARY KEY(project_id,run_id));
+CREATE TRIGGER cp_project_immutable BEFORE UPDATE OR DELETE ON cp_projects
+ FOR EACH ROW EXECUTE FUNCTION cp_immutable_history();
+CREATE TRIGGER cp_asset_immutable BEFORE UPDATE OR DELETE ON cp_assets
+ FOR EACH ROW EXECUTE FUNCTION cp_immutable_history();
+CREATE TRIGGER cp_project_run_immutable BEFORE UPDATE OR DELETE ON cp_project_runs
+ FOR EACH ROW EXECUTE FUNCTION cp_immutable_history();
+"""
+
+
 def json_value(value: Any) -> Jsonb:
     from psycopg.types.json import Jsonb
     return Jsonb(value, dumps=lambda x: json.dumps(x, allow_nan=False))
@@ -134,15 +158,19 @@ class Store:
             exists = one(conn.execute("SELECT to_regclass('cp_schema') AS name"))["name"]
             if exists:
                 versions = [r["version"] for r in conn.execute("SELECT version FROM cp_schema ORDER BY version")]
-                if versions == [1, 2]:
+                if versions == [1, 2, 3]:
                     return
-                if versions != [1]:
+                if versions not in ([1], [1, 2]):
                     fail("schema_version", "Database schema version is unsupported.", 503)
             else:
                 conn.execute(MIGRATION)
                 conn.execute("INSERT INTO cp_schema(version) VALUES (1)")
-            conn.execute(MIGRATION_2)
-            conn.execute("INSERT INTO cp_schema(version) VALUES (2)")
+                versions = [1]
+            if versions == [1]:
+                conn.execute(MIGRATION_2)
+                conn.execute("INSERT INTO cp_schema(version) VALUES (2)")
+            conn.execute(MIGRATION_3)
+            conn.execute("INSERT INTO cp_schema(version) VALUES (3)")
 
     def health(self) -> dict[str, Any]:
         with self.transaction() as conn:
@@ -150,7 +178,7 @@ class Store:
             if not exists:
                 fail("schema_missing", "Database migrations must be applied.", 503)
             versions = [r["version"] for r in conn.execute("SELECT version FROM cp_schema ORDER BY version")]
-            if versions != [1, 2]:
+            if versions != [1, 2, 3]:
                 fail("schema_version", "Database schema version is unsupported.", 503)
         return {"status": "ok", "database": "postgresql", "schema_version": SCHEMA_VERSION}
 

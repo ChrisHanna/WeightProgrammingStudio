@@ -123,6 +123,21 @@ def validate_spec(value: Any, registry: dict[str, dict[str, Any]]) -> dict[str, 
 
 
 def validate_config(operation: str, config: Any) -> None:
+    if operation == "analysis.saved_json":
+        from .product import POLICY
+        fields = {"metric_policy", "example_count"}
+        fields |= {prefix + suffix for prefix in ("gym", "dataset", "evidence", "model")
+                   for suffix in ("_artifact_id", "_asset_id", "_version")}
+        keys(config, fields, fields)
+        if config["metric_policy"] != POLICY or type(config["example_count"]) is not int or not 1 <= config["example_count"] <= 256:
+            fail("invalid_config", "Recorded analysis requires the supported metric policy and bounded row count.")
+        for prefix in ("gym", "dataset", "evidence", "model"):
+            identifier(config[prefix + "_asset_id"], "asset ID")
+            if not isinstance(config[prefix + "_artifact_id"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", config[prefix + "_artifact_id"]):
+                fail("invalid_config", "Recorded analysis inputs require pinned artifact digests.")
+            if type(config[prefix + "_version"]) is not int or config[prefix + "_version"] < 1:
+                fail("invalid_config", "Asset versions must be positive integers.")
+        return
     if operation.startswith("proof."):
         keys(config, {"runtime_profile", "artifact_id", "role"}, {"runtime_profile", "artifact_id", "role"})
         for field in ("runtime_profile", "role"):
@@ -164,15 +179,19 @@ def compile_plan(spec: dict[str, Any]) -> dict[str, Any]:
     from .implementation import execution_implementation
 
     stages = [{**s, "limits": limits(s["limits"])} for s in spec["stages"]]
-    software_only = all(s["operation"].startswith("software.") for s in stages)
+    software_only = all(s["operation"].startswith(("software.", "analysis.")) for s in stages)
+    runtime_profile = ("cpu-recorded-analysis-v1" if all(s["operation"].startswith("analysis.") for s in stages)
+                       else "cpu-software-fixture-v1" if software_only else "per-stage-qualified-profile")
     plan = {"version": 1, "spec_digest": digest(spec), "stages": stages,
-            "runtime_profile": "cpu-software-fixture-v1" if software_only else "per-stage-qualified-profile",
+            "runtime_profile": runtime_profile,
             "model_calls": False if software_only else "possible",
             "limits": {key: sum(s["limits"][key] for s in stages) for key in DEFAULT_LIMITS},
             "release_authorized": False, "execution_implementation": execution_implementation()}
     for stage in stages:
         config, bound = stage["config"], stage["limits"]
         required_steps = config.get("steps", 8 if stage["operation"] == "software.training" else 1)
+        if stage["operation"] == "analysis.saved_json":
+            required_steps = config["example_count"]
         if stage["operation"] in {"software.local_eval", "software.provider", "software.eval", "software.offline_rescore"}:
             required_steps = len(config.get("inputs", ['{"value":1}']))
         if stage["operation"] == "software.workflow":

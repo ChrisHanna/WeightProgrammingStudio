@@ -122,12 +122,18 @@ def test_all_service_endpoints_require_bearer(operator, method, path, body):
 def test_static_and_minimal_health_are_public_and_never_execute(operator):
     client, facade = operator
     assert client.get("/").status_code == 200
+    assert client.get("/operations").status_code == 200
     script = client.get("/static/app.js")
     assert script.status_code == 200
     assert "innerHTML" not in script.text
     builder = client.get("/static/workflow_builder.mjs")
     assert builder.status_code == 200
     assert "javascript" in builder.headers["content-type"]
+    for name in ("workspace.mjs", "workspace_logic.mjs"):
+        asset = client.get("/static/" + name)
+        assert asset.status_code == 200
+        assert "javascript" in asset.headers["content-type"]
+        assert "innerHTML" not in asset.text
     assert client.get("/health").json() == {"status": "ok"}
     assert client.get("/ready").json() == {"ready": True}
     assert "default-src 'self'" in script.headers["content-security-policy"]

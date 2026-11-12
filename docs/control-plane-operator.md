@@ -59,7 +59,70 @@ responsiveness; `/ready` checks database/schema readiness without returning a DS
 schema document or private details. Readiness is not a worker-liveness guarantee.
 Use deployment health checks and inspect worker/stage events as well.
 
-## Operate a workflow
+## Product workspace
+
+The root page is the project-centered model workspace. It organizes capabilities
+into customer workstreams rather than requiring users to assemble scheduler
+stages. The advanced run console remains at `/operations`, in a separately
+unlocked browser session. Both use the same PostgreSQL service, artifact backing,
+authentication boundary, and worker.
+
+1. **Create a project.** Projects persist models, datasets, gyms, recipes,
+   recorded-answer evidence, and linked experiments. Counts come from stored
+   resources, not example dashboards.
+2. **Register a model reference.** Record the model ID, revision, source and
+   optional declared weights digest. Registration does not download weights or
+   independently verify the checkpoint.
+3. **Import examples.** JSON/JSONL imports map input/expected-answer columns,
+   retain explicit training/validation splits, and show defaults for missing IDs
+   or splits. Expected answers are JSON objects. The server validates bounds,
+   identities and cross-split overlap before storing an immutable asset version.
+   These are development datasets, not sealed-test custody.
+4. **Build a gym.** Connect a JSON-extraction dataset, or configure a supported
+   stateful-counter or no-side-effect tool-workflow template. **Try this gym**
+   uses real bounded task logic. Manual stateful actions are replayed from the
+   declared seed within a trusted software fixture and closed after each request.
+   This is not a real browser, 3D renderer, or policy-training session. Publishing
+   a gym stores its definition without starting any model.
+5. **Evaluate recorded answers.** Import candidate responses linked to validation
+   example IDs, including malformed JSON responses as strings. Select a frozen
+   gym and evidence assets from the same dataset. Review the resulting durable
+   evaluation plan, authorize its exact limits, and explicitly start it. The
+   worker computes actual metrics from saved outputs with pinned source
+   identities; this is not new inference or independent final evaluation.
+6. **Prepare an improvement.** Fine-tuning, weight-edit and composition screens
+   save typed, versioned recipes linked to project assets. A saved recipe is not
+   a trained model. Launch requires a registered qualified runtime, compatible
+   actual inputs and an exact approved plan; entering a profile name cannot
+   enable execution. Weight-edit scientific effectiveness remains experimental.
+7. **Inspect and export.** Compare measurements only within matching frozen
+   gym/dataset/metric-policy contexts. The evidence manifest export preserves
+   project provenance, asset definitions (including saved examples/responses)
+   and artifact references. Protect it as private project data. The platform does
+   not add runtime credentials, model weight files, a signed deployment, or a
+   release authorization.
+
+Asset versions are immutable. Reopening a published gym creates a new version
+instead of changing old evaluation inputs. BrowserGym, FinRL, real 3D engines,
+new provider/model calls, and final-test custody are not enabled by these forms.
+The deployment remains private and single-operator, not a public multi-tenant SaaS.
+
+Model, dataset and recorded-answer inspectors expose **Create next version** for
+the current version. Old gyms and experiments keep their original references.
+Composition plans must name at least two distinct project-owned source models,
+including the selected base. Saved-output evaluation is bounded to 256 validation
+examples per candidate in this deployment; larger datasets are not silently
+truncated.
+
+An operator-installed fine-tuning runtime must declare a trusted
+`QualifiedGymBinding`: exact project/gym identity, version and content digest,
+resolved proof-registry gym reference, gym configuration digest, and supported
+method. These records are installed in trusted deployment code, not editable
+qualification assertions submitted by a browser. Planning and dispatch recheck
+the binding, selected model identity, saved recipe parameters, and exact
+train/validation data. A compatible runtime label alone does not grant execution.
+
+## Advanced operations console
 
 1. Unlock the console and open **Create experiment**. In **Guided setup**, name
    the experiment, select one or more available catalog workloads, and label your
@@ -105,8 +168,9 @@ disabled while a command is pending or database readiness is unavailable.
 Network timeouts preserve create/start idempotency keys; inspect durable state
 before retrying after an uncertain response.
 
-Dependency-free builder regression tests run with
-`node --test tests/control_plane_ui.test.mjs` (Node 18+). HTTP/static-boundary tests
+Dependency-free browser-helper regression tests run with
+`node --test tests/control_plane_ui.test.mjs tests/control_plane_workspace_ui.test.mjs`
+(Node 18+). HTTP/static-boundary tests
 run with `python -m pytest -q tests/test_control_plane_api.py`.
 
 Plans also bind the execution implementation and dependency fingerprint. If a

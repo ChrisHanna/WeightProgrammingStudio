@@ -17,13 +17,17 @@ Each capability below has one of these labels, defined in the [qualification mat
 ## Private control plane
 
 The single-host control plane provides a PostgreSQL run store, durable workers,
-an authenticated API, and a thin operator dashboard. See the
+an authenticated API, and a project-centered model workspace with versioned assets,
+gym previews, recorded-output evaluation, and improvement plans. The advanced
+operator console remains available separately. See the
 [deployment guide](docs/control-plane-deployment.md) for Docker Compose setup,
 secrets, health checks, and backup/restore, and the
 [operator guide](docs/control-plane-operator.md) for planning, approval, execution,
 events, and artifacts.
 
-The default deployment executes CPU software fixtures across multiple run shapes.
+The default deployment supports offline recorded-output analysis and bounded CPU
+software previews across multiple run shapes. Saving a fine-tuning or editing plan
+does not train or edit a model; execution requires a qualified runtime and approval.
 It does not authorize live model/provider runs, prove model quality, or grant
 release approval. Budget, custody, and exposure ledgers remain separate authorities.
 
