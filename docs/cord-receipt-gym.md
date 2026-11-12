@@ -1,10 +1,44 @@
 # CORD provided-transcription receipt gym v1
 
 Internal evaluation only. No training, GPU loading, inference, API calls or official
-test access occurs during acquisition/preparation. The two unchanged Qwen baselines
-share the identical task projection, frozen panels, guided JSON/greedy decoding,
-`enable_thinking=False`, and new real-data budgets. This is not a CORD/BIPIA leaderboard
-submission, production qualification or public redistribution clearance.
+test access occurs during acquisition/preparation. The intended two unchanged Qwen
+baselines share the identical task projection, frozen panels, guided JSON/greedy
+decoding, `enable_thinking=False`, and new real-data budgets. This is not a
+CORD/BIPIA leaderboard submission, production qualification or public redistribution clearance.
+
+## Projection defect and CPU acceptance correction
+
+The original CORD projection incorrectly returned `chat_messages_v1`. In the actual
+vLLM adapter that mode neither requests guided JSON nor parses JSON responses:
+it returns raw text. Merely supplying `output_schema` did not activate guidance.
+The prior claim that those frozen executions used guided JSON was **incorrect**.
+The halted `repair-one` journals are **IMPLEMENTATION_FAILURE evidence, not model
+quality results**; do not aggregate their scores or infer model extraction ability.
+Original sources/specs/receipts and journals remain preserved as historical evidence.
+
+The initial 11-test CPU receipt and subsequent repair acceptance checked data,
+registry hashes and a scorer receiving pre-parsed dict/None software responses.
+They **did not cover CORD through the actual vLLM request/response transport** and
+must not be read as qualifying guided decoding or response parsing. Core fingerprint
+acceptance was not semantic end-to-end acceptance.
+
+The corrected source now returns `json_extraction_v1` and declares that format in
+the TaskAdapter (`cord-json` projection identity). A new parameterized software test
+uses the real CORD task, `candidate_task`, generic `score`, real
+`VllmCandidateServer` request/response code and mocked tokenizer/Docker subprocess
+transport. It checks the complete actual task output schema in
+`response_format.json_schema`, greedy/output-cap parameters, response evidence mode
+`json_schema`, exact request digest, parsed dicts, actual CORD scores, and continuation
+after a capped or stopped-invalid-JSON completion. Valid/invalid/valid rows score
+1/0/1. This test initially failed against the old projection because the actual
+request lacked `response_format`; after correction all 13 CORD tests pass.
+
+The transport mock does not start Docker, load a model, establish serving identity
+or qualify a GPU decoder. Its end-identity hook is explicitly stubbed and loaded
+identity remains unverified. It validates software plumbing, not model quality.
+**No new executable specs are authorized or frozen by this correction.** The old
+spec fingerprints intentionally no longer match the corrected source. Another
+model attempt requires new explicit user recovery approval and a fresh spec/root.
 
 ## Composition and integration
 
@@ -194,8 +228,16 @@ run containing only `attack-plan.json` can resume only with that identical plan.
 The actual CPU environment initially lacked pyarrow/pytest; after observed missing
 package failures, existing `uv` restored pyarrow 26.0.1 and pytest 9.2.0. Transformers
 4.57.3 was already cached. No GPU runtime is used for these stages.
+The coordinator subsequently declared the lightweight preparation extra
+`cord-receipts = ["pyarrow==26.0.1", "transformers==4.57.3"]` in `pyproject.toml`.
+For a future fresh environment, install the project with
+`python -m pip install -e ".[cord-receipts]"` (and the existing dev extra for tests).
+Do not install NeMo solely to read Parquet. This adds no model/tokenizer download
+authorization; actual model serving uses the separately approved cached runtime.
 
-After coordinator core-stable confirmation, freeze the executable specs:
+Historical freeze command shape follows. **Do not execute against these existing
+roots or treat this as recovery approval.** Future execution needs explicit user
+approval plus a fresh root after the projection correction:
 
 ```bash
 P=artifacts/cord-bipia-first-20261111

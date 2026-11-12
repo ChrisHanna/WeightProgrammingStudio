@@ -64,6 +64,7 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         result = adapter.infer({"format": "json_extraction_v1", "messages": [{"role": "user", "content": "extract"}],
                                 "output_schema": {"type": "object", "properties": {}, "additionalProperties": False}})
         assert result.response == {"answer": 1}
+        assert result.interaction["response_format"] == "json_schema"
         assert adapter.loaded_identity()["local_loaded_files_verified"] is False
         assert adapter.loaded_identity()["served_model_identity_verified"] is False
         assert "state_digest" not in adapter.loaded_identity()
@@ -101,6 +102,7 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         completion["finish_reason"] = "length"
         capped = adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})
         assert capped.interaction["hit_generation_cap"] is True
+        assert capped.interaction["response_format"] == "text"
         assert capped.interaction["completion_finish_reason"] == "length"
         completion["text"] = '{"answer":'
         capped = adapter.infer({"format": "json_extraction_v1",

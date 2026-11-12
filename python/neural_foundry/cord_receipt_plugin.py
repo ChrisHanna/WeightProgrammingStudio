@@ -53,7 +53,7 @@ def project(input_value: Any, response: Any) -> dict[str, Any]:
     if response is not None:
         validate_task_instance(OUTPUT, response, field="CORD output")
         messages.append({"role": "assistant", "content": json.dumps(response, ensure_ascii=False)})
-    return {"format": "chat_messages_v1", "messages": messages, "output_schema": OUTPUT}
+    return {"format": "json_extraction_v1", "messages": messages, "output_schema": OUTPUT}
 
 
 def canonical(value: Any) -> Any:
@@ -188,7 +188,7 @@ def cord_task(configuration: Mapping[str, Any]) -> TaskAdapter:
                                     lambda **kw: {"passed": receipt_metrics(**kw)["structured_exact"] == 1})
         service.components.register("candidate_method", method.method_id, "1", digest, lambda **_kw: None)
     return TaskAdapter(AdapterIdentity("cord-receipts", "1", digest), job, "single_response",
-                       AdapterIdentity("cord-chat", "1", digest), "chat_messages_v1", project, bind)
+                       AdapterIdentity("cord-json", "1", digest), "json_extraction_v1", project, bind)
 
 
 def public_audit(*, spec: Mapping[str, Any]) -> dict:

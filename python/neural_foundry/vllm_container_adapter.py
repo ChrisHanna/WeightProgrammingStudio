@@ -277,6 +277,8 @@ class VllmCandidateServer:
                 raise GymJobError("vLLM returned an invalid completion envelope or finish reason") from exc
             evidence = {"raw_text": text, "completion_finish_reason": finish_reason,
                         "hit_generation_cap": finish_reason == "length",
+                        "response_format": "json_schema" if kind == "json_extraction_v1" else "text",
+                        "request_digest": _document_digest(payload),
                         "served_model_identity_verified": self._identity_verified,
                         "prompt_renderer_digest": renderer.digest,
                         "rendered_prompt_digest": rendered.prompt_digest}
