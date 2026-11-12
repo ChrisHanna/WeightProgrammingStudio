@@ -49,9 +49,13 @@ correlate those authorities. Publish safe metadata/events into a single
 operator view; do not give that view direct access to sealed prompts or the
 ability to reset spending/exposure history.
 
-Start with SQLite and a filesystem-backed artifact adapter locally. Avoid a
-Postgres migration, object-store dependency, Kubernetes or Ray requirement
-before the first usable local vertical slice. Keep interfaces open to them.
+**Agreed backend:** PostgreSQL is the initial canonical run store, using Docker
+locally and portable connection configuration. Do not build a parallel SQLite
+run-store implementation first. Existing SQLite budget/attempt authorities
+remain separate unless an independently reviewed migration is needed.
+Use a persistent named database volume and versioned migrations. Artifacts
+remain filesystem-backed initially; object storage, Kubernetes and Ray are
+not prerequisites.
 
 ## 3. What the completed experiments teach the control plane
 
@@ -142,8 +146,9 @@ retry support: it requires an explicitly qualified backend continuation contract
 ### Local runtime and artifact approach
 
 Use the existing Python application/stage adapters and Rust enforcement
-primitives. Begin with one local coordinator service, SQLite and filesystem
-artifacts, not a new microservice topology.
+primitives. Begin with one application service, PostgreSQL and filesystem
+artifacts, not a new microservice topology. API and worker can share the same
+application package/image with separate process entrypoints.
 
 Logical specs reference runtime-profile IDs and content-addressed assets.
 Worker receipts record resolved executable/image, device, versions and actual
@@ -447,6 +452,11 @@ CORD test use remains a separate future user authorization.
 
 - One documented fast CPU/software contract entry point without model weights,
   paid APIs or a GPU. Separate live/native capability qualifications clearly.
+- Keep pure unit tests Docker-free, but verify store migrations, transactions,
+  concurrent claims and restart behavior against real PostgreSQL in a local
+  test container. Do not substitute SQLite for PostgreSQL semantics. The
+  official pinned image must be acquired explicitly; cached-image integration
+  tests need no external network or model assets.
 - Keep the documented two-thread capability-runner Cargo rule in native Linux CI.
   Do not mislabel Linux-specific isolation as portable Windows execution.
 - Cover all plugin kinds and actual task/request/response boundaries; keep the
@@ -474,7 +484,7 @@ Do not add another receipt-training round to any acceptance criterion.
 1. **Contracts and capability metadata:** schemas, IDs, operation/plugin
    descriptors, planner and incompatibility checks. Review the public contracts
    before persistence code depends on them.
-2. **Persistence and queries:** SQLite migrations, transactional transitions,
+2. **Persistence and queries:** PostgreSQL migrations, transactional transitions,
    event ordering, artifact indexing and historical-receipt import.
 3. **Coordinator and approvals:** dependency scheduling over existing stage
    functions, admission, claims/leases, bounded authorization, progress and
@@ -503,13 +513,42 @@ execution implementation.
 - API budget reservations survive restart and cannot be reset by a new UI request.
 - Resource/time limits and cancellation apply only to owned processes.
 - Completed runs, passed gates and release authorization remain separate.
-- All mandatory software acceptance is network/GPU/model-download free.
+- Mandatory software acceptance needs no external network, GPU or model
+  download. PostgreSQL integration uses a local Docker network and cached image;
+  pure unit contracts remain Docker-free.
 - No HTTP read, UI refresh or catalog request initiates paid/training work.
 
 Keep parked: synthetic quality runs, the two unscored factorial candidates,
 weight-edit research, full SFT, new datasets/model downloads, fresh holdouts and
-final-test scoring. Defer distributed scheduling, Kubernetes/Ray, Postgres,
+final-test scoring. Defer distributed scheduling, Kubernetes/Ray,
 cloud object storage and broad UI polish until a concrete product need.
+
+### Proposed first deployment target
+
+For the fastest usable deployment, carry the first two checkpoints through
+to a **private single-host Docker Compose stack**, rather than stopping at
+database/contracts with no operator-facing product:
+
+- PostgreSQL on an internal network, pinned official image, healthcheck and
+  persistent named volume; versioned migration step before application startup.
+- Control-plane API and one independently restartable worker using the same
+  application contracts and database. PostgreSQL claims/leases are sufficient
+  initially; do not add Redis or another queue service without need.
+- Thin UI for plan/approval, live progress, failures, artifacts and comparison.
+- Persistent artifact backing separate from PostgreSQL; runtime secret
+  references, no committed credentials or model payloads in the database.
+- Minimum operator authentication before any remote access. No public
+  multi-tenant deployment or production-readiness claim.
+
+First acceptance uses CPU fixtures and imported evidence across the supported
+workflow shapes. Existing qualified local model runtimes can be attached through
+worker profiles after explicit run approval; packaging every GPU backend into
+a new image must not block a working operator deployment or be silently claimed
+as complete. Windows can be an operator client to the Linux execution profile.
+
+PostgreSQL selection is approved. This deployment recommendation is still a
+plan; it does not itself authorize image pulls, services, new dependencies or
+model/API operations.
 
 ## 6. Source evidence and review boundary
 
