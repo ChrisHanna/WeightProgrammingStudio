@@ -202,6 +202,27 @@ def test_native_test_and_nonvalidation_providers_are_denied_before_io(tmp_path):
             provider(split=split)
 
 
+def test_training_audit_rejects_normalized_validation_overlap_and_methods_are_data():
+    reference = target(annotation())
+    clean = [{"scenario_id": f"validation:clean:{i}", "native_split": "validation",
+              "input": {"document": f"receipt {i}"}, "reference": reference} for i in range(100)]
+    attacked = [{**row, "scenario_id": row["scenario_id"] + ":attack",
+                 "clean_scenario_id": row["scenario_id"]} for row in clean]
+    for row in [*clean, *attacked]:
+        row["row_digest"] = _document_digest(row)
+    train = {"scenario_id": "train:native:1", "native_split": "train",
+             "input": {"document": "independent receipt"}, "reference": reference}
+    train["row_digest"] = _document_digest(train)
+    spec = {"public_sets": [{"rows": clean}, {"rows": attacked}],
+            "training_rows": [train], "training_policy_reference": {"approval": "bound by runner"}}
+    assert public_audit(spec=spec)["public_passed"] is True
+    train["input"]["document"] = " receipt \n 0 "
+    train["row_digest"] = _document_digest({k: v for k, v in train.items() if k != "row_digest"})
+    assert public_audit(spec=spec)["public_passed"] is False
+    task = cord_task({"rows": [], "methods": ["unchanged_base", "lora", "provider"]})
+    assert [method.method_id for method in task.job.candidate_methods] == ["unchanged_base", "lora", "provider"]
+
+
 def test_composition_uses_generic_registry_and_new_budgets_without_training():
     row = {"scenario_id": "validation:cord:0", "input": {"document": "Nasi"},
            "reference": target(annotation())}

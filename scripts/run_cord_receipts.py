@@ -5,17 +5,26 @@ import json
 from pathlib import Path
 
 from neural_foundry.cord_receipt_plugin import compose, registry, summarize
-from neural_foundry.proof_pipeline import audit, read_document, score, validate_spec, write_document
+from neural_foundry.proof_pipeline import (
+    audit,
+    read_document,
+    score,
+    train,
+    validate_spec,
+    write_document,
+)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("freeze", "audit", "export", "identity", "score"))
+    parser.add_argument("stage", choices=("freeze", "audit", "train", "export", "identity", "score"))
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--core-stable", action="store_true")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--role")
+    parser.add_argument("--automodel-python")
+    parser.add_argument("--reload-python")
     args = parser.parse_args()
     if args.stage == "freeze":
         if not args.core_stable or not args.config:
@@ -42,7 +51,13 @@ def main() -> None:
             if not args.role:
                 parser.error("--role required")
             candidate = next(c for c in spec["candidates"] if c["role"] == args.role)
-            if args.stage == "export":
+            if args.stage == "train":
+                if not args.automodel_python or not args.reload_python:
+                    parser.error("training requires the approved existing trainer/reload runtimes")
+                result = train(spec, role=args.role, root=args.root,
+                               automodel_python=args.automodel_python,
+                               reload_python=args.reload_python, registry=custom)
+            elif args.stage == "export":
                 result = custom.resolve("exporter", spec["plugins"]["exporter"])(
                     spec=spec, role=args.role, root=args.root)
             elif args.stage == "identity":

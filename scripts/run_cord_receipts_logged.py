@@ -12,12 +12,14 @@ from neural_foundry.execution_runner import run_logged_worker, write_status
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("export", "identity", "score", "audit"))
+    parser.add_argument("stage", choices=("train", "export", "identity", "score", "audit"))
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--role")
+    parser.add_argument("--automodel-python", type=Path)
+    parser.add_argument("--reload-python", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=3600)
     args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
@@ -33,6 +35,10 @@ def main() -> None:
                args.stage, "--spec", str(args.spec.resolve()), "--root", str(args.root.resolve())]
     if args.role:
         command.extend(["--role", args.role])
+    for name in ("automodel_python", "reload_python"):
+        value = getattr(args, name)
+        if value is not None:
+            command.extend(["--" + name.replace("_", "-"), str(value)])
     environment = {**os.environ, "PYTHONPATH": str(project / "python"),
                    "PYTHONDONTWRITEBYTECODE": "1", "HF_HUB_OFFLINE": "1",
                    "HF_DATASETS_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}

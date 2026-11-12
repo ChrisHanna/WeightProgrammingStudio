@@ -251,6 +251,49 @@ candidates are not read or scored.
 
 ## Exact execution commands
 
+### Approved one-round training extension
+
+The approved round excludes every training receipt matching clean validation
+text after whitespace collapse. The immutable exclusion manifest retains
+**799 of the original800 receipts**, preserving native order and original row
+digests; one receipt is excluded, never moved into another split.
+
+[Training policy v1](../protocols/cord-lora-training-policy-v1.json) authorizes
+one ordered rank8 q/v LoRA pass, seed17, LR5e-5, no packing/shuffling or adaptive
+recipe changes. The generic runner's legacy512-row cap remains for unbound
+runs; larger passes require a digest-bound approved policy and exact matching
+recipe. CORD method roles and supplied training rows are manifest data.
+The public audit rejects any remaining normalized train/validation overlap.
+
+The parent baseline is staged on **CPU**, while the external AutoModel worker
+explicitly trains on `cuda:0`. This avoids keeping an extra4B base on the same
+GPU as the trainer and records the devices separately rather than pretending
+CPU-loaded weights were GPU resident.
+
+The guarded single-rank torchrun entrypoint sets the CUDA allocator ceiling
+**before** entering the official in-process AutoModel CLI. It does not replace
+the NeMo model factory or bypass its PEFT/distributed infrastructure.
+The ceiling is **28 GiB allocated** and the worker deadline is **10,800s**;
+allocation failure or timeout stops the attempt without recipe changes/retries.
+Evidence combines per-step peak allocated memory (NeMo resets peak counters
+each step) with worker-exit statistics. CUDA reserved memory is reported
+separately. Training disables KV cache; activation checkpointing is not
+silently enabled.
+
+All799 actual pinned AutoModel dataset examples were CPU-audited before the
+round: maximum shifted input1,685 tokens, total337,499, maximum supervised
+suffix1,173; every decoded supervised target equals its frozen reference.
+The approved sequence2,048 and dataset338,546-token ceilings remain unchanged.
+Dataset auditing loads no model and performs no forward pass.
+
+Acceptance compares scorer2 with the saved4B baseline: at least +5 percentage
+points clean field micro F1, no lower attacked field micro F1, and no lower
+whole-response link validity on either panel. Exact match and resource use
+remain separate reporting metrics. No test or synthetic-candidate evaluation
+is authorized.
+
+### Historical acquisition and preparation
+
 From repository root in WSL (PowerShell can invoke these with `wsl.exe --exec bash -lc`):
 
 ```bash

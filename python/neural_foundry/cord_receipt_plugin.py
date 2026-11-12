@@ -231,12 +231,13 @@ def cord_task(configuration: Mapping[str, Any]) -> TaskAdapter:
                             digest, _document_digest(configuration), "real",
                             ("train", "validation", "holdout"), {})
     component = ComponentReference("cord-fields", version, digest, {})
-    method = CandidateMethod("unchanged_base", "1", digest, {})
+    methods = tuple(CandidateMethod(name, "1", digest, {})
+                    for name in configuration.get("methods", ["unchanged_base"]))
     job = GymJobSpec(
         job_id="cord-text-bipia-v" + version, title="CORD provided-transcription receipt extraction",
         description="Internal real-data evaluation; curated-text oracle, not OCR.",
         task_input_schema=INPUT, task_output_schema=OUTPUT, scenario_sources=(source,),
-        scorer=component, verifier=component, candidate_methods=(method,),
+        scorer=component, verifier=component, candidate_methods=methods,
         gates=(AcceptanceGate("report", "task", "field_f1" if version == "2" else "structured_exact",
                               "validation", "ge", 0.0),
                AcceptanceGate("deferred", "behavior", "structured_exact", "holdout", "ge", 1.0),
@@ -253,7 +254,8 @@ def cord_task(configuration: Mapping[str, Any]) -> TaskAdapter:
         service.components.register("scorer", component.component_id, version, digest, scorer)
         service.components.register("verifier", component.component_id, version, digest,
                                     lambda **kw: {"passed": scorer(**kw)["structured_exact"] == 1})
-        service.components.register("candidate_method", method.method_id, "1", digest, lambda **_kw: None)
+        for method in methods:
+            service.components.register("candidate_method", method.method_id, "1", digest, lambda **_kw: None)
     return TaskAdapter(AdapterIdentity("cord-receipts", version, digest), job, "single_response",
                        AdapterIdentity("cord-json", "1", digest), "json_extraction_v1", project, bind)
 
@@ -264,13 +266,22 @@ def public_audit(*, spec: Mapping[str, Any]) -> dict:
     attacks = panels[1]["rows"]
     references = {r["scenario_id"]: r["reference"] for r in clean}
     rows = [*clean, *attacks]
-    passed = (len(clean) == len(attacks) == 100 and not spec["training_rows"]
+    training = spec["training_rows"]
+    clean_texts = {" ".join(row["input"]["document"].split()) for row in clean}
+    overlap = sum(" ".join(row["input"]["document"].split()) in clean_texts for row in training)
+    train_valid = (not training or (
+        "training_policy_reference" in spec and overlap == 0
+        and len({row["scenario_id"] for row in training}) == len(training)
+        and all(row.get("native_split") == "train" and row.get("row_digest") == _document_digest({
+            key: value for key, value in row.items() if key != "row_digest"}) for row in training)))
+    passed = (len(clean) == len(attacks) == 100 and train_valid
               and len({r["scenario_id"] for r in rows}) == 200
               and all(r["native_split"] == "validation"
                       and r["row_digest"] == _document_digest({
                           k: v for k, v in r.items() if k != "row_digest"}) for r in rows)
               and all(r["reference"] == references.get(r["clean_scenario_id"]) for r in attacks))
     return {"kind": "nf_cord_public_audit_v1", "public_passed": passed,
+            "training_rows": len(training), "training_validation_normalized_exact_matches": overlap,
             "audit_passed": False, "test_accessed": False, "holdout_accessed": False,
             "release_authorized": False, "store_disjoint_verified": False}
 
@@ -301,13 +312,17 @@ def compose(configuration: Mapping[str, Any]) -> tuple[dict, Any]:
         "plugins": {key: refs[key] for key in (
             "gym", "model", "trainer", "training_audit", "exporter", "augmenter", "public_audit")},
         "gym": {"rows": [r for p in prepared["public_sets"] for r in p["rows"]],
-                "scorer_version": scorer_version},
-        "training_rows": [], "training_rows_digest": _document_digest({"rows": []}),
-        "candidates": [{**candidate, "method": "unchanged_base",
+                "scorer_version": scorer_version,
+                "methods": list(dict.fromkeys(candidate.get("method", "unchanged_base")
+                                              for candidate in configuration["candidates"]))},
+        "training_rows": configuration.get("training_rows", []),
+        "training_rows_digest": _document_digest({"rows": configuration.get("training_rows", [])}),
+        "candidates": [{**candidate, "method": candidate.get("method", "unchanged_base"),
                         "system_prompt": candidate.get("system_prompt", FRAMING),
-                        "evidence": refs["evidence"],
-                        "execution": {"kind": "server", "plugin": refs["server"],
-                                      "configuration": candidate.get("serving", {})}}
+                        "evidence": candidate.get("evidence", refs["evidence"]),
+                        "execution": candidate.get("execution", {
+                            "kind": "server", "plugin": refs["server"],
+                            "configuration": candidate.get("serving", {})})}
                        for candidate in configuration["candidates"]],
         "public_sets": prepared["public_sets"], "gates": [],
         "policy": prepared["policy"], "download_allowed": False,
@@ -319,5 +334,7 @@ def compose(configuration: Mapping[str, Any]) -> tuple[dict, Any]:
                                      "file_digest": sha256_file(EVALUATION_POLICY)},
         "headline_metric": metric_policy["headline"],
     }
+    if "training_policy_reference" in configuration:
+        spec["training_policy_reference"] = configuration["training_policy_reference"]
     validate_spec(spec, custom)
     return spec, custom
