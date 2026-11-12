@@ -4,6 +4,7 @@ import json
 from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -221,6 +222,33 @@ def test_spec_refuses_unsafe_or_unfrozen_contracts(change) -> None:
     else:
         spec["policy"]["api"]["maximum_api_attempts"] = 0
     with pytest.raises(GymJobError):
+        validate_spec(spec, registry)
+
+
+def test_larger_ordered_pass_requires_bound_policy_and_exact_approved_recipe(tmp_path) -> None:
+    from neural_foundry.provenance import sha256_file
+
+    spec, registry = _custom_spec()
+    rows = [{"scenario_id": f"train:approved:{i}"} for i in range(799)]
+    spec["training_rows"] = rows
+    spec["training_rows_digest"] = _document_digest({"rows": rows})
+    policy_path = Path(__file__).resolve().parents[1] / "protocols" / "cord-lora-training-policy-v1.json"
+    policy = json.loads(policy_path.read_bytes())
+    candidate = spec["candidates"][0]
+    candidate["method"] = "lora"
+    candidate["recipe"] = {**policy["recipe"], "steps": len(rows)}
+    with pytest.raises(GymJobError, match="policy limits"):
+        validate_spec(spec, registry)
+    spec["training_policy_reference"] = {"path": str(policy_path), "file_digest": sha256_file(policy_path)}
+    validate_spec(spec, registry)
+    candidate["recipe"]["learning_rate"] *= 2
+    with pytest.raises(GymJobError, match="approved policy"):
+        validate_spec(spec, registry)
+    changed = tmp_path / "policy.json"
+    changed.write_text(json.dumps({**policy, "maximum_rows": 798}))
+    candidate["recipe"]["learning_rate"] = policy["recipe"]["learning_rate"]
+    spec["training_policy_reference"] = {"path": str(changed), "file_digest": sha256_file(changed)}
+    with pytest.raises(GymJobError, match="policy limits"):
         validate_spec(spec, registry)
 
 

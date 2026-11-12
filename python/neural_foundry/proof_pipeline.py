@@ -34,6 +34,9 @@ def write_document(path: Path, document: Mapping[str, Any], field: str = "docume
 
 
 def validate_spec(spec: Mapping[str, Any], registry: ProofRegistry) -> None:
+    from .training_policy import bound_training_policy
+
+    training_policy = bound_training_policy(spec)
     if spec.get("kind") != "nf_public_proof_run" or spec.get("version") != 1:
         raise GymJobError("unsupported public proof run spec")
     if spec.get("download_allowed") is not False or spec.get("holdout_accessed") is not False:
@@ -52,7 +55,9 @@ def validate_spec(spec: Mapping[str, Any], registry: ProofRegistry) -> None:
         or len({row["role"] for row in roles}) != len(roles)):
         raise GymJobError("candidate roles must be unique manifest data")
     policy = spec.get("policy", {})
-    if (policy.get("version") != 1 or type(policy.get("max_new_tokens")) is not int
+    if (policy.get("version") not in {1, 2}
+        or (policy.get("version") == 2 and "policy_reference" not in spec)
+        or type(policy.get("max_new_tokens")) is not int
         or type(policy.get("context_tokens")) is not int
         or not 1 <= policy["max_new_tokens"] < policy["context_tokens"]
         or policy.get("report_only") is not True or policy.get("adaptive_retraining") is not False
@@ -94,8 +99,14 @@ def validate_spec(spec: Mapping[str, Any], registry: ProofRegistry) -> None:
             if not rows or recipe.get("method") != candidate.get("method"):
                 raise GymJobError("candidate recipe method differs")
             coverage = spec.get("coverage_policy", "complete_ordered_pass")
-            if coverage == "complete_ordered_pass" and (recipe.get("steps") != len(rows) or len(rows) > 512):
-                raise GymJobError("one approved ordered pass must consume every row within 512 steps")
+            maximum_rows = training_policy["maximum_rows"] if training_policy else 512
+            maximum_steps = training_policy["maximum_steps"] if training_policy else 512
+            if coverage == "complete_ordered_pass" and (
+                recipe.get("steps") != len(rows) or len(rows) > maximum_rows or len(rows) > maximum_steps):
+                raise GymJobError("one approved ordered pass must consume every row within its policy limits")
+            if training_policy and any(recipe.get(key) != value
+                                       for key, value in training_policy["recipe"].items()):
+                raise GymJobError("training recipe differs from its approved policy")
             if coverage not in {"complete_ordered_pass", "legacy_partial_ordered_pass"}:
                 raise GymJobError("unknown training coverage policy")
         source = candidate.get("execution")
@@ -154,7 +165,8 @@ def training_task(task: Any, rows: list[dict[str, Any]]) -> Any:
     digest = _document_digest({"rows": rows})
     # Gym jobs declare all split roles; this provider refuses every non-train request.
     source = ScenarioSource("proof-train", "proof-frozen-rows", "1", digest, digest,
-                            "simulated", ("train", "validation", "holdout"), {})
+                            "real" if all(source.origin == "real" for source in task.job.scenario_sources)
+                            else "simulated", ("train", "validation", "holdout"), {})
     job = replace(task.job, scenario_sources=(source,))
 
     def bind(service: GymStudioService) -> None:
@@ -203,14 +215,21 @@ def train(spec: Mapping[str, Any], *, role: str, root: Path, automodel_python: s
     task = candidate_task(registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"]), selected)
     task = training_task(task, spec["training_rows"])
     policy = spec["policy"]
+    from .training_policy import bound_training_policy
+
+    limits = bound_training_policy(spec)
+    model_options = {"device": limits["base_staging_device"]} if limits else {}
     base = registry.resolve("model", spec["plugins"]["model"])(
-        base_model=spec["base_model"], policy=policy, seed=selected["recipe"]["seed"])
+        base_model=spec["base_model"], policy=policy, seed=selected["recipe"]["seed"], **model_options)
     lifecycle = GymLifecycle(GymStudioService(state_dir=output / "state"))
     evaluator = EvaluatorAdapter(AdapterIdentity("public-deferred", "1", task.identity.implementation_digest),
                                 lambda *_args: {"split": "validation", "complete": False, "metrics": {},
                                                 "status": "deferred_to_verified_public_server"})
     trainer = registry.resolve("trainer", spec["plugins"]["trainer"])(
-        automodel_python=automodel_python, reload_python=reload_python)
+        automodel_python=automodel_python, reload_python=reload_python,
+        **({"timeout_seconds": limits["worker_timeout_seconds"],
+            "maximum_cuda_allocated_bytes": limits["maximum_cuda_allocated_bytes"],
+            "training_device": limits["training_device"]} if limits else {}))
     for adapter in (task, base, evaluator, trainer):
         lifecycle.register(adapter)
     run = lifecycle.run({"run_id": spec["run_id"] + ":" + role,

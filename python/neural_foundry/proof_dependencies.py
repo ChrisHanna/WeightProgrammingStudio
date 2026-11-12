@@ -15,7 +15,8 @@ PACKAGE = ROOT / "python"
 ROOTS = {
     "gym": ("reference_json_extraction",),
     "model": ("gym_adapters", "model_digest", "prompt_rendering"),
-    "trainer": ("backends.automodel.adapter", "backends.automodel.config", "backends.automodel.worker.probe"),
+    "trainer": ("backends.automodel.adapter", "backends.automodel.config", "backends.automodel.worker.probe",
+                "backends.automodel.worker.guarded_train"),
     "training_audit": ("backends.automodel.adapter", "proof_pipeline"),
     "provider": ("openai_provider", "openai_transport", "public_budget", "proof_policy"),
     "exporter": ("gym_artifacts", "model_digest", "vllm_candidate_files"),

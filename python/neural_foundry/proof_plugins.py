@@ -34,15 +34,19 @@ def invoice_task(configuration: Mapping[str, Any]) -> Any:
     return replace(task, job=replace(task.job, candidate_methods=methods), bind=bind)
 
 
-def training_model(*, base_model: Mapping[str, Any], policy: Mapping[str, Any], seed: int) -> Any:
+def training_model(*, base_model: Mapping[str, Any], policy: Mapping[str, Any], seed: int,
+                   device: str = "cuda:0") -> Any:
     from .gym_adapters import transformers_model
 
-    return transformers_model(**base_model, device="cuda:0", precision="bfloat16",
+    return transformers_model(**base_model, device=device, precision="bfloat16",
                               context_tokens=policy["context_tokens"],
                               max_new_tokens=policy["max_new_tokens"], seed=seed)
 
 
-def automodel_trainer(*, automodel_python: str, reload_python: str) -> Any:
+def automodel_trainer(*, automodel_python: str, reload_python: str,
+                      timeout_seconds: float = 1800,
+                      maximum_cuda_allocated_bytes: int | None = None,
+                      training_device: str | None = None) -> Any:
     from .backends.automodel.adapter import automodel_sft_trainer
     from .backends.automodel.config import AutoModelBackendConfig
 
@@ -50,7 +54,8 @@ def automodel_trainer(*, automodel_python: str, reload_python: str) -> Any:
         if not interpreter or not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise GymJobError("approved runtime interpreter is missing")
     return automodel_sft_trainer(AutoModelBackendConfig(
-        automodel_python, timeout_seconds=1800, reload_python_executable=reload_python))
+        automodel_python, timeout_seconds=timeout_seconds, reload_python_executable=reload_python,
+        maximum_cuda_allocated_bytes=maximum_cuda_allocated_bytes, training_device=training_device))
 
 
 def automodel_coverage(*, artifact: Path, roster: list[str], steps: int) -> dict[str, Any]:

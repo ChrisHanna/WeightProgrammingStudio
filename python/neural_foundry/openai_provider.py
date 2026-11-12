@@ -9,7 +9,7 @@ from typing import Any, Protocol, Self
 from .gym_job import GymJobError
 from .gym_lifecycle import TaskAdapter
 from .gym_service import ExecutionResponse, _document_digest
-from .openai_transport import completion, validate_endpoint
+from .openai_transport import completion, response_digest, validate_endpoint
 from .proof_policy import require_bound_policy
 from .public_budget import PublicBudget, unsigned_spec
 
@@ -98,7 +98,8 @@ class OpenAIProvider:
                                 "budget_binding_digest": reservation["binding_digest"],
                                 "reservation_digest": reservation["reservation_digest"],
                                 "api_attempts": reservation["attempt"],
-                                "reserved_cost_microusd": reservation["run_reserved_cost_microusd"]})
+                                "reserved_cost_microusd": reservation["run_reserved_cost_microusd"]},
+                            retain_invalid_completion=self.policy["version"] == 2)
         self._response_receipts.append(dict(result.interaction["api_response_receipt"]))
         return result
 
@@ -111,8 +112,20 @@ class OpenAIProvider:
             or receipt.get("configuration_digest") != self.configuration["configuration_digest"]
             or receipt.get("scorer_digest") != self.context["scorer"]["implementation_digest"]
             or receipt.get("interaction_digest") != _document_digest(interaction)
-            or receipt.get("response_digest") != _document_digest(result.response)):
+            or receipt.get("response_digest") != response_digest(result.response)):
             raise GymJobError("provider response lacks exact Gym-bound receipt evidence")
+        if self.policy["version"] == 2:
+            transport = result.interaction.get("raw_transport")
+            try:
+                choice = transport["choices"][0]
+                if (receipt["wire_response_digest"] != _document_digest(transport)
+                    or result.interaction["raw_text"] != choice["message"]["content"]
+                    or result.interaction["finish_reason"] != choice["finish_reason"]
+                    or result.interaction["hit_generation_cap"] is not (choice["finish_reason"] == "length")
+                    or receipt["usage"] != transport["usage"]):
+                    raise GymJobError("provider raw transport differs from its receipt")
+            except (KeyError, TypeError, IndexError) as error:
+                raise GymJobError("provider raw transport is missing or malformed") from error
 
     def loaded_identity(self) -> Mapping[str, Any]:
         self.require_configuration()

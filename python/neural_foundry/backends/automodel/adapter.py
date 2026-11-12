@@ -55,6 +55,7 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
     python = Path(config.python_executable)
     executable = python.parent / "automodel"
     probe = Path(__file__).parent / "worker" / "probe.py"
+    memory_guard = Path(__file__).parent / "worker" / "guarded_train.py"
     if not python.is_file() or not executable.is_file():
         raise GymJobError("AutoModel Python interpreter or CLI is missing")
     if os.name == "nt":
@@ -70,6 +71,7 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
     implementation = _document_digest({
         "adapter": sha256_file(__file__), "config": sha256_file(config_module.__file__),
         "probe": sha256_file(probe), "model_helpers": sha256_file(gym_adapters.__file__),
+        "memory_guard": sha256_file(memory_guard),
         "state_digest": sha256_file(model_digest.__file__), "runner": sha256_file(execution_runner.__file__),
         "runtime_config": config.document(),
     })
@@ -156,7 +158,7 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
     def train(request: Mapping[str, Any], examples: Sequence[Mapping[str, Any]], base: CandidateRef, directory: Path) -> CandidateRef:
         recipe = AutoModelSFTRecipe.from_document(request["recipe"])
         settings = request["inference_config"]
-        if (settings.get("device") not in {"cuda", "cuda:0"}
+        if ((config.training_device or settings.get("device")) not in {"cuda", "cuda:0"}
             or settings.get("precision") not in {"float32", "float16", "bfloat16"}
             or recipe.max_sequence_tokens > settings.get("context_tokens", 0)):
             raise GymJobError("AutoModel requires a supported local CUDA device, precision, and context budget")
@@ -207,6 +209,17 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
                                         "target_modules": [pattern for target in recipe.target_modules
                                                            for pattern in (target, f"*.{target}")], "dim": recipe.rank,
                                         "alpha": recipe.rank * 2, "use_triton": False}
+            memory_path = work / "gpu-memory.json"
+            worker_environment = dict(environment)
+            command = [str(executable), str(work / "recipe.yaml"), "--nproc-per-node", "1"]
+            if config.maximum_cuda_allocated_bytes is not None:
+                train_config["model"]["use_cache"] = False
+                worker_environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+                worker_environment["NF_MAX_CUDA_ALLOCATED_BYTES"] = str(config.maximum_cuda_allocated_bytes)
+                worker_environment["NF_CUDA_MEMORY_RECEIPT"] = str(memory_path)
+                command = [str(python), "-m", "torch.distributed.run", "--standalone",
+                           "--nproc_per_node", "1", "--module",
+                           "neural_foundry.backends.automodel.worker.guarded_train", str(work / "recipe.yaml")]
             if recipe.method == "qlora":
                 train_config["quantization"] = {"load_in_4bit": True, "load_in_8bit": False,
                                                 "bnb_4bit_compute_dtype": "bfloat16", "bnb_4bit_use_double_quant": True,
@@ -214,15 +227,33 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
             config_path = work / "recipe.yaml"
             config_path.write_bytes(_wire_document(train_config))
             config_digest = sha256_file(config_path)
-            execution = run_local_worker([str(executable), str(config_path), "--nproc-per-node", "1"], cwd=work,
-                                         timeout_seconds=config.timeout_seconds, env=environment, cleanup_descendants=True)
+            execution = run_local_worker(command, cwd=work,
+                                         timeout_seconds=config.timeout_seconds, env=worker_environment,
+                                         cleanup_descendants=True)
             if execution.timed_out or execution.returncode != 0:
                 failure_dir = Path(tempfile.mkdtemp(prefix=".nf-automodel-failure-", dir=directory.parent))
                 (failure_dir / "stdout.log").write_bytes(execution.stdout)
                 (failure_dir / "stderr.log").write_bytes(execution.stderr)
+                shutil.copyfile(config_path, failure_dir / "automodel_config.json")
+                if memory_path.is_file():
+                    shutil.copyfile(memory_path, failure_dir / "gpu-memory.json")
+                (failure_dir / "failure.json").write_bytes(_wire_document({
+                    "execution": execution.receipt,
+                    "memory_limit_bytes": config.maximum_cuda_allocated_bytes,
+                    "worker_config_digest": config_digest,
+                    "dataset_digest": dataset_digest}))
                 raise GymJobError(f"AutoModel training failed; private logs: {failure_dir}")
             if sha256_file(dataset) != dataset_digest or sha256_file(config_path) != config_digest:
                 raise GymJobError("AutoModel dataset or configuration changed during training")
+            memory_evidence = None
+            if config.maximum_cuda_allocated_bytes is not None:
+                if not memory_path.is_file():
+                    raise GymJobError("AutoModel training did not persist its CUDA allocation evidence")
+                memory_evidence = json.loads(memory_path.read_bytes())
+                if (memory_evidence.get("limit_bytes") != config.maximum_cuda_allocated_bytes
+                    or type(memory_evidence.get("peak_allocated_bytes")) is not int
+                    or not 0 < memory_evidence["peak_allocated_bytes"] <= config.maximum_cuda_allocated_bytes):
+                    raise GymJobError("AutoModel peak CUDA allocation exceeds the approved limit")
             gym_adapters._resolve_training_checkpoint(request, base)
             try:
                 training_rows = [json.loads(line) for line in (checkpoint_dir / "training.jsonl").read_bytes().splitlines() if line]
@@ -231,6 +262,16 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
             if ([row.get("step") for row in training_rows] != list(range(recipe.steps))
                 or any(not is_finite_number(row.get("loss")) for row in training_rows)):
                 raise GymJobError("AutoModel training log does not contain the exact finite step roster")
+            if memory_evidence is not None:
+                if any(not is_finite_number(row.get("mem")) or row["mem"] <= 0 for row in training_rows):
+                    raise GymJobError("AutoModel step log lacks finite peak allocated-memory evidence")
+                memory_evidence["peak_allocated_bytes"] = max(
+                    memory_evidence["peak_allocated_bytes"],
+                    max(int(row["mem"] * 1024**3) for row in training_rows))
+                memory_evidence["measurement"] = "maximum of per-step allocated peaks and worker-exit peak"
+                if memory_evidence["peak_allocated_bytes"] > config.maximum_cuda_allocated_bytes:
+                    raise GymJobError("AutoModel recorded training peak exceeds its approved allocation limit")
+                memory_path.write_bytes(_wire_document(memory_evidence))
             if recipe.method in {"lora", "qlora"}:
                 outputs = [path for path in checkpoint_dir.glob("epoch_*_step_*/model")
                            if (path / "adapter_model.safetensors").is_file()
@@ -261,6 +302,8 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
             if model_info.get("family") != base.family or not isinstance(model_info.get("state_digest"), str):
                 raise GymJobError("AutoModel checkpoint has an unexpected model family or state")
             shutil.copyfile(config_path, directory / "automodel_config.json")
+            if memory_evidence is not None:
+                shutil.copyfile(memory_path, directory / "gpu-memory.json")
             receipt = {
                 "kind": "nf_automodel_sft_receipt_v1", "training_request_digest": request["training_request_digest"],
                 "dataset_digest": request["dataset_digest"], "projected_examples_digest": request["projected_examples_digest"],
@@ -270,6 +313,7 @@ def automodel_sft_trainer(config: AutoModelBackendConfig) -> TrainerAdapter:
                 "reload_runtime": reload_info,
                 "committed_steps": list(range(recipe.steps)), "losses": [row["loss"] for row in training_rows],
                 "model_digest": model_info["state_digest"], "token_count": token_report["total_tokens"],
+                "memory_evidence": memory_evidence,
             }
             (directory / "training_receipt.json").write_bytes(_wire_document(receipt))
         return load(request, base, directory)

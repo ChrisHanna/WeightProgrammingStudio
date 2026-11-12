@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from neural_foundry.backends.automodel.config import AutoModelBackendConfig, AutoModelSFTRecipe
@@ -38,6 +40,49 @@ def test_automodel_checkpoint_selection_uses_final_committed_step(tmp_path: Path
     assert not _is_final_checkpoint_output(intermediate, method="lora", final_step=383)
     assert _is_final_checkpoint_output(final, method="lora", final_step=383)
     assert _is_final_checkpoint_output(consolidated_final, method="sft", final_step=383)
+
+
+def test_guarded_external_training_bounds_allocator_before_official_cli(tmp_path, monkeypatch) -> None:
+    from neural_foundry.backends.automodel.worker import guarded_train
+
+    calls = []
+    callbacks = []
+    limit = 28 * 1024**3
+    receipt = tmp_path / "memory.json"
+    cuda = SimpleNamespace(
+        current_device=lambda: 0,
+        get_device_properties=lambda _: SimpleNamespace(total_memory=32 * 1024**3),
+        set_per_process_memory_fraction=lambda fraction, device: calls.append(("limit", fraction, device)),
+        reset_peak_memory_stats=lambda _: calls.append(("reset",)),
+        max_memory_allocated=lambda _: 20 * 1024**3,
+        max_memory_reserved=lambda _: 24 * 1024**3)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=cuda))
+    monkeypatch.setitem(sys.modules, "nemo_automodel.cli.app",
+                        SimpleNamespace(main=lambda: calls.append(("official_cli",))))
+    monkeypatch.setattr(guarded_train.atexit, "register", callbacks.append)
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("NF_MAX_CUDA_ALLOCATED_BYTES", str(limit))
+    monkeypatch.setenv("NF_CUDA_MEMORY_RECEIPT", str(receipt))
+    guarded_train.main()
+    assert calls == [("limit", 0.875, 0), ("reset",), ("official_cli",)]
+    callbacks[0]()
+    evidence = json.loads(receipt.read_bytes())
+    assert evidence["limit_bytes"] == limit
+    assert evidence["peak_allocated_bytes"] == 20 * 1024**3
+    monkeypatch.setenv("NF_MAX_CUDA_ALLOCATED_BYTES", str(33 * 1024**3))
+    with pytest.raises(ValueError, match="capacity"):
+        guarded_train.main()
+
+
+def test_external_training_limits_and_cpu_staging_are_explicit_backend_data(tmp_path):
+    config = AutoModelBackendConfig(str(tmp_path / "python"), timeout_seconds=10800,
+                                   training_device="cuda:0", maximum_cuda_allocated_bytes=28 * 1024**3)
+    assert config.document()["training_device"] == "cuda:0"
+    assert config.document()["maximum_cuda_allocated_bytes"] == 28 * 1024**3
+    for changed in ({"maximum_cuda_allocated_bytes": 0}, {"maximum_cuda_allocated_bytes": True},
+                    {"training_device": "cpu"}):
+        with pytest.raises(GymJobError):
+            AutoModelBackendConfig(str(tmp_path / "python"), **changed)
 
 
 @pytest.mark.parametrize("method", ["sft", "lora", "qlora"])

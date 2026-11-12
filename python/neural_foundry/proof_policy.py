@@ -27,13 +27,23 @@ def load_policy(reference: Mapping[str, Any]) -> dict[str, Any]:
         if not path.is_absolute() or sha256_file(path) != reference["file_digest"]:
             raise GymJobError("public policy file digest differs")
         document = parse_strict_json(path.read_bytes())
-        if (document.get("kind") != "nf_public_proof_policy" or document.get("version") != 1
+        version = document.get("version")
+        if (document.get("kind") != "nf_public_proof_policy" or type(version) is not int
+            or version not in (1, 2)
             or type(reference.get("calls_authorized")) is not bool):
             raise GymJobError("unsupported public policy reference")
         policy = deepcopy(document["policy"])
         api = policy["api"]
-        if (policy["version"] != 1 or policy["max_new_tokens"] != 128
-            or policy["context_tokens"] != 512 or policy["temperature"] != 0
+        if (policy["version"] != version
+            or (version == 1 and (policy["max_new_tokens"] != 128 or policy["context_tokens"] != 512))
+            or (version == 2 and (
+                type(policy["max_new_tokens"]) is not int or type(policy["context_tokens"]) is not int
+                or not 1 <= policy["max_new_tokens"] < policy["context_tokens"] <= 1048576
+                or policy.get("report_only") is not True or policy.get("adaptive_retraining") is not False
+                or api.get("automatic_retries") != 0 or type(api.get("automatic_retries")) is not int
+                or api.get("model_fallback") is not False or api.get("cache_discount_assumed") is not False
+                or api.get("invalid_response_rule") != "retain_raw_and_score_invalid_v1"))
+            or policy["temperature"] != 0
             or policy["reasoning_effort"] != "none"
             or policy["identity"] != {"version": 1, "probe_count": 16, "logprob_atol": 1e-6,
                                       "shutdown_logprobs": "informational_only"}
@@ -50,7 +60,7 @@ def load_policy(reference: Mapping[str, Any]) -> dict[str, Any]:
                 raise GymJobError("invalid public provider price bounds")
         api["calls_authorized"] = reference["calls_authorized"]
         return policy
-    except (OSError, KeyError, TypeError, ValueError) as error:
+    except (OSError, KeyError, TypeError, ValueError, AttributeError) as error:
         raise GymJobError("public policy is missing or malformed") from error
 
 

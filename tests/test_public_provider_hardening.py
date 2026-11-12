@@ -372,3 +372,107 @@ def test_dependency_reference_mutation_cannot_mutate_registry_expectations() -> 
     reference["dependencies"].pop("python/neural_foundry/records.py")
     with pytest.raises(GymJobError, match="dependencies changed"):
         registry.resolve("provider", reference)
+
+
+def version_two_spec(root: Path):
+    spec, registry = fixture_spec(root)
+    path = Path(__file__).resolve().parents[1] / "protocols" / "cord-frontier-policy-v1.json"
+    spec["policy_reference"] = {"path": str(path), "file_digest": sha256_file(path),
+                                "calls_authorized": True}
+    spec["policy"] = load_policy(spec["policy_reference"])
+    return spec, registry
+
+
+@pytest.mark.parametrize("completion_kind", ["stop", "length", "malformed"])
+def test_version_two_retains_raw_response_usage_and_scores_invalid_caps(
+        tmp_path, monkeypatch, completion_kind) -> None:
+    from neural_foundry.proof_pipeline import score_public_rows
+
+    spec, _ = version_two_spec(tmp_path)
+    initialize_public_budget(spec)
+    interaction = project(spec["gym"]["rows"][0]["input"], None)
+    raw_text = ('{"value":' if completion_kind == "malformed"
+                else json.dumps({"value": "2042", "source": "synthetic-catalog:orchid"}))
+    wire = {"id": "offline-response", "created": 1700000000, "model": "gpt-6-luna",
+            "usage": {"prompt_tokens": 777, "completion_tokens": 2560 if completion_kind == "length" else 23,
+                      "total_tokens": 3337 if completion_kind == "length" else 800,
+                      "completion_tokens_details": {"reasoning_tokens": 0}},
+            "choices": [{"finish_reason": "length" if completion_kind == "length" else "stop",
+                         "message": {"content": raw_text}}]}
+    calls = []
+
+    class Opener:
+        def open(self, request, timeout):
+            payload = json.loads(request.data)
+            assert payload["max_completion_tokens"] == 2560
+            assert payload["reasoning_effort"] == "none" and payload["temperature"] == 0
+            assert payload["response_format"]["json_schema"]["strict"] is True
+            calls.append(payload)
+            return FakeResponse(wire)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: Opener())
+    model = fixture_client(spec)
+    result = score_public_rows(company_task(spec["gym"]), model, [spec["gym"]["rows"][0]])
+    record = result["responses"][0]
+    evidence = record["execution_evidence"]
+    model.verify_response_receipt(interaction, ExecutionResponse(record["response"], evidence))
+    changed = deepcopy(evidence)
+    changed["raw_transport"]["choices"][0]["message"]["content"] = "altered raw model text"
+    with pytest.raises(GymJobError, match="raw transport"):
+        model.verify_response_receipt(interaction, ExecutionResponse(record["response"], changed))
+    assert evidence["raw_text"] == raw_text and evidence["raw_transport"] == wire
+    assert evidence["api_response_receipt"]["usage"] == wire["usage"]
+    assert evidence["api_response_receipt"]["reported_model"] == "gpt-6-luna"
+    assert record["format_valid"] is (completion_kind == "stop")
+    if completion_kind != "stop":
+        assert all(value == 0 for value in record["metrics"].values())
+    if completion_kind == "malformed":
+        assert record["response"] == raw_text
+    assert len(calls) == 1 and PublicBudget(spec).snapshot()["attempts"] == 1
+    payload = calls[0]
+    expected = ((len(json.dumps(payload, allow_nan=False).encode()) + 1024) * 100000 + 999999) // 1000000 + 1280
+    assert PublicBudget(spec).snapshot()["reserved_cost_microusd"] == expected
+
+
+@pytest.mark.parametrize("change", ["version", "bool-cap", "context", "retries", "fallback", "discount", "raw"])
+def test_version_two_policy_rejects_unbound_or_unsafe_changes(tmp_path, change) -> None:
+    path = Path(__file__).resolve().parents[1] / "protocols" / "cord-frontier-policy-v1.json"
+    document = json.loads(path.read_bytes())
+    policy = document["policy"]
+    if change == "version":
+        document["version"] = 1
+    elif change == "bool-cap":
+        policy["max_new_tokens"] = True
+    elif change == "context":
+        policy["max_new_tokens"] = policy["context_tokens"]
+    elif change == "retries":
+        policy["api"]["automatic_retries"] = 1
+    elif change == "fallback":
+        policy["api"]["model_fallback"] = True
+    elif change == "discount":
+        policy["api"]["cache_discount_assumed"] = True
+    else:
+        policy["api"].pop("invalid_response_rule")
+    target = tmp_path / "policy.json"
+    target.write_text(json.dumps(document))
+    with pytest.raises(GymJobError):
+        load_policy({"path": str(target), "file_digest": sha256_file(target), "calls_authorized": True})
+
+
+def test_version_two_missing_usage_stops_without_retry_and_spends_reservation(tmp_path, monkeypatch) -> None:
+    spec, _ = version_two_spec(tmp_path)
+    initialize_public_budget(spec)
+    calls = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request)
+            return FakeResponse({"id": "offline-response", "created": 1700000000, "model": "gpt-6-luna",
+                                 "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]})
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: Opener())
+    with pytest.raises(GymJobError, match="incomplete"):
+        fixture_client(spec).infer(project(spec["gym"]["rows"][0]["input"], None))
+    state = PublicBudget(spec).snapshot()
+    assert len(calls) == state["attempts"] == 1
+    assert state["reserved_cost_microusd"] > 0

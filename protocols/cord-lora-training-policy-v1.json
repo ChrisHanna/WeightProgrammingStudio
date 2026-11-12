@@ -1,0 +1,32 @@
+{
+  "kind": "nf_public_training_policy",
+  "version": 1,
+  "maximum_rows": 800,
+  "maximum_steps": 800,
+  "worker_timeout_seconds": 10800,
+  "maximum_cuda_allocated_bytes": 30064771072,
+  "base_staging_device": "cpu",
+  "training_device": "cuda:0",
+  "recipe": {
+    "method": "lora",
+    "seed": 17,
+    "max_sequence_tokens": 2048,
+    "tokens_per_batch": 2048,
+    "max_dataset_tokens": 338546,
+    "rank": 8,
+    "target_modules": ["q_proj", "v_proj"],
+    "learning_rate": 0.00005
+  },
+  "coverage": "one ordered pass of every retained row, no packing or shuffling",
+  "exclude_training_text_matching_clean_validation": "collapse whitespace only",
+  "success": {
+    "clean_field_micro_f1_minimum_gain": 0.05,
+    "attacked_field_micro_f1_minimum_gain": 0.0,
+    "link_valid_fraction_minimum_gain_both_panels": 0.0
+  },
+  "automatic_retries_authorized": false,
+  "adaptive_recipe_changes_authorized": false,
+  "test_access_authorized": false,
+  "synthetic_scoring_authorized": false,
+  "internal_evaluation_only": true
+}

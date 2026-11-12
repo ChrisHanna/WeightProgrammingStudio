@@ -26,6 +26,8 @@ class AutoModelBackendConfig:
     python_executable: str
     timeout_seconds: float = 1800.0
     reload_python_executable: str | None = None
+    maximum_cuda_allocated_bytes: int | None = None
+    training_device: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.python_executable, str) or not self.python_executable or not Path(self.python_executable).is_absolute():
@@ -36,13 +38,23 @@ class AutoModelBackendConfig:
             not isinstance(self.reload_python_executable, str) or not Path(self.reload_python_executable).is_absolute()
         ):
             raise GymJobError("AutoModel reload Python must be an absolute interpreter path")
+        if self.maximum_cuda_allocated_bytes is not None and (
+            type(self.maximum_cuda_allocated_bytes) is not int or self.maximum_cuda_allocated_bytes <= 0):
+            raise GymJobError("AutoModel CUDA allocation limit must be positive bytes")
+        if self.training_device not in {None, "cuda", "cuda:0"}:
+            raise GymJobError("AutoModel training device must be local CUDA")
 
     def document(self) -> dict[str, Any]:
-        return {"python_executable": self.python_executable, "timeout_seconds": self.timeout_seconds,
+        document = {"python_executable": self.python_executable, "timeout_seconds": self.timeout_seconds,
             "placement": "local", "versions": dict(AUTOMODEL_VERSIONS), "python": list(AUTOMODEL_PYTHON),
             "reload_python_executable": self.reload_python_executable,
             "reload_versions": dict(PEFT_RELOAD_VERSIONS), "reload_python": list(PEFT_RELOAD_PYTHON),
             "qlora_bitsandbytes": QLORA_BITSANDBYTES_VERSION}
+        if self.maximum_cuda_allocated_bytes is not None:
+            document["maximum_cuda_allocated_bytes"] = self.maximum_cuda_allocated_bytes
+        if self.training_device is not None:
+            document["training_device"] = self.training_device
+        return document
 
     @property
     def digest(self) -> str:
