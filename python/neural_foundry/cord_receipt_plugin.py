@@ -306,6 +306,9 @@ def compose(configuration: Mapping[str, Any]) -> tuple[dict, Any]:
     metric_policy = evaluation_policy()
     scorer_version = configuration.get("scorer_version", metric_policy["scorer"]["active_version"])
     _scorer(scorer_version)
+    methods = [candidate.get("method", "unchanged_base") for candidate in configuration["candidates"]]
+    if configuration.get("training_rows"):
+        methods.insert(0, "unchanged_base")
     spec = {
         "kind": "nf_public_proof_run", "version": 1, "run_id": configuration["run_id"],
         "base_model": configuration["base_model"],
@@ -313,8 +316,7 @@ def compose(configuration: Mapping[str, Any]) -> tuple[dict, Any]:
             "gym", "model", "trainer", "training_audit", "exporter", "augmenter", "public_audit")},
         "gym": {"rows": [r for p in prepared["public_sets"] for r in p["rows"]],
                 "scorer_version": scorer_version,
-                "methods": list(dict.fromkeys(candidate.get("method", "unchanged_base")
-                                              for candidate in configuration["candidates"]))},
+                "methods": list(dict.fromkeys(methods))},
         "training_rows": configuration.get("training_rows", []),
         "training_rows_digest": _document_digest({"rows": configuration.get("training_rows", [])}),
         "candidates": [{**candidate, "method": candidate.get("method", "unchanged_base"),

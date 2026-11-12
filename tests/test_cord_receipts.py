@@ -223,6 +223,32 @@ def test_training_audit_rejects_normalized_validation_overlap_and_methods_are_da
     assert [method.method_id for method in task.job.candidate_methods] == ["unchanged_base", "lora", "provider"]
 
 
+def test_training_composition_declares_base_teacher_without_adding_a_scored_base_role():
+    from pathlib import Path
+
+    from neural_foundry.json_public_run import public_policy
+    from neural_foundry.provenance import sha256_file
+
+    reference = target(annotation())
+    train = {"scenario_id": "train:one", "input": {"document": "native train"},
+             "reference": reference}
+    row = {**train, "scenario_id": "validation:one"}
+    policy_path = Path(__file__).resolve().parents[1] / "protocols" / "cord-lora-training-policy-v1.json"
+    approved = json.loads(policy_path.read_bytes())
+    spec, registry = compose({
+        "kind": "nf_cord_receipt_config_v1", "run_id": "base-teacher-contract",
+        "base_model": {"model_id": "software-only/no-load", "revision": "pinned"},
+        "training_rows": [train],
+        "training_policy_reference": {"path": str(policy_path), "file_digest": sha256_file(policy_path)},
+        "candidates": [{"role": "only-lora", "method": "lora", "recipe": {**approved["recipe"], "steps": 1}}],
+        "prepared": {"public_sets": [{"name": "contract", "rows": [row],
+                                     "rows_digest": _document_digest({"rows": [row]})}],
+                     "policy": public_policy(), "document_digest": "fixture", "limitations": []}})
+    task = registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"])
+    assert [method.method_id for method in task.job.candidate_methods] == ["unchanged_base", "lora"]
+    assert [candidate["role"] for candidate in spec["candidates"]] == ["only-lora"]
+
+
 def test_composition_uses_generic_registry_and_new_budgets_without_training():
     row = {"scenario_id": "validation:cord:0", "input": {"document": "Nasi"},
            "reference": target(annotation())}

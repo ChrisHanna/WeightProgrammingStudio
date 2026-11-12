@@ -292,6 +292,22 @@ whole-response link validity on either panel. Exact match and resource use
 remain separate reporting metrics. No test or synthetic-candidate evaluation
 is authorized.
 
+The first initialization stopped before invoking the trainer: a train-only
+candidate lineup omitted the unchanged-base teacher method required by the
+practice-plan contract. Training compositions now declare that internal base
+method without adding a scored base role. A regression test and full799-row
+CPU lifecycle preflight reached a non-executing trainer sentinel. The original
+failure is preserved; the user explicitly approved one fresh, same-recipe
+startup in a separate recovery root.
+
+The actual persisted worker dataset is verified independently of the direct
+preprojection audit. Service persistence canonicalizes response key order:
+this changes tokenization, not JSON target semantics. Its exact reconstructed
+JSONL SHA-256 matches the worker receipt; all799 decoded supervised targets
+match the original references. Actual shifted input total is337,761, maximum
+1,685, within the unchanged338,546/2,048 ceilings. The earlier337,499 count
+describes the direct preprojection audit, not the final worker bytes.
+
 ### Historical acquisition and preparation
 
 From repository root in WSL (PowerShell can invoke these with `wsl.exe --exec bash -lc`):
