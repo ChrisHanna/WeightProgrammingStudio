@@ -28,6 +28,42 @@ from neural_foundry.gym_service import (
 )
 
 
+def test_nullable_fields_keep_required_structure_and_nonnull_constraints() -> None:
+    schema = {"type": "object", "properties": {
+        "text": {"type": ["string", "null"], "minLength": 2},
+        "parent": {"type": ["integer", "null"], "minimum": 0},
+    }, "required": ["text", "parent"], "additionalProperties": False}
+    for value in ({"text": None, "parent": None}, {"text": "line", "parent": 0}):
+        validate_task_instance(schema, value)
+    for value in ({"text": "x", "parent": None}, {"text": None, "parent": -1},
+                  {"text": None, "parent": True}, {"text": None}, {"text": [], "parent": 0}):
+        with pytest.raises(GymJobError):
+            validate_task_instance(schema, value)
+    validate_task_instance({"type": "null", "enum": [None]}, None)
+    with pytest.raises(GymJobError, match="null"):
+        validate_task_instance({"type": "null"}, "")
+
+
+def test_type_unions_apply_each_types_constraints_and_enums() -> None:
+    schema = {"type": ["integer", "string"], "minimum": 0, "minLength": 2, "enum": [3, "ok"]}
+    validate_task_instance(schema, 3)
+    validate_task_instance(schema, "ok")
+    for value in (-1, 4, "x", "other", None, True):
+        with pytest.raises(GymJobError, match="declared types"):
+            validate_task_instance(schema, value)
+    nested = {"type": ["array", "null"], "minItems": 1, "items": {"type": ["string", "null"]}}
+    validate_task_instance(nested, [None, "item"])
+    validate_task_instance(nested, None)
+    with pytest.raises(GymJobError):
+        validate_task_instance(nested, [])
+
+
+@pytest.mark.parametrize("kind", [[], ["string", "string"], ["unknown"], ["null", {}], [True]])
+def test_schema_type_unions_reject_malformed_declarations(kind) -> None:
+    with pytest.raises(GymJobError, match="unique types"):
+        validate_task_instance({"type": kind}, None)
+
+
 def _identity(label: str) -> str:
     return "sha256:" + hashlib.sha256(label.encode("utf-8")).hexdigest()
 
@@ -1550,7 +1586,7 @@ def test_generated_tool_json_accepts_fence_but_retains_raw_text() -> None:
 
 
 @pytest.mark.parametrize(("schema", "value", "valid"), [
-    ({"type": ["string"]}, "x", False),
+    ({"type": ["string"]}, "x", True),
     ({"type": "boolean", "enum": [1]}, True, False),
     ({"type": "array", "items": {"type": "integer"}, "enum": [[1, 2]]}, [1, 2], True),
     ({"type": "number"}, 10 ** 400, False),

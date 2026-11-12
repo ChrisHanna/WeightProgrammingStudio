@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .gym_job import GymJobError, ScenarioSource, is_finite_number, validate_task_instance
-from .gym_lifecycle import AdapterIdentity, EvaluatorAdapter, GymLifecycle
+from .gym_lifecycle import AdapterIdentity, EvaluatorAdapter, GymLifecycle, TaskAdapter
 from .gym_service import GymStudioService, _document_digest
 from .proof_registry import ProofRegistry, builtin_registry
 
@@ -83,6 +83,9 @@ def validate_spec(spec: Mapping[str, Any], registry: ProofRegistry) -> None:
             or panel.get("rows_digest") != _document_digest({"rows": public})):
             raise GymJobError("public panels require complete frozen validation rows")
     for candidate in roles:
+        if ("system_prompt" in candidate
+            and (not isinstance(candidate["system_prompt"], str) or not candidate["system_prompt"].strip())):
+            raise GymJobError("candidate system_prompt must be nonempty text")
         if ("public_sets" in candidate and (not candidate["public_sets"]
             or not set(candidate["public_sets"]) <= {panel["name"] for panel in panels})):
             raise GymJobError("candidate public sets must select existing frozen panels")
@@ -116,6 +119,34 @@ def audit(spec: Mapping[str, Any], registry: ProofRegistry) -> dict[str, Any]:
     if result.get("public_passed") is not True:
         raise GymJobError("public contamination gate failed")
     return result
+
+
+def candidate_task(task: TaskAdapter, candidate: Mapping[str, Any]) -> TaskAdapter:
+    if "system_prompt" not in candidate:
+        return task
+    from .prompt_rendering import prompt_specification
+    from .provenance import sha256_file
+
+    system_prompt = candidate["system_prompt"]
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        raise GymJobError("candidate system_prompt must be nonempty text")
+
+    def project(input_value: Any, response: Any) -> Mapping[str, Any]:
+        interaction = prompt_specification(task.project(input_value, response), has_chat_template=True)
+        if interaction["format"] == "raw_text_v1":
+            raise GymJobError("candidate system_prompt requires a chat interaction")
+        messages = interaction["messages"]
+        if messages[0]["role"] == "system":
+            messages[0]["content"] += "\n\n" + system_prompt
+        else:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+        return interaction
+
+    digest = _document_digest({"base_projection": task.projection.document(),
+                              "system_prompt": system_prompt,
+                              "implementation_digest": sha256_file(__file__)})
+    return replace(task, project=project,
+                   projection=AdapterIdentity(task.projection.adapter_id + "-candidate-system", "1", digest))
 
 
 def training_task(task: Any, rows: list[dict[str, Any]]) -> Any:
@@ -169,7 +200,7 @@ def train(spec: Mapping[str, Any], *, role: str, root: Path, automodel_python: s
         raise GymJobError("role has no approved training recipe")
     output = root / role
     output.mkdir(parents=True, exist_ok=False)
-    task = registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"])
+    task = candidate_task(registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"]), selected)
     task = training_task(task, spec["training_rows"])
     policy = spec["policy"]
     base = registry.resolve("model", spec["plugins"]["model"])(
@@ -267,7 +298,7 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
     selected = next((row for row in spec["candidates"] if row["role"] == role), None)
     if selected is None or "execution" not in selected:
         raise GymJobError("candidate has no declared execution plugin")
-    task = registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"])
+    task = candidate_task(registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"]), selected)
     execution = selected["execution"]
     factory = registry.resolve(execution["kind"], execution["plugin"])
     evidence = registry.resolve("evidence", selected["evidence"])
@@ -351,6 +382,7 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
         return write_document(root / f"public-score-{role}.json", {
             "kind": "nf_public_proof_score_v1", "role": role, "complete": True,
             "run_spec_digest": _document_digest(spec), "scores": scores, "gates": gates,
+            "prompt_projection": task.projection.document(),
             "retry_of_failure_digest": retry_digest,
             "gates_complete": len(gates) == len(spec["gates"]),
             "gate_passed": bool(gates) and len(gates) == len(spec["gates"])

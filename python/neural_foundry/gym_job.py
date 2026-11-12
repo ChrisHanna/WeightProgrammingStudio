@@ -21,7 +21,7 @@ MAX_JOB_PARAMETERS_BYTES = 262_144
 MAX_SCHEMA_DEPTH = 12
 MAX_SCHEMA_NODES = 256
 _JSON_TYPES = (str, int, float, bool, type(None))
-_SCHEMA_TYPES = {"array", "boolean", "integer", "number", "object", "string"}
+_SCHEMA_TYPES = {"array", "boolean", "integer", "null", "number", "object", "string"}
 _SCHEMA_FIELDS = {
     "type", "enum", "properties", "required", "additionalProperties", "items",
     "minItems", "maxItems", "minLength", "maxLength", "minimum", "maximum",
@@ -110,18 +110,23 @@ def _validate_schema(schema: Any, field: str) -> None:
         if not isinstance(value, Mapping) or set(value) - _SCHEMA_FIELDS:
             raise GymJobError(f"{where} contains unsupported schema fields")
         kind = value.get("type")
-        if not isinstance(kind, str) or kind not in _SCHEMA_TYPES:
-            raise GymJobError(f"{where}.type must be one of {sorted(_SCHEMA_TYPES)}")
+        kinds = (kind,) if isinstance(kind, str) else kind
+        if (not isinstance(kinds, (list, tuple)) or not kinds
+            or any(not isinstance(item, str) or item not in _SCHEMA_TYPES for item in kinds)
+            or len(set(kinds)) != len(kinds)):
+            raise GymJobError(f"{where}.type must name unique types from {sorted(_SCHEMA_TYPES)}")
         count_bounds = {"minItems", "maxItems", "minLength", "maxLength"}
         numeric_bounds = {"minimum", "maximum"}
-        applicable_bounds = {
+        bounds_by_type = {
             "array": {"minItems", "maxItems"},
             "string": {"minLength", "maxLength"},
             "integer": numeric_bounds,
             "number": numeric_bounds,
             "object": set(),
             "boolean": set(),
-        }[kind]
+            "null": set(),
+        }
+        applicable_bounds = set().union(*(bounds_by_type[item] for item in kinds))
         for bound in (count_bounds | numeric_bounds) & set(value):
             bound_value = value[bound]
             if bound not in applicable_bounds:
@@ -136,7 +141,7 @@ def _validate_schema(schema: Any, field: str) -> None:
             if not isinstance(enum, (list, tuple)) or not enum:
                 raise GymJobError(f"{where}.enum must be a non-empty list")
             _freeze_json(enum, f"{where}.enum", depth=depth)
-        if kind == "object":
+        if "object" in kinds:
             properties, required = value.get("properties"), value.get("required", [])
             if not isinstance(properties, Mapping) or not isinstance(required, (list, tuple)):
                 raise GymJobError(f"{where} object schemas require properties and required lists")
@@ -148,7 +153,7 @@ def _validate_schema(schema: Any, field: str) -> None:
                 raise GymJobError(f"{where}.required must name declared properties")
             for name, child in properties.items():
                 visit(child, f"{where}.properties.{name}", depth + 1)
-        elif kind == "array":
+        if "array" in kinds:
             if "items" not in value:
                 raise GymJobError(f"{where} array schemas require an items schema")
             visit(value["items"], f"{where}.items", depth + 1)
@@ -165,6 +170,14 @@ def validate_task_instance(schema: Mapping[str, Any], value: Any, *, field: str 
 
     def visit(spec: Mapping[str, Any], item: Any, where: str) -> None:
         kind = spec["type"]
+        if isinstance(kind, (list, tuple)):
+            for alternative in kind:
+                try:
+                    visit({**spec, "type": alternative}, item, where)
+                    return
+                except GymJobError:
+                    continue
+            raise GymJobError(f"{where} does not match any of its declared types: {list(kind)}")
         if kind == "object":
             if not isinstance(item, Mapping):
                 raise GymJobError(f"{where} must be an object")
@@ -202,6 +215,8 @@ def validate_task_instance(schema: Mapping[str, Any], value: Any, *, field: str 
                 raise GymJobError(f"{where} is outside its numeric bounds")
         elif kind == "boolean" and type(item) is not bool:
             raise GymJobError(f"{where} must be a boolean")
+        elif kind == "null" and item is not None:
+            raise GymJobError(f"{where} must be null")
         if "enum" in spec:
             encoded = canonicalize({"value": _thaw(item)})
             if all(encoded != canonicalize({"value": _thaw(option)}) for option in spec["enum"]):
