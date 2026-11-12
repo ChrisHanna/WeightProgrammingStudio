@@ -144,9 +144,27 @@ slice**, not as a separate months-long platform.
   ambiguous started operations. The latter require attention/new approval,
   never blind resubmission. Custody's no-retry-after-start rule stays stricter.
 
-**Acceptance:** one documented CLI path executes a mixed local/provider
-software-fixture plan and produces indexed comparisons without manual step
-ordering. Unapproved work cannot dispatch. Kill/restart tests cover:
+**Acceptance:** one documented CLI entry point uses the same coordinator,
+store, approval model and stage contracts to execute all of:
+
+- local evaluation-only;
+- bounded provider-only evaluation;
+- training -> export -> identity verification -> evaluation;
+- offline rescoring/comparison of saved outputs, with zero inference calls.
+
+Exercise multiple gyms and candidate counts, including mixed local/provider
+comparisons, through configuration rather than task-specific controllers.
+Use software fixtures and existing receipts; this does not authorize new
+model runs. A CORD-specific runner with a database is **not** an acceptable
+control-plane MVP.
+
+"Vertical slice" means delivery across planning, approval, execution, evidence
+and querying layers. It does not mean a single hardcoded run shape. The
+execution primitives already support several operations; the coordinator must
+unify them rather than reduce their capabilities.
+
+Indexed comparisons require no manual step ordering. Unapproved work cannot
+dispatch. Kill/restart tests cover:
 
 1. before dispatch;
 2. after dispatch but before receipt;
