@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -243,7 +243,9 @@ def train(spec: Mapping[str, Any], *, role: str, root: Path, automodel_python: s
 
 
 def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]], *,
-                      progress: dict[str, int] | None = None) -> dict[str, Any]:
+                      progress: dict[str, int] | None = None,
+                      on_response: Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None = None,
+                      ) -> dict[str, Any]:
     """Resolve the Gym's own scorer rather than importing a task-specific scorer."""
     from .gym_service import ExecutionResponse
 
@@ -265,7 +267,8 @@ def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]], *,
         evidence = dict(output.interaction) if isinstance(output, ExecutionResponse) else {}
         try:
             validate_task_instance(task.job.task_output_schema, response, field="response")
-            valid = not evidence.get("hit_generation_cap", False)
+            valid = not (evidence.get("hit_generation_cap", False)
+                         or evidence.get("invalid_completion_json", False))
         except GymJobError:
             valid = False
         metrics = scorer(reference=row["reference"], response=response, output_valid=valid)
@@ -275,9 +278,12 @@ def score_public_rows(task: Any, model: Any, rows: list[dict[str, Any]], *,
             raise GymJobError("Gym scorer must return named metrics")
         if not valid:
             metrics = {name: 0.0 for name in metrics}
-        records.append({"scenario_id": row["scenario_id"], "response": response,
-                        "format_valid": bool(valid), "execution_evidence": evidence,
-                        "metrics": dict(metrics)})
+        record = {"scenario_id": row["scenario_id"], "response": response,
+                  "format_valid": bool(valid), "execution_evidence": evidence,
+                  "metrics": dict(metrics)}
+        if on_response is not None:
+            on_response(row, record)
+        records.append(record)
         if progress is not None:
             progress["scored_responses"] += 1
     names = records[0]["metrics"].keys()
@@ -355,7 +361,19 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
                     continue
                 rows = panel["rows"]
                 stage = "public_inference"
-                result = score_public_rows(task, model, rows, progress=progress)
+
+                def persist_response(row: Mapping[str, Any], record: Mapping[str, Any],
+                                     public_set: str = panel["name"],
+                                     set_rows_digest: str = panel["rows_digest"]) -> None:
+                    write_document(root / f"public-score-{role}{attempt}-responses"
+                                   / f"{progress['scored_responses']:06d}.json", {
+                        "kind": "nf_public_proof_response_record_v1",
+                        "run_spec_digest": _document_digest(spec), "public_set": public_set,
+                        "public_set_rows_digest": set_rows_digest,
+                        "row_digest": _document_digest(row), "response_record": dict(record)})
+
+                result = score_public_rows(task, model, rows, progress=progress,
+                                           on_response=persist_response)
                 for row, response in zip(rows, result["responses"], strict=True):
                     evidence(model=model, policy=spec["policy"], interaction=task.project(row["input"], None),
                              result=ExecutionResponse(response["response"], response["execution_evidence"]))
@@ -383,6 +401,8 @@ def score(spec: Mapping[str, Any], *, role: str, root: Path,
             "kind": "nf_public_proof_score_v1", "role": role, "complete": True,
             "run_spec_digest": _document_digest(spec), "scores": scores, "gates": gates,
             "prompt_projection": task.projection.document(),
+            "response_journal": {"path": str(root / f"public-score-{role}{attempt}-responses"),
+                                 "records": progress["scored_responses"]},
             "retry_of_failure_digest": retry_digest,
             "gates_complete": len(gates) == len(spec["gates"]),
             "gate_passed": bool(gates) and len(gates) == len(spec["gates"])

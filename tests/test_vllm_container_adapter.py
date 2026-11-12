@@ -99,7 +99,20 @@ def test_container_adapter_is_network_isolated_and_never_claims_loaded_identity(
         assert server._identity_evidence["observed_record"] == changed
         assert server._identity_evidence["expected_record"] == record
         completion["finish_reason"] = "length"
-        with pytest.raises(GymJobError, match="incomplete"):
+        capped = adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})
+        assert capped.interaction["hit_generation_cap"] is True
+        assert capped.interaction["completion_finish_reason"] == "length"
+        completion["text"] = '{"answer":'
+        capped = adapter.infer({"format": "json_extraction_v1",
+                                "messages": [{"role": "user", "content": "extract"}]})
+        assert capped.response is None and capped.interaction["raw_text"] == '{"answer":'
+        assert capped.interaction["hit_generation_cap"] is True
+        completion["finish_reason"] = "stop"
+        invalid = adapter.infer({"format": "json_extraction_v1",
+                                 "messages": [{"role": "user", "content": "extract"}]})
+        assert invalid.response is None and invalid.interaction["invalid_completion_json"] is True
+        completion["finish_reason"] = "abort"
+        with pytest.raises(GymJobError, match="finish reason"):
             adapter.infer({"format": "chat_messages_v1", "messages": [{"role": "user", "content": "extract"}]})
     create = calls[0][0]
     assert "--init" in create

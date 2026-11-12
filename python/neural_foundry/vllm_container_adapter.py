@@ -265,17 +265,31 @@ class VllmCandidateServer:
                 raise GymJobError("vLLM inference failed")
             try:
                 choices = json.loads(result.stdout)["choices"]
-                if not isinstance(choices, list) or len(choices) != 1 or choices[0].get("finish_reason") != "stop":
+                if (not isinstance(choices, list) or len(choices) != 1
+                    or not isinstance(choices[0], Mapping)
+                    or choices[0].get("finish_reason") not in {"stop", "length"}):
                     raise ValueError("completion did not finish normally")
+                finish_reason = choices[0]["finish_reason"]
                 text = choices[0]["text"]
                 if not isinstance(text, str):
-                    raise ValueError("completion has no text")
-                response = parse_strict_json(text.encode("utf-8")) if kind == "json_extraction_v1" else text
+                    raise TypeError("completion has no text")
             except (ValueError, KeyError, IndexError, TypeError) as exc:
-                raise GymJobError("vLLM returned an incomplete or invalid completion") from exc
-            return ExecutionResponse(response, {"raw_text": text, "served_model_identity_verified": self._identity_verified,
-                                                 "prompt_renderer_digest": renderer.digest,
-                                                 "rendered_prompt_digest": rendered.prompt_digest})
+                raise GymJobError("vLLM returned an invalid completion envelope or finish reason") from exc
+            evidence = {"raw_text": text, "completion_finish_reason": finish_reason,
+                        "hit_generation_cap": finish_reason == "length",
+                        "served_model_identity_verified": self._identity_verified,
+                        "prompt_renderer_digest": renderer.digest,
+                        "rendered_prompt_digest": rendered.prompt_digest}
+            if kind == "json_extraction_v1":
+                if finish_reason == "length":
+                    return ExecutionResponse(None, evidence)
+                try:
+                    response = parse_strict_json(text.encode("utf-8"))
+                except ValueError:
+                    return ExecutionResponse(None, {**evidence, "invalid_completion_json": True})
+            else:
+                response = text
+            return ExecutionResponse(response, evidence)
 
         return ModelAdapter(identity, candidate, reference.family, ("chat_messages_v1", "json_extraction_v1"), settings,
                             infer, loaded_identity, artifact_kinds=("full", "weight_edit"), artifact_kind=reference.kind, reference=reference)

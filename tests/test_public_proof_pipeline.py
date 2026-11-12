@@ -241,6 +241,86 @@ def test_scoring_refusal_writes_bounded_failure_receipt(tmp_path) -> None:
     assert "private diagnostic" not in json.dumps(result)
 
 
+def test_public_response_journal_preserves_completed_rows_after_later_failure(tmp_path) -> None:
+    spec, registry = _custom_spec()
+    panel = spec["public_sets"][0]
+    second = deepcopy(panel["rows"][0])
+    second["scenario_id"] += "-second"
+    panel["rows"].append(second)
+    panel["rows_digest"] = _document_digest({"rows": panel["rows"]})
+    dispatched = 0
+
+    class Server:
+        def __enter__(self):
+            def infer(_interaction):
+                nonlocal dispatched
+                dispatched += 1
+                if dispatched == 2:
+                    raise GymJobError("transport interrupted")
+                return ExecutionResponse(panel["rows"][0]["reference"], {"receipt": "custom"})
+
+            return SimpleNamespace(infer=infer, loaded_identity=dict)
+
+        def __exit__(self, *_args):
+            pass
+
+    spec["candidates"][0]["execution"]["plugin"] = registry.register(
+        "provider", AdapterIdentity("journal-test", "1", _document_digest({"journal": 1})),
+        lambda **_: Server())
+    with pytest.raises(GymJobError, match="transport interrupted"):
+        score(spec, role="arbitrary-candidate", root=tmp_path, registry=registry)
+    journal = list((tmp_path / "public-score-arbitrary-candidate-responses").glob("*.json"))
+    assert len(journal) == 1
+    record = read_document(journal[0])
+    assert record["row_digest"] == _document_digest(panel["rows"][0])
+    assert record["response_record"]["metrics"]["semantic_success"] == 1.0
+    failure = read_document(next(tmp_path.glob("*failure*.json")))
+    assert failure["public_inference_dispatches"] == 2
+    assert failure["scored_responses"] == 1
+
+
+@pytest.mark.parametrize("failure_flag", ["hit_generation_cap", "invalid_completion_json"])
+def test_invalid_completion_is_recorded_and_does_not_abort_the_panel(tmp_path, failure_flag) -> None:
+    spec, registry = _custom_spec()
+    task = registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"])
+    task = replace(task, job=replace(task.job, task_output_schema={
+        **task.job.task_output_schema, "type": ["object", "null"]}))
+    spec["plugins"]["gym"] = registry.register(
+        "gym", AdapterIdentity("nullable-response-test", "1", _document_digest({"nullable": 1})),
+        lambda _: task)
+    panel = spec["public_sets"][0]
+    second = deepcopy(panel["rows"][0])
+    second["scenario_id"] += "-second"
+    panel["rows"].append(second)
+    panel["rows_digest"] = _document_digest({"rows": panel["rows"]})
+    outputs = iter([
+        ExecutionResponse(None, {"receipt": "custom", "raw_text": '{"customer":',
+                                 failure_flag: True,
+                                 "completion_finish_reason": "length" if failure_flag == "hit_generation_cap" else "stop"}),
+        ExecutionResponse(second["reference"], {"receipt": "custom"}),
+    ])
+
+    class Server:
+        def __enter__(self):
+            return SimpleNamespace(infer=lambda _: next(outputs), loaded_identity=dict)
+
+        def __exit__(self, *_args):
+            pass
+
+    spec["candidates"][0]["execution"]["plugin"] = registry.register(
+        "provider", AdapterIdentity("cap-test", "1", _document_digest({"cap": 1})),
+        lambda **_: Server())
+    result = score(spec, role="arbitrary-candidate", root=tmp_path, registry=registry)
+    responses = result["scores"]["arbitrary-set"]["responses"]
+    assert result["complete"] and len(responses) == 2
+    assert responses[0]["format_valid"] is False
+    assert responses[0]["metrics"]["semantic_success"] == 0
+    assert responses[0]["execution_evidence"][failure_flag] is True
+    assert responses[1]["format_valid"] is True
+    assert result["response_journal"]["records"] == 2
+    assert len(list((tmp_path / "public-score-arbitrary-candidate-responses").glob("*.json"))) == 2
+
+
 def test_schedule_coverage_rejects_short_or_shuffled_training() -> None:
     roster = [f"train:row:{index}" for index in range(448)]
     config = {"dataloader": {"shuffle": False},

@@ -108,6 +108,26 @@ corresponding types; required fields, enum restrictions and closed object
 properties still apply. This was a core modularity gap repaired generically,
 not evidence that the first CORD composition needed no core changes.
 
+The first CORD 0.6B score exposed a second gap: the serving adapter aborted the
+whole panel on any non-`stop` completion. The failed attempt dispatched105
+requests and returned/scored104, without preserving their records. Its raw
+finish reason was not retained, so a length cap is a hypothesis, not a proven
+diagnosis of that historical response.
+
+The generic adapter now records `length` completions as explicitly invalid
+responses, retaining raw text, finish reason and generation-cap evidence;
+stopped malformed JSON is also invalid, not a successful empty object.
+Unexpected finish reasons and malformed transport envelopes remain errors.
+The runner journals each completed scored response with its row/spec digests,
+so a later error no longer discards earlier records. This does not relax the
+automatic pre-inference-only retry rule.
+
+The user explicitly approved **one repaired 0.6B rerun and the first 4B run**,
+with unchanged CORD data, system prompt and context/output budgets. The failed
+attempt remains intact; newly bound executable specs use a separate repair
+root. Neither the approval nor this repair authorizes training, additional
+quality attempts, factorial scoring, frontier calls or test access.
+
 `neural_foundry.proof_pipeline` accepts a digest-verified
 `nf_public_proof_run`, version 1. The spec explicitly binds:
 
