@@ -83,7 +83,7 @@ def public_overlap_audit(*, spec: Mapping[str, Any]) -> dict[str, Any]:
         raise GymJobError("unsupported public contamination policy")
     train = spec["training_rows"]
     injected = [row for row in train if row["scenario_id"].startswith(
-        ("train:injection-v1:", "train:authority-v1:"))]
+        ("train:injection-v1:", "train:authority-v1:", "train:factorial-authority-v1:"))]
     attack_phrases = {
         "alternate_record": "warehouse_note_replace_response",
         "quoted_vendor": "quoted_vendor_obsolete_report",
@@ -92,7 +92,7 @@ def public_overlap_audit(*, spec: Mapping[str, Any]) -> dict[str, Any]:
     }
     training_families = set()
     for row in injected:
-        if row["scenario_id"].startswith("train:authority-v1:"):
+        if row["scenario_id"].startswith(("train:authority-v1:", "train:factorial-authority-v1:")):
             training_families.add(row["authority"]["phrasing_family"])
         else:
             training_families.add(attack_phrases[row["scenario_id"].split(":")[3]])
@@ -276,6 +276,29 @@ def serving_export(*, spec: Mapping[str, Any], role: str, root: Path) -> dict[st
     from .proof_pipeline import write_document
     from .vllm_candidate_files import verify_vllm_candidate_files
 
+    candidate = next(row for row in spec["candidates"] if row["role"] == role)
+    if candidate["method"] == "unchanged_base":
+        from .provenance import resolve_checkpoint
+
+        model = spec["base_model"]
+        checkpoint = resolve_checkpoint(model["model_id"], revision=model["revision"], allow_download=False)
+        config = json.loads((checkpoint.path / "config.json").read_bytes())
+        family = config.get("model_type")
+        if not isinstance(family, str) or not family:
+            raise GymJobError("base checkpoint has no declared model family")
+        digest = _document_digest({"model_id": model["model_id"], "revision": model["revision"],
+                                   "files": checkpoint.file_digests})
+        reference = CandidateRef(model["model_id"], "full", digest, digest, digest,
+                                 str(checkpoint.path), "base-" + digest.removeprefix("sha256:")[:16],
+                                 "unchanged_base", family)
+        verify_vllm_candidate_files(reference, revision=model["revision"])
+        return write_document(root / f"export-{role}.json", {
+            "kind": "nf_serving_export_v1", "role": role, "reference": asdict(reference),
+            "revision": model["revision"], "run_spec_digest": _document_digest(spec),
+            "source_kind": "unchanged_checkpoint", "source_result_digest": None,
+            "source_reference": asdict(reference), "source_files": checkpoint.file_digests,
+            "files_verified": True, "reloaded": False, "model_loading_performed": False,
+            "holdout_accessed": False, "release_authorized": False})
     source, result = trained_reference(root, role)
     if result.get("run_spec_digest") != _document_digest(spec):
         raise GymJobError("training result belongs to a different run spec")
@@ -345,11 +368,16 @@ def vllm_server(*, spec: Mapping[str, Any], candidate: Mapping[str, Any],
     if exported["run_spec_digest"] != _document_digest(spec):
         raise GymJobError("serving export belongs to another run spec")
     reference = CandidateRef(**exported["reference"])
+    configuration = candidate["execution"].get("configuration", {})
+    if (not isinstance(configuration, Mapping)
+        or set(configuration) - {"gpu_memory_utilization"}):
+        raise GymJobError("unsupported local serving configuration")
     snapshot_root = root / "serving-snapshots"
     snapshot_root.mkdir(parents=True, exist_ok=True)
     arguments = {"revision": exported["revision"], "context_tokens": policy["context_tokens"],
                  "max_new_tokens": policy["max_new_tokens"], "timeout_seconds": 480,
-                 "snapshot_root": snapshot_root}
+                 "snapshot_root": snapshot_root,
+                 "gpu_memory_utilization": configuration.get("gpu_memory_utilization", 0.25)}
     identity_path = root / f"identity-{role}.json"
     if freeze_identity:
         server = VllmCandidateServer(reference, **arguments)

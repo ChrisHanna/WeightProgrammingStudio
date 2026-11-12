@@ -87,4 +87,8 @@ def builtin_registry() -> tuple[ProofRegistry, dict[str, dict[str, Any]]]:
         "provider", "recorded-public-responses", proof_plugins.recorded_provider, "recorded")
     references["recorded_evidence"] = register(
         "evidence", "recorded-api-receipts", proof_plugins.recorded_evidence, "recorded")
+    from .json_factorial_training import factorial_augmentation
+
+    references["factorial_augmenter"] = register(
+        "augmenter", "factorial-authority", factorial_augmentation, "factorial_augmenter")
     return registry, references

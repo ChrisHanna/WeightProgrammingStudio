@@ -21,6 +21,7 @@ ROOTS = {
     "exporter": ("gym_artifacts", "model_digest", "vllm_candidate_files"),
     "server": ("vllm_container_adapter", "vllm_candidate_files", "backends.weight_edit.serving_probes"),
     "augmenter": ("json_authority_training",),
+    "factorial_augmenter": ("json_factorial_training",),
     "public_audit": ("public_data_audit",),
     "evidence": ("json_proof_loop", "backends.weight_edit.serving_probes", "openai_provider"),
     "recorded": ("reference_json_extraction", "json_frontier_model"),
