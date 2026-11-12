@@ -22,7 +22,6 @@ jobs:
           --health-retries 12
     env:
       CARGO_BUILD_JOBS: '2'
-      KIROCREW_SCRATCH: ${{ runner.temp }}/nf-m1
       UV_LINK_MODE: copy
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -31,6 +30,8 @@ jobs:
           python-version: '3.12'
       - name: Pinned development and CPU reference tools
         run: |
+          KIROCREW_SCRATCH="$RUNNER_TEMP/nf-m1"
+          echo "KIROCREW_SCRATCH=$KIROCREW_SCRATCH" >> "$GITHUB_ENV"
           mkdir -p "$KIROCREW_SCRATCH"
           python -m pip install --upgrade pip uv
           uv venv --python "$(command -v python)" .venv
