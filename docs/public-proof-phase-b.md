@@ -128,6 +128,30 @@ attempt remains intact; newly bound executable specs use a separate repair
 root. Neither the approval nor this repair authorizes training, additional
 quality attempts, factorial scoring, frontier calls or test access.
 
+The repaired attempt subsequently exposed a CORD plugin wiring defect: its
+projection used plain chat, so the vLLM adapter neither sent the schema nor
+parsed structured JSON. The initial CPU fake provider bypassed that boundary;
+its passing tests did not qualify real guided serving. The attempt was stopped
+with193 completed response journals before the first4B export. Neither earlier
+CORD attempt is model-quality evidence.
+
+The plugin now selects `json_extraction_v1`. A new actual-task to mocked-vLLM
+request/parsing/scoring contract fails with the old projection and passes with
+the corrected one, including invalid completions and continuation. Runtime
+receipts record the actual response mode and request digest. After these tests
+passed, the user explicitly approved one correctly guided0.6B evaluation and
+the first4B evaluation under a new `guided-one` root, keeping original
+data/references/prompt/token budgets unchanged. No automatic retry is granted.
+
+The frozen CORD v1 scorer also has an important interpretation limit:
+`json_valid` includes semantic hierarchy checks, not just JSON/schema validity.
+A parent index referring to the same or a later item rejects the entire
+response, including otherwise correct fields; field/item F1 is partial only
+among hierarchy-valid responses. The generic `format_valid` flag is narrower
+and checks completion/schema validity. Reports must distinguish these counts
+and must not interpret a zero strict F1 as proof that no receipt facts were
+extracted. Frozen scores are not silently redefined after observing outcomes.
+
 `neural_foundry.proof_pipeline` accepts a digest-verified
 `nf_public_proof_run`, version 1. The spec explicitly binds:
 
