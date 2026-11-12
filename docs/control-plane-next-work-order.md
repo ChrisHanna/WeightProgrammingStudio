@@ -84,6 +84,7 @@ These are design proposals to finalize in CP-01, not already implemented APIs.
 | Local evaluation | Evaluate one or several cached candidates against frozen panels. |
 | Provider evaluation | Evaluate bounded API candidates with explicit transfer/cost approval. |
 | Training | Materialize -> train -> export -> verify -> evaluate -> compare. |
+| Weight editing | Qualify base/sites -> capture approved edit/retention inputs -> compute/apply patch -> verify/reload -> evaluate task and preservation. |
 | Mixed comparison | Local and provider candidates share a frozen evaluation definition and metric policy. |
 | Offline analysis | Import receipts, rescore with an explicit scorer version, compare without inference. |
 
@@ -153,6 +154,83 @@ Coordinator, trainer, reload and serving processes have separate resource
 requirements. Resource admission prevents incompatible co-residency and
 limits are enforced in the allocating process. The system reports estimates,
 reservations, measured usage and unknown values distinctly.
+
+## 3b. Gym families and scale: design now, qualify adapters separately
+
+The target includes **Gymnasium, 3D/simulation and workflow gyms**, not only
+one-shot document parsing. Core contracts must accommodate those families
+from the beginning. This does not authorize installing engines, starting
+simulations, training agents or claiming an unqualified adapter works.
+
+Use explicit capabilities rather than assuming every Gym is a collection of
+prompt/reference JSON rows:
+
+| Contract concern | Required extension point |
+| --- | --- |
+| Interaction | One-shot requests, stateful episodes and multi-step/tool workflows. |
+| Environment lifecycle | Session creation, reset/seed, step/action and close; termination and truncation remain distinct. |
+| Actor/policy | LLM client, local learned policy or scripted actor, with typed observation/action compatibility. |
+| Observations/actions | Text, discrete/continuous values, structured data and references to images, frames, tensors or other binary assets. |
+| Evidence | Responses, trajectories, state snapshots, tool traces and replay metadata, linked to the exact candidate/policy version. |
+| Metrics | Versioned success/reward/return/length/collision/field metrics; reward is not silently relabelled accuracy. |
+| Budgets | Episodes, environment steps, simulated/wall time, tool/API calls, GPU compute/render memory and recorded-data volume. |
+| Placement | CPU/GPU compute, graphics/headless rendering, engine/runtime dependencies, approved network/tool access and concurrency limits. |
+| Reproducibility | Environment/world/asset/engine versions, seeds, initial state and explicit replay qualification; determinism is not assumed. |
+
+Represent large trajectories/videos/snapshots through chunked artifact
+references, not giant event payloads or database rows. Keep detailed simulation
+state in the environment/worker boundary; the coordinator tracks lifecycle,
+ownership, budgets, progress and evidence references.
+
+The run plan is an operation graph. A workflow Gym's internal task/tool graph is
+separate: changing a business workflow must not change the control-plane
+scheduler. External tool side effects need explicit permissions, receipts and
+idempotency/recovery rules; replaying a trace must not repeat live side effects.
+
+Add stateful-environment and multi-step-workflow **software fixtures** to the
+first contract/coordinator acceptance matrix, alongside existing one-shot gyms.
+Real Gymnasium/3D adapters are subsequent explicitly qualified integrations.
+The existing `run_gymnasium_adapter` is a toy dynamics fixture whose receipt
+states `external_package_executed=false`; it is not live Gymnasium integration.
+
+## 3c. Weight editing: first-class product capability, unresolved method research
+
+Weight editing is a major project capability, not a feature to omit because
+the first real workload used LoRA.
+
+The current backend has an edit-method interface, capture/calculation/apply
+machinery, patch lineage, compatibility probes, reload/serving identity and
+preservation checks. Its worker recipe still accepts
+`edit_method="legacy_key_value_v1"`. This is implemented machinery, not a
+demonstrated generally successful editing method.
+
+The recorded comparable expanded profile had zero net exact-match gain on
+train and validation and failed its bf16 preservation gate. Other historical
+reports contain invalid comparison configurations and must not be used as
+successful acceptance evidence. The v3 five-fix proposal remains proposal-only
+on `wip/weight-edit-paused`; it was not implemented or run.
+
+Separate two tracks:
+
+1. **Control-plane integration now:** represent candidate transformation as a
+   method capability, not always an optimizer epoch. Accommodate fine-tuning,
+   adapter learning and weight editing using existing adapters where possible.
+   Edits need target/site/input/cache/retention references, compute budgets,
+   patch/full-model output types, transactional apply/rollback, effective
+   precision-change diagnostics and task/preservation evidence. Do not force
+   edit operations to invent training steps or require `steps == row_count`.
+   Qualify orchestration with tensor/software fixtures and existing receipts;
+   the legacy method can remain explicitly labelled research/limited.
+2. **Method research, separate approval:** the v3 foundation proposes
+   value-token-only loss, unnormalized key gradients, Gram-diagonal-scaled
+   ridge, all-token covariance/protected-key retention and activation-scaled
+   targets. Reconcile this old JSON-specific proposal with the chosen future
+   workload before approving implementation or bounded experiments.
+
+Do not treat successful SFT/LoRA as evidence that editing is solved, or make
+the entire control-plane build wait for an editing breakthrough. Platform
+support belongs in the initial architecture; algorithm effectiveness has its
+own evidence and approval gates. No weight-edit research run is authorized.
 
 ## 4. Proposed work orders
 
@@ -232,6 +310,8 @@ store, approval model and stage contracts to execute all of:
 - bounded provider-only evaluation;
 - training -> export -> identity verification -> evaluation;
 - offline rescoring/comparison of saved outputs, with zero inference calls.
+- candidate-edit/verify/preservation workflows using software/tensor fixtures;
+- stateful episode and tool/workflow fixtures, without installing live engines.
 
 Exercise multiple gyms and candidate counts, including mixed local/provider
 comparisons, through configuration rather than task-specific controllers.
@@ -385,7 +465,8 @@ Do not add another receipt-training round to any acceptance criterion.
    functions, admission, claims/leases, bounded authorization, progress and
    cancellation. CLI calls this same application service.
 4. **Recovery and workflow matrix:** failure injection, reconciliation and
-   all five run shapes across multiple gyms/candidate counts.
+   all supported run shapes, including edit and stateful/workflow fixtures,
+   across multiple gyms/candidate counts.
 
 Completion of these batches must yield a useful local control plane, not only
 schemas and a database. API/dashboard follow without introducing another
