@@ -14,6 +14,21 @@ Each capability below has one of these labels, defined in the [qualification mat
 
 ---
 
+## Private control plane
+
+The single-host control plane provides a PostgreSQL run store, durable workers,
+an authenticated API, and a thin operator dashboard. See the
+[deployment guide](docs/control-plane-deployment.md) for Docker Compose setup,
+secrets, health checks, and backup/restore, and the
+[operator guide](docs/control-plane-operator.md) for planning, approval, execution,
+events, and artifacts.
+
+The default deployment executes CPU software fixtures across multiple run shapes.
+It does not authorize live model/provider runs, prove model quality, or grant
+release approval. Budget, custody, and exposure ledgers remain separate authorities.
+
+---
+
 ## Why Weight Programming Studio?
 
 Most model-editing scripts change tensors in the same process that holds the benchmark answers. This project separates proposing an edit from executing and evaluating it. What's implemented today:

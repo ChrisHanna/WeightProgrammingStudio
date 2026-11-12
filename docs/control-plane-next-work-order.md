@@ -7,6 +7,30 @@ The product is the control plane. CORD and the synthetic/company-facts gyms
 are integration and regression workloads, not products whose accuracy must
 be optimized before the platform can progress.
 
+## Implementation checkpoint: 2026-11-12
+
+The private single-host implementation was subsequently approved separately
+and is now deployed: PostgreSQL migrations, durable run/stage/attempt state,
+events, approval-bound execution, leases, content-addressed artifacts, API/CLI,
+catalog, worker, and thin dashboard. See the
+[deployment guide](control-plane-deployment.md) and
+[operator guide](control-plane-operator.md).
+
+Acceptance passed 112 selected CPU/API/real-PostgreSQL regression tests, strict
+control-plane typing, and lint. Actual Docker checks covered ten software
+operations, authenticated catalog access, restart persistence, and backup
+restoration to separate resources. Browser checks exercised a two-candidate
+tensor-edit/stateful-gym workflow, artifacts, read-only polling, session locking,
+and desktop/mobile layouts. Execution fingerprints prevent queued approvals
+from silently authorizing changed code.
+
+This is a CPU-fixture private control-plane deployment, not live model/runtime
+qualification. Real Gymnasium/3D engines, qualified model/provider workers,
+custody/signing/release integration, and scientific weight-edit effectiveness
+remain separate work. No new model, GPU, paid-provider, or sealed-test runs were
+performed for this deployment. The assessment below records the earlier review,
+not the current absence of the newly implemented components.
+
 ## 1. Assessment of the supplied review
 
 The overall diagnosis is right: we have substantial execution/evidence

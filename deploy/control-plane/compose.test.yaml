@@ -1,0 +1,11 @@
+# Explicit opt-in for real integration tests from the WSL host.
+services:
+  postgres:
+    networks:
+      - private
+      - host-test
+    ports:
+      - "127.0.0.1:55432:5432"
+networks:
+  host-test:
+    driver: bridge

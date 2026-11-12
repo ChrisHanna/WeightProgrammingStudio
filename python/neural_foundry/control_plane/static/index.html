@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Neural Foundry · Control plane</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <aside class="rail">
+    <a class="brand" href="/">NF<span>NEURAL FOUNDRY</span></a>
+    <p class="eyebrow">PRIVATE CONTROL PLANE</p>
+    <nav aria-label="Workspace"><a href="#workspace">Run workspace</a><a href="#new-run">New workflow</a><a href="#artifacts">Artifact registry</a></nav>
+    <div class="rail-note"><span class="dot"></span> Explicit authority<br><small>Plan → approve → start.<br>Browsing never executes work.</small></div>
+  </aside>
+  <main>
+    <header><div><p class="eyebrow">OPERATOR CONSOLE / V1</p><h1>Evidence, under control.</h1><p class="muted">Durable workflows. Bounded execution. Inspectable receipts.</p></div><div class="connection"><span id="health" class="pill">Checking readiness</span><button id="logout" class="quiet" hidden>Lock console</button></div></header>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="login" class="card login">
+      <div><p class="eyebrow">OPERATOR ACCESS</p><h2>Unlock this session</h2><p class="muted">Use your private operator token. It stays in memory only, never in a URL or browser storage. Reloading locks the console.</p></div>
+      <form id="login-form"><label for="token">Operator token</label><input id="token" type="password" autocomplete="off" spellcheck="false" required><button type="submit">Unlock console</button></form>
+    </section>
+    <div id="console" hidden>
+      <section id="workspace" class="workspace">
+        <div class="card run-index"><div class="section-title"><h2>Runs</h2><button id="refresh" class="quiet">Refresh</button></div><p class="muted small">Latest 100 · durable state</p><div id="runs" class="run-list"></div></div>
+        <div class="card run-detail">
+          <div class="section-title"><div><p class="eyebrow">SELECTED WORKFLOW</p><h2 id="run-title">Choose a run</h2></div><span id="run-state" class="pill">No selection</span></div>
+          <p id="run-meta" class="muted small">Select a run or create one from the catalog below.</p>
+          <div class="actions"><button id="plan" disabled>Generate plan</button><button id="cancel" class="danger" disabled>Cancel run</button></div>
+          <h3>Stages &amp; progress</h3><div id="stages" class="stages"><p class="empty">No run selected.</p></div>
+          <details id="plan-details"><summary>Plan &amp; preflight</summary><pre id="plan-json">No plan yet.</pre></details>
+          <div class="approval-box"><div><h3>Execution authority</h3><p class="muted small">Review the complete plan, preflight and limits before approving. Approval does not start execution.</p></div>
+            <label for="limits">Approved limits · JSON object</label><textarea id="limits" rows="5" spellcheck="false">{}</textarea>
+            <p id="approval-status" class="muted small">No approval.</p><div class="actions"><button id="approve" disabled>Approve this plan</button><button id="start" class="accent" disabled>Start approved run</button></div>
+          </div>
+          <h3>Outcomes &amp; metric policy</h3><p class="muted small">Execution completion is not quality success or release authorization. Read policy-labelled evidence, not preset scores.</p><pre id="outcome">No outcome recorded.</pre>
+          <details><summary>Run document · provenance &amp; artifact references</summary><pre id="run-json">No run selected.</pre></details>
+        </div>
+      </section>
+      <section class="card timeline"><div class="section-title"><div><p class="eyebrow">APPEND-ONLY AUDIT</p><h2>Live timeline</h2></div><span id="poll-state" class="muted small">Read-only polling · every 3 s</span></div><ol id="events"><li class="empty">Select a run to inspect its ordered events.</li></ol></section>
+      <section id="new-run" class="card"><div class="section-title"><div><p class="eyebrow">CATALOG-DRIVEN</p><h2>Create a workflow</h2></div><span class="pill">No execution on create</span></div>
+        <p class="muted">Templates are supplied by registered backend plugins. Current CPU software fixtures are not real model evaluations. Imported real receipts and legacy evidence retain their own provenance and metric policies. Edit a versioned spec; the server validates it. Rescoring is a new catalog workflow, never a hidden execution path.</p>
+        <label for="templates">Workflow template</label><select id="templates"><option value="">Select a template…</option></select><p id="template-description" class="muted small"></p>
+        <details><summary>Registered plugins · capabilities, profiles &amp; validation schemas</summary><pre id="catalog-json">Unlock to load backend descriptors.</pre></details>
+        <form id="create-form"><label for="spec">Run specification · editable JSON</label><textarea id="spec" rows="16" spellcheck="false" required placeholder="Select a backend template to begin."></textarea><div class="form-footer"><span id="spec-validation" class="muted small">JSON object required. Semantic validation is server-side.</span><button type="submit">Create draft run</button></div></form>
+      </section>
+      <section id="artifacts" class="card"><p class="eyebrow">CONTENT-ADDRESSED EVIDENCE</p><h2>Artifact registry</h2><p class="muted">Import existing receipt documents only. No model downloads, GPU jobs, live providers or holdout runs are initiated here.</p><div class="artifact-grid">
+        <form id="artifact-get"><label for="artifact-id">Artifact identifier</label><input id="artifact-id" required autocomplete="off"><button type="submit" class="quiet">Inspect artifact</button></form>
+        <form id="artifact-import"><label for="artifact-document">Existing artifact · JSON document</label><textarea id="artifact-document" rows="6" required spellcheck="false"></textarea><button type="submit" class="quiet">Import document</button></form>
+      </div><pre id="artifact-output">No artifact selected.</pre></section>
+      <footer>Private operator boundary · one operator role · fixture / receipt workflows only · not a public multi-tenant service</footer>
+    </div>
+  </main>
+</body>
+</html>

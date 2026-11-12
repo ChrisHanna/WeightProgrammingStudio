@@ -1,0 +1,94 @@
+name: nf-control-plane-dev
+
+x-app: &app
+  image: nf-control-plane:local
+  build:
+    context: ../..
+    dockerfile: deploy/control-plane/Dockerfile
+  environment:
+    CP_ARTIFACT_ROOT: /var/lib/control-plane
+    CP_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+    CP_OPERATOR_TOKEN_FILE: /run/secrets/operator_token
+    CP_WORKER_ID: singlehost-worker-1
+  secrets:
+    - postgres_password
+    - operator_token
+  volumes:
+    - artifacts:/var/lib/control-plane
+  networks:
+    - private
+  init: true
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+    environment:
+      POSTGRES_DB: control_plane
+      POSTGRES_USER: control_plane
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres:/var/lib/postgresql
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control_plane -d control_plane"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    command: ["python", "-m", "neural_foundry.control_plane.worker", "--migrate-only"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  api:
+    <<: *app
+    networks:
+      - private
+      - ingress
+    command: ["python", "-m", "uvicorn", "neural_foundry.control_plane.api:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    ports:
+      - "127.0.0.1:${CP_HTTP_PORT:-8787}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "/opt/control-plane/healthcheck.py"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: ["python", "-m", "neural_foundry.control_plane.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "/opt/control-plane/healthcheck.py", "--database"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  private:
+    internal: true
+  ingress:
+    driver: bridge
+volumes:
+  postgres:
+  artifacts:
+secrets:
+  postgres_password:
+    file: ../../artifacts/control-plane-local/secrets/postgres_password
+  operator_token:
+    file: ../../artifacts/control-plane-local/secrets/operator_token

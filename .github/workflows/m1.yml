@@ -6,6 +6,20 @@ jobs:
   linux-cpu:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+        env:
+          POSTGRES_DB: control_plane_test
+          # Passwordless authentication is confined to this ephemeral CI service.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d control_plane_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       CARGO_BUILD_JOBS: '2'
       KIROCREW_SCRATCH: ${{ runner.temp }}/nf-m1
@@ -44,9 +58,12 @@ jobs:
         run: |
           cargo build -p nf-weight-ir --example parser_fuzz_smoke --locked
           (ulimit -v 524288; ulimit -t 20; ./target/debug/examples/parser_fuzz_smoke)
-      - name: CPU layer-sweep preflight and full pytest suite
+      - name: Control-plane types, CPU preflight and full pytest suite
+        env:
+          CP_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/control_plane_test
         run: |
           VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --locked
+          .venv/bin/python -m mypy --python-version 3.12 --follow-imports=silent python/neural_foundry/control_plane
           .venv/bin/python -m pytest -q tests/test_weight_edit_drift_diagnostic.py -k layer_strength_sweep_cpu_smoke
           export NF_CLI="$PWD/target/debug/nf"
           .venv/bin/python -m pytest -q --basetemp="$KIROCREW_SCRATCH/pytest"
