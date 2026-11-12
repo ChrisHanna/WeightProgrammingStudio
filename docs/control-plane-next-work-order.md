@@ -193,6 +193,14 @@ Real Gymnasium/3D adapters are subsequent explicitly qualified integrations.
 The existing `run_gymnasium_adapter` is a toy dynamics fixture whose receipt
 states `external_package_executed=false`; it is not live Gymnasium integration.
 
+The approved first implementation is now available in
+[gym_runtime.py](../python/neural_foundry/gym_runtime.py) with
+[software fixtures and contract documentation](gym-runtime-contracts.md).
+It bridges existing one-shot TaskAdapters and describes future GPU/render
+requirements while the conformance runner admits only its qualified CPU-local
+profile. Limits are cooperative, not process isolation. Durable orchestration,
+artifact backing and real-engine qualification remain separate work.
+
 ## 3c. Weight editing: first-class product capability, unresolved method research
 
 Weight editing is a major project capability, not a feature to omit because
@@ -207,8 +215,12 @@ demonstrated generally successful editing method.
 The recorded comparable expanded profile had zero net exact-match gain on
 train and validation and failed its bf16 preservation gate. Other historical
 reports contain invalid comparison configurations and must not be used as
-successful acceptance evidence. The v3 five-fix proposal remains proposal-only
-on `wip/weight-edit-paused`; it was not implemented or run.
+successful acceptance evidence. The historical proposal remains isolated on
+`wip/weight-edit-paused`. Under subsequent explicit implementation approval,
+[an experimental five-fix CPU implementation](weight-edit-experimental-v3.md)
+now exists on the active branch. It is not a successful model experiment:
+live worker execution refuses before checkpoint loading, and task gain,
+nonlinear preservation and serving qualification remain unmeasured.
 
 Separate two tracks:
 
@@ -221,11 +233,14 @@ Separate two tracks:
    edit operations to invent training steps or require `steps == row_count`.
    Qualify orchestration with tensor/software fixtures and existing receipts;
    the legacy method can remain explicitly labelled research/limited.
-2. **Method research, separate approval:** the v3 foundation proposes
+2. **Method research, separate approval:** the experimental v3 foundation implements
    value-token-only loss, unnormalized key gradients, Gram-diagonal-scaled
    ridge, all-token covariance/protected-key retention and activation-scaled
-   targets. Reconcile this old JSON-specific proposal with the chosen future
-   workload before approving implementation or bounded experiments.
+   targets, with explicit task-provided semantic spans or a deliberately
+   limited JSON helper. CPU tensor tests and independent solver oracles
+   establish software correctness only. A future live workload, numerical
+   calibration/policy, model experiment and scientific acceptance each need
+   explicit qualification and approval.
 
 Do not treat successful SFT/LoRA as evidence that editing is solved, or make
 the entire control-plane build wait for an editing breakthrough. Platform

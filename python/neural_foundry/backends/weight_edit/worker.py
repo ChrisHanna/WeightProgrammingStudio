@@ -116,6 +116,11 @@ def calculate_edit(loaded, job, examples, recipe, *, site_layer: int | None = No
             raise GymJobError("requested edit layer is not a unique discovered MLP write site")
         site = matches[0]
     selected = SiteMap((site,), checkpoint_names_verified=True)
+    from .methods.experimental import METHOD_ID
+    if recipe["edit_method"] == METHOD_ID:
+        from .experimental_worker import calculate_experimental_edit
+        delta, evidence = calculate_experimental_edit(loaded, examples, recipe, selected, site)
+        return sites, site, delta, evidence
     renderer = PromptRenderer(loaded.tokenizer)
     panel = [*recipe["preservation_interactions"], *recipe.get("protected_training_interactions", ())]
     for interaction in panel:
@@ -173,6 +178,9 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
                               retention_interactions: Sequence[Mapping[str, Any]], diagnostics_only=False) -> dict[str, tuple[Any, dict[str, Any]]]:
     """Capture each demonstration once across all selected MLP sites, then reuse it for every strength."""
     recipe = validate_recipe(recipe)
+    from .methods.experimental import METHOD_ID
+    if recipe["edit_method"] == METHOD_ID:
+        raise GymJobError("experimental method supports exactly one site; multi-site composition is unqualified")
     if not sites.checkpoint_names_verified or not sites.sites or not retention_interactions:
         raise GymJobError("multi-site calculation requires verified sites and protected interactions")
     renderer = PromptRenderer(loaded.tokenizer)
@@ -245,6 +253,9 @@ def calculate_edits_for_sites(loaded, job, examples, recipe, *, sites: SiteMap,
 
 
 def train_payload(payload: dict[str, Any], serving_factory=None) -> CandidateRef:
+    from .methods.experimental import METHOD_ID
+    if payload.get("request", {}).get("recipe", {}).get("edit_method") == METHOD_ID:
+        raise GymJobError("experimental method is CPU-prototype only; no live-job policy or model execution is authorized")
     from importlib import metadata
     if metadata.version("transformers") != "4.57.3" or metadata.version("torch").split("+")[0] != "2.9.1":
         raise GymJobError("weight-edit worker runtime differs from the pinned numerical environment")

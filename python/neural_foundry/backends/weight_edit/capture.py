@@ -35,6 +35,8 @@ def capture(
     sink: Callable[[str, torch.Tensor, torch.Tensor, torch.Tensor | None, str], None] | None = None,
     token_outcome_sink: Callable[[torch.Tensor], None] | None = None,
     token_loss_sink: Callable[[torch.Tensor], None] | None = None,
+    causal_value_objective: bool = False,
+    loss_denominator: int | None = None,
 ) -> dict[str, Activations]:
     if output_dtype not in {torch.float32, torch.float64}:
         raise WeightEditInputError("capture output dtype must be float32 or float64")
@@ -60,6 +62,8 @@ def capture(
     active: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     collected = {site.tensor_name: [[], [], []] for site in sites.sites}
     gradient_mode = loss_labels is not None
+    if causal_value_objective and (not gradient_mode or type(loss_denominator) is not int or loss_denominator < 1):
+        raise WeightEditInputError("value objective requires labels and an explicit positive global token denominator")
 
     def hook_for(site: Any):
         name = site.tensor_name
@@ -116,7 +120,16 @@ def capture(
                     labels = torch.tensor([loss_labels[index]], dtype=torch.long, device=device)
                     if labels.shape != encoded["input_ids"].shape:
                         raise WeightEditInputError("loss labels do not match rendered tokenized input")
-                    result = loaded.model(**encoded, labels=labels)
+                    result = loaded.model(**encoded) if causal_value_objective else loaded.model(**encoded, labels=labels)
+                    if causal_value_objective:
+                        expected_positions = [position - 1 for position in range(1, length) if labels[0, position] != -100]
+                        if (selected != expected_positions or labels[0, 0] != -100
+                            or len(selected) > loss_denominator
+                            or not torch.equal(labels[labels != -100], tokens[labels != -100])):
+                            raise WeightEditInputError("value objective causal labels/positions are inconsistent")
+                        value_loss = torch.nn.functional.cross_entropy(
+                            result.logits[0, :-1].double(), labels[0, 1:], ignore_index=-100,
+                            reduction="sum") / loss_denominator
                 else:
                     result = loaded.model(**encoded)
                 if set(active) != set(collected):
@@ -133,9 +146,10 @@ def capture(
                         token_losses = torch.nn.functional.cross_entropy(token_logits.float(), expected, reduction="none")
                         token_loss_sink(token_losses.detach().cpu())
                 if gradient_mode:
-                    if result.loss.ndim != 0 or not bool(torch.isfinite(result.loss)):
+                    objective = value_loss if causal_value_objective else result.loss
+                    if objective.ndim != 0 or not bool(torch.isfinite(objective)):
                         raise UnsupportedModel("capture loss is not finite")
-                    gradients = torch.autograd.grad(result.loss, [active[name][1] for name in collected])
+                    gradients = torch.autograd.grad(objective, [active[name][1] for name in collected])
                 else:
                     gradients = [None] * len(collected)
                 for name, gradient in zip(collected, gradients, strict=True):

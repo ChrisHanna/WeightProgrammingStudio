@@ -40,6 +40,10 @@ class WeightEditBackendConfig:
 def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(recipe, Mapping):
         raise GymJobError("weight-edit recipe must be a mapping")
+    from .methods.experimental import METHOD_ID
+    if recipe.get("edit_method") == METHOD_ID:
+        from .experimental_worker import validate_experimental_recipe
+        return validate_experimental_recipe(recipe)
     fields = {"method", "edit_method", "seed", "target_step", "retention_nullspace_weight", "max_sequence_tokens",
               "max_training_tokens", "max_keys", "preservation_interactions", "preservation_source", "max_preservation_logit_drift"}
     if "retention_mode" in recipe:
@@ -116,7 +120,9 @@ def weight_edit_trainer(config: WeightEditBackendConfig, job: GymJobSpec) -> Tra
         "adapter": sha256_file(__file__), "probe": probe["probe_digest"], "config": config.document(), "job": job.digest,
         "worker": sha256_file(worker) if worker.is_file() else None,
         "helpers": {name: sha256_file(Path(__file__).parent / name) for name in
-                ("apply.py", "capture.py", "demonstrations.py", "loader.py", "numerics.py", "methods/base.py", "serving_probes.py", "near_ties.py", "preservation.py")},
+                ("apply.py", "capture.py", "demonstrations.py", "loader.py", "numerics.py", "methods/base.py",
+                 "methods/experimental.py", "experimental_worker.py", "value_objective.py",
+                 "serving_probes.py", "near_ties.py", "preservation.py")},
     }))
 
     def preflight(request: Mapping[str, Any], base: CandidateRef) -> dict[str, Any]:
