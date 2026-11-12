@@ -125,6 +125,9 @@ def test_static_and_minimal_health_are_public_and_never_execute(operator):
     script = client.get("/static/app.js")
     assert script.status_code == 200
     assert "innerHTML" not in script.text
+    builder = client.get("/static/workflow_builder.mjs")
+    assert builder.status_code == 200
+    assert "javascript" in builder.headers["content-type"]
     assert client.get("/health").json() == {"status": "ok"}
     assert client.get("/ready").json() == {"ready": True}
     assert "default-src 'self'" in script.headers["content-security-policy"]

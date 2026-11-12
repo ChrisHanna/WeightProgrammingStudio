@@ -61,10 +61,18 @@ Use deployment health checks and inspect worker/stage events as well.
 
 ## Operate a workflow
 
-1. Unlock the console, select a **backend catalog template**, and edit its JSON
-   specification. The editor checks JSON structure; the service enforces versioned
-   workflow/plugin schemas, allowed operations and resource bounds.
-2. **Create draft run** persists the specification with an idempotency key. It
+1. Unlock the console and open **Create experiment**. In **Guided setup**, name
+   the experiment, select one or more available catalog workloads, and label your
+   candidates. Each candidate receives its own dependency graph for every selected
+   workload. Current candidates use the built-in CPU fixture policy; labels do not
+   load models or change its behavior. Settings are generated from plugin schemas;
+   blank values keep template/server defaults. Optional limits apply per stage.
+   The generated specification can be previewed without executing anything.
+   **Advanced JSON** retains arbitrary supported run specifications; switching back
+   to guided setup asks before abandoning advanced changes. The service remains
+   authoritative for validation. BrowserGym, FinRL and live 3D engines are explicitly
+   unavailable until their integrations are separately qualified.
+2. **Create draft experiment** persists the specification with an idempotency key. It
    does not execute work.
 3. **Generate plan**, expand **Plan & preflight**, and review stages, dependencies,
    runtime profile, model-call flags and aggregate resource limits. A rejected
@@ -81,6 +89,25 @@ Use deployment health checks and inspect worker/stage events as well.
 7. Inspect each stage's artifact, the full run document, and **Outcomes & metric
    policy**. **Cancel run** records cancellation; inspect subsequent durable
    state/events rather than assuming already-issued external work was undone.
+
+Filter experiments by name/ID and status. **Refresh** reads both the selected
+experiment and its events; it never creates, approves, starts or retries work.
+The lifecycle and next-action guidance explain draft, review, approved, running,
+failed and attention-required states. Plan summaries show aggregate resource
+ceilings, not cost or completion-time predictions. Results separate execution,
+measured quality and release permission; the metrics table preserves candidate,
+stage, metric version and unit without averaging unlike gyms.
+
+**Copy setup** copies an existing specification into the advanced editor without
+changing the original or creating a run. Unsaved edits are session-only and are
+lost on reload; explicitly created drafts remain in PostgreSQL. Controls are
+disabled while a command is pending or database readiness is unavailable.
+Network timeouts preserve create/start idempotency keys; inspect durable state
+before retrying after an uncertain response.
+
+Dependency-free builder regression tests run with
+`node --test tests/control_plane_ui.test.mjs` (Node 18+). HTTP/static-boundary tests
+run with `python -m pytest -q tests/test_control_plane_api.py`.
 
 Plans also bind the execution implementation and dependency fingerprint. If a
 deployment changes that fingerprint, a queued run stops in `needs_attention`

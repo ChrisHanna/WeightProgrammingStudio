@@ -12,7 +12,7 @@
   <aside class="rail">
     <a class="brand" href="/">NF<span>NEURAL FOUNDRY</span></a>
     <p class="eyebrow">PRIVATE CONTROL PLANE</p>
-    <nav aria-label="Workspace"><a href="#workspace">Run workspace</a><a href="#new-run">New workflow</a><a href="#artifacts">Artifact registry</a></nav>
+    <nav aria-label="Workspace"><a href="#new-run">Create experiment</a><a href="#workspace">Experiments &amp; results</a><a href="#artifacts">Evidence library</a></nav>
     <div class="rail-note"><span class="dot"></span> Explicit authority<br><small>Plan → approve → start.<br>Browsing never executes work.</small></div>
   </aside>
   <main>
@@ -23,28 +23,48 @@
       <form id="login-form"><label for="token">Operator token</label><input id="token" type="password" autocomplete="off" spellcheck="false" required><button type="submit">Unlock console</button></form>
     </section>
     <div id="console" hidden>
+      <section class="welcome card">
+        <div><p class="eyebrow">YOUR EXPERIMENT WORKSPACE</p><h2>Choose workloads. Compare candidates. Inspect the evidence.</h2><p class="muted">Start with guided setup. Creating and approving an experiment never starts it automatically.</p></div>
+        <a class="button-link" href="#new-run">Create an experiment</a>
+        <p class="scope-note">Available now: CPU software fixtures. BrowserGym, FinRL, and real 3D engines require separately qualified integrations; they cannot be launched here yet.</p>
+      </section>
       <section id="workspace" class="workspace">
-        <div class="card run-index"><div class="section-title"><h2>Runs</h2><button id="refresh" class="quiet">Refresh</button></div><p class="muted small">Latest 100 · durable state</p><div id="runs" class="run-list"></div></div>
+        <div class="card run-index"><div class="section-title"><h2>Experiments</h2><button id="refresh" class="quiet">Refresh</button></div><p class="muted small">Latest 100 · refresh is read-only</p><label for="run-search">Find an experiment</label><input id="run-search" type="search" placeholder="Name or run ID"><label for="run-filter">Status</label><select id="run-filter"><option value="">All statuses</option><option value="created">Draft</option><option value="planned">Ready for review</option><option value="approved">Approved</option><option value="queued">Queued</option><option value="running">Running</option><option value="needs_attention">Needs attention</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select><div id="runs" class="run-list"></div></div>
         <div class="card run-detail">
           <div class="section-title"><div><p class="eyebrow">SELECTED WORKFLOW</p><h2 id="run-title">Choose a run</h2></div><span id="run-state" class="pill">No selection</span></div>
           <p id="run-meta" class="muted small">Select a run or create one from the catalog below.</p>
-          <div class="actions"><button id="plan" disabled>Generate plan</button><button id="cancel" class="danger" disabled>Cancel run</button></div>
+          <ol id="lifecycle" class="lifecycle" aria-label="Experiment lifecycle"></ol>
+          <p id="next-action" class="next-action">Choose an experiment, or create one below. No work starts while browsing.</p>
+          <div class="actions"><button id="plan" disabled>Generate plan</button><button id="copy-setup" class="quiet" disabled>Copy setup</button><button id="cancel" class="danger" disabled>Cancel run</button></div>
           <h3>Stages &amp; progress</h3><div id="stages" class="stages"><p class="empty">No run selected.</p></div>
-          <details id="plan-details"><summary>Plan &amp; preflight</summary><pre id="plan-json">No plan yet.</pre></details>
+          <section id="plan-review" hidden><h3>Review before approval</h3><div id="plan-summary" class="summary-grid"></div><p class="muted small">These are approved resource ceilings, not predicted usage or guaranteed completion times. The plan also binds the execution implementation.</p></section>
+          <details id="plan-details"><summary>Advanced: full plan &amp; preflight</summary><pre id="plan-json">No plan yet.</pre></details>
           <div class="approval-box"><div><h3>Execution authority</h3><p class="muted small">Review the complete plan, preflight and limits before approving. Approval does not start execution.</p></div>
-            <label for="limits">Approved limits · JSON object</label><textarea id="limits" rows="5" spellcheck="false">{}</textarea>
+            <p class="muted small">The limits below must match the generated plan exactly. Changing them does not create a new plan.</p><details><summary>Advanced: approved limits</summary><label for="limits">Approved limits · JSON object</label><textarea id="limits" rows="5" spellcheck="false">{}</textarea></details>
             <p id="approval-status" class="muted small">No approval.</p><div class="actions"><button id="approve" disabled>Approve this plan</button><button id="start" class="accent" disabled>Start approved run</button></div>
           </div>
-          <h3>Outcomes &amp; metric policy</h3><p class="muted small">Execution completion is not quality success or release authorization. Read policy-labelled evidence, not preset scores.</p><pre id="outcome">No outcome recorded.</pre>
+          <h3>Results &amp; measurements</h3><div id="outcome-summary" class="summary-grid"></div><p class="muted small">Execution, measured quality, and release permission are separate. Fixture results are not evidence of model improvement.</p><div id="metrics" class="table-scroll"></div><details><summary>Advanced: raw outcome</summary><pre id="outcome">No outcome recorded.</pre></details>
           <details><summary>Run document · provenance &amp; artifact references</summary><pre id="run-json">No run selected.</pre></details>
         </div>
       </section>
       <section class="card timeline"><div class="section-title"><div><p class="eyebrow">APPEND-ONLY AUDIT</p><h2>Live timeline</h2></div><span id="poll-state" class="muted small">Read-only polling · every 3 s</span></div><ol id="events"><li class="empty">Select a run to inspect its ordered events.</li></ol></section>
-      <section id="new-run" class="card"><div class="section-title"><div><p class="eyebrow">CATALOG-DRIVEN</p><h2>Create a workflow</h2></div><span class="pill">No execution on create</span></div>
-        <p class="muted">Templates are supplied by registered backend plugins. Current CPU software fixtures are not real model evaluations. Imported real receipts and legacy evidence retain their own provenance and metric policies. Edit a versioned spec; the server validates it. Rescoring is a new catalog workflow, never a hidden execution path.</p>
-        <label for="templates">Workflow template</label><select id="templates"><option value="">Select a template…</option></select><p id="template-description" class="muted small"></p>
-        <details><summary>Registered plugins · capabilities, profiles &amp; validation schemas</summary><pre id="catalog-json">Unlock to load backend descriptors.</pre></details>
-        <form id="create-form"><label for="spec">Run specification · editable JSON</label><textarea id="spec" rows="16" spellcheck="false" required placeholder="Select a backend template to begin."></textarea><div class="form-footer"><span id="spec-validation" class="muted small">JSON object required. Semantic validation is server-side.</span><button type="submit">Create draft run</button></div></form>
+      <section id="new-run" class="card"><div class="section-title"><div><p class="eyebrow">GUIDED SETUP</p><h2>Create an experiment</h2></div><span class="pill">Draft only · no execution</span></div>
+        <p class="muted">Choose one or more registered workloads. Each candidate gets its own copy of every selected workflow. Current workloads use built-in CPU fixture policies, not downloaded models. Setup is unsaved until you create a draft; reloading discards unsaved edits.</p>
+        <div class="editor-switch" role="group" aria-label="Experiment editor"><label><input id="mode-guided" name="editor-mode" type="radio" checked> Guided setup</label><label><input id="mode-advanced" name="editor-mode" type="radio"> Advanced JSON</label></div>
+        <form id="create-form">
+          <fieldset id="guided-builder">
+            <legend class="sr-only">Guided experiment configuration</legend>
+            <label for="experiment-name">Experiment name</label><input id="experiment-name" required maxlength="128" placeholder="For example: editing and stateful behavior">
+            <h3>1. Choose workloads</h3><div id="templates" class="catalog-grid"></div>
+            <h3>2. Label your candidates</h3><p class="muted small">Labels distinguish pipelines in results. They do not load different models or change the built-in policy. Use Advanced JSON for other registered candidate contracts.</p><div id="candidate-list"></div><button id="add-candidate" type="button" class="quiet">Add candidate</button>
+            <h3>3. Configure workload settings</h3><p class="muted small">Settings come from the registered plugin schemas and apply to each candidate. Blank fields keep template/server defaults.</p><div id="workload-settings"><p class="empty">Select a workload to see its settings.</p></div>
+            <details><summary>Optional: resource limits per stage</summary><p class="muted small">Blank values keep template/server defaults. Final aggregate limits are shown in the server-generated plan.</p><div id="builder-limits" class="field-grid"></div></details>
+            <h3>4. Review your draft</h3><p id="draft-summary" class="next-action">Choose a workload to begin.</p><details><summary>Preview generated specification</summary><pre id="spec-preview"></pre></details>
+          </fieldset>
+          <fieldset id="advanced-editor" hidden disabled><legend class="sr-only">Advanced experiment specification</legend><p class="muted">The server validates registered operations, contracts, permissions and limits. External gyms are not enabled by editing JSON.</p><label for="spec">Run specification · editable JSON</label><textarea id="spec" rows="16" spellcheck="false" required placeholder="Enter a versioned registered run specification."></textarea></fieldset>
+          <div class="form-footer"><span id="spec-validation" role="status" class="muted small">Choose workloads and name your experiment.</span><button id="create-submit" type="submit">Create draft experiment</button></div>
+        </form>
+        <details><summary>Advanced: registered plugins &amp; schemas</summary><pre id="catalog-json">Unlock to load backend descriptors.</pre></details>
       </section>
       <section id="artifacts" class="card"><p class="eyebrow">CONTENT-ADDRESSED EVIDENCE</p><h2>Artifact registry</h2><p class="muted">Import existing receipt documents only. No model downloads, GPU jobs, live providers or holdout runs are initiated here.</p><div class="artifact-grid">
         <form id="artifact-get"><label for="artifact-id">Artifact identifier</label><input id="artifact-id" required autocomplete="off"><button type="submit" class="quiet">Inspect artifact</button></form>
