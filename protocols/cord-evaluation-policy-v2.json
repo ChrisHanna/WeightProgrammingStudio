@@ -1,0 +1,40 @@
+{
+  "kind": "nf_cord_evaluation_policy",
+  "version": 2,
+  "scorer": {
+    "component_id": "cord-fields",
+    "active_version": "2",
+    "supported_versions": ["1", "2"]
+  },
+  "headline": {
+    "metric": "field_micro_f1",
+    "aggregation": "sum field true positives, predictions and references over every case",
+    "include_invalid_case_reference_denominators": true
+  },
+  "secondary": ["structured_exact", "json_valid", "link_valid", "item_micro_f1"],
+  "field_scope": {
+    "line_items": ["name", "quantity_text", "unit_price_text", "line_total_text", "is_void"],
+    "totals": ["subtotal_text", "discount_text", "tax_text", "service_text", "grand_total_text"],
+    "excluded_relationship_field": "parent_item_index",
+    "alignment": "original line-item index; no fuzzy matching or item reordering"
+  },
+  "normalization": "Unicode NFC and whitespace only; no locale or numeric coercion",
+  "link_validity": {
+    "scope": "complete schema-valid response",
+    "rule": "every parent is null or an integer index strictly preceding its child",
+    "empty_item_array": "valid links vacuously; missing fields/items still reduce extraction scores",
+    "not_link_accuracy": true,
+    "does_not_gate_field_or_item_metrics": true
+  },
+  "item_metric": "multiset of canonical complete item fields excluding parent_item_index",
+  "structured_exact": "canonical full response including parent indices; valid links required",
+  "incomplete_or_schema_invalid_output": "zero quality scores and predictions; retain reference denominators",
+  "legacy_version_1": "unchanged hierarchy-gated metrics including parent indices as field facts",
+  "decoding_change_authorized": false,
+  "new_inference_authorized": false,
+  "training_authorized": false,
+  "frontier_calls_authorized": false,
+  "test_access_authorized": false,
+  "internal_evaluation_only": true,
+  "public_bipia_performance_claims_authorized": false
+}

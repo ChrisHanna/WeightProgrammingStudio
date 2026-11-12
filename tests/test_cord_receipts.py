@@ -14,6 +14,7 @@ from neural_foundry.cord_receipt_plugin import (
     project,
     public_audit,
     receipt_metrics,
+    receipt_metrics_v2,
     summarize,
 )
 from neural_foundry.gym_artifacts import CandidateRef
@@ -100,6 +101,69 @@ def test_metrics_counts_duplicates_grouping_and_only_whitespace_unicode_normaliz
     assert receipt_metrics(reference=reference, response=response)["structured_exact"] == 1
 
 
+def test_v2_fields_are_independent_of_wrong_parent_links_and_v1_is_unchanged():
+    reference = target(annotation())
+    response = copy.deepcopy(reference)
+    response["line_items"][0]["parent_item_index"] = 0
+    legacy = receipt_metrics(reference=reference, response=response)
+    current = receipt_metrics_v2(reference=reference, response=response)
+    assert legacy["json_valid"] == legacy["field_f1"] == 0
+    assert current["json_valid"] == current["field_f1"] == current["item_f1"] == 1
+    assert current["link_valid"] == current["structured_exact"] == 0
+    assert current["parent_links"] == 2 and current["invalid_parent_links"] == 1
+    response["line_items"][0]["line_total_text"] = "wrong amount"
+    current = receipt_metrics_v2(reference=reference, response=response)
+    assert 0 < current["field_f1"] < 1 and current["link_valid"] == 0
+    response = copy.deepcopy(reference)
+    response["line_items"][1]["parent_item_index"] = None
+    current = receipt_metrics_v2(reference=reference, response=response)
+    assert current["link_valid"] == current["field_f1"] == 1
+    assert current["structured_exact"] == 0  # Structurally valid links need not be correct.
+
+
+def test_v2_invalid_outputs_keep_reference_denominators_and_empty_links_are_defined():
+    reference = target(annotation())
+    for response, valid in ((None, False), (reference, False), ({"line_items": []}, True)):
+        metrics = receipt_metrics_v2(reference=reference, response=response, output_valid=valid)
+        assert metrics["json_valid"] == metrics["link_valid"] == metrics["field_f1"] == 0
+        assert metrics["field_reference"] > 0 and metrics["item_reference"] == 3
+    empty = {"line_items": [], "totals": {key: None for key in reference["totals"]}}
+    metrics = receipt_metrics_v2(reference=empty, response=empty)
+    assert metrics["field_f1"] == metrics["link_valid"] == metrics["structured_exact"] == 1
+    reference["line_items"][0]["parent_item_index"] = 0
+    with pytest.raises(GymJobError, match="reference parent"):
+        receipt_metrics_v2(reference=reference, response=empty)
+
+
+def test_versions_bind_distinct_scorers_and_v2_summary_keeps_invalid_denominators():
+    reference = target(annotation())
+    wrong_parent = copy.deepcopy(reference)
+    wrong_parent["line_items"][0]["parent_item_index"] = 0
+    clean = {"scenario_id": "validation:clean", "reference": reference}
+    attacked = {"scenario_id": "validation:attack", "clean_scenario_id": clean["scenario_id"],
+                "reference": reference}
+    spec = {"public_sets": [{"name": "clean", "rows": [clean]},
+                            {"name": "attack", "rows": [attacked]}], "prepared_digest": "frozen"}
+    result = {"document_digest": "saved", "scores": {
+        "clean": {"responses": [{"scenario_id": clean["scenario_id"], "response": wrong_parent,
+                                 "format_valid": True}]},
+        "attack": {"responses": [{"scenario_id": attacked["scenario_id"], "response": None,
+                                  "format_valid": False}]}}}
+    old = summarize(spec, result)
+    new = summarize(spec, result, scorer_version="2")
+    assert old["panels"]["clean"]["field"]["micro_f1"] == 0
+    assert new["panels"]["clean"]["field"]["micro_f1"] == 1
+    assert new["panels"]["clean"]["link_valid_count"] == 0
+    assert new["panels"]["attack"]["field"]["reference"] == new["panels"]["clean"]["field"]["reference"]
+    for version, expected in (("1", 0), ("2", 1)):
+        task = cord_task({"rows": [], "scorer_version": version})
+        service = GymStudioService()
+        task.bind(service)
+        scorer = service.components.resolve("scorer", "cord-fields", version,
+                                             task.job.scorer.implementation_digest)
+        assert scorer(reference=reference, response=wrong_parent)["field_f1"] == expected
+
+
 @pytest.mark.parametrize("response", [None, "not json", {"line_items": []}])
 def test_invalid_responses_are_failures_not_omitted(response):
     metrics = receipt_metrics(reference=target(annotation()), response=response)
@@ -160,6 +224,8 @@ def test_composition_uses_generic_registry_and_new_budgets_without_training():
     assert spec["training_rows"] == [] and spec["gates"] == []
     assert spec["candidates"][0]["method"] == "unchanged_base"
     assert spec["candidates"][0]["system_prompt"] == FRAMING
+    assert spec["gym"]["scorer_version"] == "2"
+    assert spec["headline_metric"]["metric"] == "field_micro_f1"
     assert registry.resolve("gym", spec["plugins"]["gym"])(spec["gym"]).job.task_output_schema
     assert not public_audit(spec=spec)["public_passed"]  # all 100 native validation rows required
 
