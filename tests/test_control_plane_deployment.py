@@ -1,6 +1,7 @@
 """Focused deployment helper tests; scratch state stays under ignored artifacts."""
 
 import importlib.util
+import json
 import os
 import shutil
 import sys
@@ -71,6 +72,18 @@ def test_database_password_urlencoding(monkeypatch):
     assert parsed.username == "control_plane"
     assert unquote(parsed.password) == password
     assert parsed.path == "/control_plane"
+
+
+def test_local_worker_installer_refuses_unqualified_configuration(tmp_path, monkeypatch):
+    module = load_script("local-training-worker")
+    config = tmp_path / "operator.json"
+    config.write_text(json.dumps({"python": sys.executable, "qualification": {"complete": False}}))
+    monkeypatch.setattr(sys, "argv", ["worker", "--config", str(config), "--install-user-service"])
+    calls = []
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(SystemExit, match="qualification"):
+        module.main()
+    assert calls == []
 
 
 def test_api_probe_checks_database_readiness_without_leaking_errors(monkeypatch, capsys):

@@ -46,6 +46,8 @@ def fixture_spec() -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify-run", help="Recheck a previously completed run after restart")
+    parser.add_argument("--allow-qualified-runtime", action="store_true",
+                        help="Permit explicitly qualified proof profiles; the smoke itself still runs CPU fixtures only")
     args = parser.parse_args()
     port = int(os.environ.get("CP_HTTP_PORT", "8787"))
     token = (ROOT / "artifacts" / "control-plane-local" / "secrets" / "operator_token").read_text().strip()
@@ -81,8 +83,14 @@ def main() -> None:
         plugin for plugin in catalog.get("plugins", [])
         if plugin.get("id", "").startswith(("proof.", "live."))
     ]
-    if not proof_plugins or any(plugin.get("enabled") is not False for plugin in proof_plugins):
-        raise SystemExit("Live/proof operations must remain disabled in the fixture deployment")
+    if not proof_plugins:
+        raise SystemExit("Expected explicit proof/live capability descriptors")
+    for plugin in proof_plugins:
+        if plugin.get("enabled") is False:
+            continue
+        if (not args.allow_qualified_runtime or plugin["id"].startswith("live.")
+                or not plugin.get("qualified_profiles")):
+            raise SystemExit("Unqualified live/proof operations are not permitted by this smoke mode")
 
     run_id = args.verify_run
     if run_id is None:

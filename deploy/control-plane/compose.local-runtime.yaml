@@ -1,0 +1,30 @@
+services:
+  postgres:
+    networks:
+      - private
+      - local-runtime
+    ports:
+      - "127.0.0.1:${CP_LOCAL_POSTGRES_PORT:-55432}:5432"
+  api:
+    environment:
+      CP_RUNTIME_CONFIG_FILE: /run/control-plane/local-runtime/operator.json
+    volumes:
+      - type: bind
+        source: ../../artifacts/control-plane-local/training-runtime
+        target: /run/control-plane/local-runtime
+        read_only: true
+        bind:
+          create_host_path: false
+  worker:
+    environment:
+      CP_RUNTIME_CONFIG_FILE: /run/control-plane/local-runtime/operator.json
+    volumes:
+      - type: bind
+        source: ../../artifacts/control-plane-local/training-runtime
+        target: /run/control-plane/local-runtime
+        read_only: true
+        bind:
+          create_host_path: false
+networks:
+  local-runtime:
+    driver: bridge

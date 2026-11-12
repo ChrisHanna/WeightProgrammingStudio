@@ -203,7 +203,8 @@ def training_coverage(roster: list[str], receipt: Mapping[str, Any],
 
 
 def train(spec: Mapping[str, Any], *, role: str, root: Path, automodel_python: str,
-          reload_python: str, registry: ProofRegistry | None = None) -> dict[str, Any]:
+          reload_python: str, registry: ProofRegistry | None = None,
+          trusted_training_limits: Mapping[str, Any] | None = None) -> dict[str, Any]:
     registry = registry or builtin_registry()[0]
     validate_spec(spec, registry)
     public_audit = audit(spec, registry)
@@ -217,7 +218,7 @@ def train(spec: Mapping[str, Any], *, role: str, root: Path, automodel_python: s
     policy = spec["policy"]
     from .training_policy import bound_training_policy
 
-    limits = bound_training_policy(spec)
+    limits = trusted_training_limits or bound_training_policy(spec)
     model_options = {"device": limits["base_staging_device"]} if limits else {}
     base = registry.resolve("model", spec["plugins"]["model"])(
         base_model=spec["base_model"], policy=policy, seed=selected["recipe"]["seed"], **model_options)

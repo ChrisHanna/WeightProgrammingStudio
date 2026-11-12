@@ -57,6 +57,8 @@ class TrustedRuntimeProfile:
     registry: ProofRegistry | None = None
     callbacks: Mapping[str, Callable[[BridgeContext], dict[str, Any]]] = field(default_factory=dict)
     product_gym_bindings: tuple[QualifiedGymBinding, ...] = ()
+    descriptor: Mapping[str, Any] = field(default_factory=dict)
+    operator_config: str = ""
 
     def __post_init__(self) -> None:
         identifier(self.id, "runtime profile")
@@ -93,6 +95,7 @@ class BridgeContext(TypedDict):
     role: str
     root: Path
     limits: dict[str, int]
+    operation: str
 
 
 def _train(context: BridgeContext) -> dict[str, Any]:
@@ -157,13 +160,16 @@ def dispatch(operation: str, profile: TrustedRuntimeProfile, *, document: dict[s
         gyms = [asset for asset in binding["assets"] if asset["kind"] == "gym"]
         if not gyms or role != binding["role"]:
             fail("runtime_not_qualified", "Product proof binding requires its exact qualified role and gyms.", 409)
-        for gym in gyms:
+        if profile.descriptor:
+            from .local_runtime import validate_compiled_proof
+            validate_compiled_proof(profile, document, limits)
+        for gym in ([] if profile.descriptor else gyms):
             require_product_gym_binding(
                 profile, project_id=binding["project_id"], gym_asset_id=gym["id"], gym_version=gym["version"],
                 gym_artifact_id=gym["artifact_id"], proof_gym_reference=document["plugins"]["gym"],
                 proof_gym_configuration=document["gym"], method=binding["method"])
     context: BridgeContext = {"profile": profile, "document": document, "role": role,
-               "root": profile.root.resolve() / run_id, "limits": limits}
+               "root": profile.root.resolve() / run_id, "limits": limits, "operation": operation}
     callback = profile.callbacks.get(operation) or BRIDGES[operation]
     # Callbacks are Python callables installed by trusted deployment code, never import strings.
     result = callback(context)

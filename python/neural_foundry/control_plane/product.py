@@ -13,6 +13,7 @@ from .store import json_value, one
 if TYPE_CHECKING:
     from psycopg import Connection
 
+    from .bridges import TrustedRuntimeProfile
     from .service import ControlPlaneService
 
 MAX_EXAMPLES = 1000
@@ -147,7 +148,7 @@ class ProductWorkspace:
 
     def capabilities(self) -> dict[str, Any]:
         profiles = self.service.runtime_profiles.values()
-        training = any(p.qualified and p.registry is not None and p.product_gym_bindings
+        training = any(p.qualified and p.registry is not None and (p.product_gym_bindings or p.descriptor)
                        and {"model_training", "model_export", "model_identity", "model_scoring"}
                        <= p.deployment_capabilities for p in profiles)
         reason = "Operator must install a qualified JSON gym registry/runtime with train/export/identity/score capabilities and exact saved-input proof bindings."
@@ -165,8 +166,13 @@ class ProductWorkspace:
                 "SELECT id,name,description,created_at FROM cp_projects ORDER BY created_at,id")]
         return {"projects": projects, "capabilities": self.capabilities(), "gym_templates": templates(),
                 "recipe_methods": recipe_methods(),
+                "training_runtimes": self.training_runtimes(),
                 "limits": {"max_examples": MAX_EXAMPLES, "max_evaluation_examples": 256, "max_document_bytes": 262144,
                            "max_preview_actions": 64, "max_response_chars": 8192, "max_evidence_candidates": 16}}
+
+    def training_runtimes(self) -> list[dict[str, Any]]:
+        from .local_runtime import runtime_descriptor
+        return [runtime_descriptor(profile) for profile in self.service.runtime_profiles.values()]
 
     def create_project(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
         from .service import _id, _public_document
@@ -254,7 +260,8 @@ class ProductWorkspace:
                 if name in value:
                     identifier(value[name], name)
             if "proof_spec_artifact_id" in value:
-                self.service.artifacts._path(value["proof_spec_artifact_id"])
+                from .artifacts import validate_artifact_id
+                validate_artifact_id(value["proof_spec_artifact_id"])
                 if conn.execute("SELECT id FROM cp_artifacts WHERE id=%s", (value["proof_spec_artifact_id"],)).fetchone() is None:
                     fail("artifact_not_found", "Proof specification artifact is not registered.", 404)
         elif kind == "evidence":
@@ -447,6 +454,8 @@ class ProductWorkspace:
         required = {"model_training", "model_export", "model_identity", "model_scoring"}
         if not profile or not profile.qualified or not required <= profile.deployment_capabilities:
             fail("runtime_not_qualified", reason, 409)
+        if profile.descriptor:
+            return self._local_proof_plan(conn, project_id, name, recipe, profile, actor=actor)
         if not all(value.get(field) for field in ("proof_spec_artifact_id", "role", "dataset_asset_id")):
             fail("runtime_not_qualified", "Operator must supply a complete proof artifact, role and dataset for the qualified runtime.", 409)
         from ..gym_job import GymJobError
@@ -503,6 +512,41 @@ class ProductWorkspace:
                         "candidate_id": "candidate", "config": {"runtime_profile": profile.id,
                             "artifact_id": metadata["id"], "role": value["role"]},
                         "limits": {}} for i, op in enumerate(("train", "export", "identity", "score"))]}
+
+    def _local_proof_plan(self, conn: Connection[dict[str, Any]], project_id: str,
+                          name: str, recipe: dict[str, Any], profile: TrustedRuntimeProfile,
+                          *, actor: str) -> dict[str, Any]:
+        from pathlib import Path
+
+        from .local_runtime import compile_proof, read_config, stage_limits
+        value = recipe["document"]
+        if value.get("proof_spec_artifact_id"):
+            fail("runtime_binding_changed", "The built-in runtime compiles its own proof; do not supply a legacy artifact.")
+        model = self._asset(conn, project_id, value["model_asset_id"], "model")
+        gyms = [self._asset(conn, project_id, gid, "gym") for gid in value["gym_asset_ids"]]
+        dataset_id = value.get("dataset_asset_id") or gyms[0]["document"].get("dataset_asset_id")
+        dataset = self._asset(conn, project_id, dataset_id, "dataset")
+        if any(gym["document"] != {"template": "json_exact", "config": {},
+                                  "dataset_asset_id": dataset["id"]} for gym in gyms):
+            fail("runtime_not_qualified", "Only the owned JSON gym pinned to this dataset is installed.", 409)
+        binding = {"project_id": project_id, "method": value["method"],
+                   "role": value.get("role", "candidate"),
+                   "assets": [{key: asset[key] for key in ("id", "kind", "version", "artifact_id")}
+                              for asset in (recipe, model, dataset, *gyms)]}
+        config = read_config(Path(profile.operator_config))
+        proof = compile_proof(config, profile.descriptor, model=model["document"],
+                              dataset=dataset["document"], recipe=value, binding=binding)
+        metadata = self.service.artifacts.put(proof)
+        conn.execute("INSERT INTO cp_artifacts(id,metadata,actor) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                     (metadata["id"], json_value(metadata), actor))
+        operations = ("train", "export", "identity", "score")
+        return {"version": 1, "name": name, "candidates": [{
+            "id": "candidate", "model": {"id": model["document"]["model_id"],
+                "revision": model["document"]["revision"]}, "method": "lora"}],
+            "stages": [{"id": op, "operation": "proof." + op,
+                "depends_on": [operations[i - 1]] if i else [], "candidate_id": "candidate",
+                "config": {"runtime_profile": profile.id, "artifact_id": metadata["id"], "role": binding["role"]},
+                "limits": stage_limits(config, proof, "proof." + op)} for i, op in enumerate(operations)]}
 
     def bundle(self, project_id: str) -> dict[str, Any]:
         project = self.get_project(project_id)

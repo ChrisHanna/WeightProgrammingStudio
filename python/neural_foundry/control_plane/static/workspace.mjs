@@ -9,7 +9,7 @@ const state = { token: "", ready: false, busy: false, generation: 0, workspace: 
 const requestKeys = new Map();
 let dialogSubmit = null;
 let previewGeneration = 0;
-const views = new Set(["overview", "models", "datasets", "gyms", "evaluate", "fine_tune", "weight_edit", "merge", "experiments", "export"]);
+const views = new Set(["overview", "models", "datasets", "gyms", "evaluate", "fine_tune", "weight_edit", "merge", "experiments", "runtimes", "export"]);
 const assets = (kind) => (state.snapshot?.assets || []).filter((asset) => asset.kind === kind);
 const assetById = (id) => (state.snapshot?.assets || []).find((asset) => asset.id === id);
 const assetName = (id) => { const asset = assetById(id); return asset ? `${asset.name} · v${asset.version}` : id || "Not recorded"; };
@@ -111,7 +111,7 @@ function lock() {
     "experiment-json", "experiment-events", "comparison-table", "recent-experiments",
     "fine-tune-form", "fine-tune-recipes", "weight-edit-form", "weight-edit-recipes", "merge-form", "merge-recipes",
     "gym-template", "gym-dataset", "preview-example", "evaluation-gym", "evaluation-evidence",
-    "experiment-title", "experiment-state", "experiment-scope", "experiment-next", "experiment-plan"]) {
+    "experiment-title", "experiment-state", "experiment-scope", "experiment-next", "experiment-plan", "training-runtime-list"]) {
     $(id).replaceChildren();
   }
   $("gym-form").reset();
@@ -192,6 +192,7 @@ async function loadProject(projectId) {
       if (input.multiple) for (const option of input.options) option.selected = value.includes(option.value);
       else input.value = value;
     }
+    if ($("fine-tune-runtime")) $("fine-tune-runtime").dispatchEvent(new Event("change"));
   }
   showView(state.view);
 }
@@ -289,7 +290,48 @@ function renderProject() {
   fillAssetOptions($("evaluation-gym"), assets("gym").filter((asset) => asset.document.template === "json_exact"), "Choose an extraction gym");
   renderEvaluationEvidence();
   for (const workstream of ["fine_tune", "weight_edit", "merge"]) renderRecipe(workstream);
+  renderTrainingRuntimes();
   controls();
+}
+
+function renderTrainingRuntimes() {
+  const container = $("training-runtime-list");
+  container.replaceChildren();
+  const runtimes = state.workspace.training_runtimes || [];
+  if (!runtimes.length) {
+    empty(container, "No local training runtime is connected. An operator must run preflight and qualification, then install the trusted runtime connection.");
+    return;
+  }
+  for (const runtime of runtimes) {
+    const panel = node("section", undefined, "panel");
+    const header = node("div", undefined, "section-heading");
+    header.append(node("h2", runtime.name || runtime.id),
+      node("span", runtime.ready ? "Ready in its qualified scope" : "Not ready", `badge${runtime.ready ? " available" : ""}`));
+    panel.append(header, node("p", runtime.reason || "Inspect this runtime's recorded qualification before submitting work."));
+    panel.append(node("p", `Methods: ${(runtime.methods || []).join(", ") || "None qualified"}`, "field-help"));
+    for (const model of runtime.models || []) {
+      const row = node("div", undefined, "list-row");
+      const detail = node("div");
+      detail.append(node("strong", model.model_id), node("p", `Pinned revision: ${model.revision}`));
+      const registered = assets("model").some((asset) =>
+        asset.document.model_id === model.model_id && asset.document.revision === model.revision);
+      const register = button(registered ? "Registered in this project" : "Add model reference", () => action(async () => {
+        const document = { model_id: model.model_id, revision: model.revision, source: "reference" };
+        if (model.weights_digest !== undefined) {
+          if (!/^sha256:[0-9a-f]{64}$/.test(model.weights_digest)) throw new Error("Runtime returned an invalid checkpoint digest.");
+          document.weights_digest = model.weights_digest;
+        }
+        await saveAsset("model", `${model.model_id} · ${model.revision.slice(0, 8)}`, document);
+      }), "quiet");
+      register.disabled = registered || !runtime.ready;
+      row.append(detail, register); panel.append(row);
+    }
+    const details = node("details");
+    details.append(node("summary", "Qualification, resource limits & runtime identity"), node("pre", pretty({
+      id: runtime.id, limits: runtime.limits, qualification: runtime.qualification,
+    })));
+    panel.append(details); container.append(panel);
+  }
 }
 
 function renderRuns(container, runs) {
@@ -502,7 +544,11 @@ function openAsset(asset) {
           recipe_asset_id: asset.id });
         $("workspace-dialog").close(); await loadProject(state.projectId); await selectRun(run.id);
       }), "primary");
-      launch.disabled = !capability?.enabled; container.append(launch);
+      const runtime = (state.workspace.training_runtimes || []).find((item) => item.id === asset.document.runtime_profile);
+      const localReady = runtime?.ready && (runtime.methods || []).includes(asset.document.method);
+      const legacyInputs = asset.document.proof_spec_artifact_id && asset.document.runtime_profile;
+      launch.disabled = !capability?.enabled || (workstream === "fine_tune" && !localReady && !legacyInputs);
+      container.append(launch);
     }
     const details = node("details"); details.append(node("summary", "Full asset document & lineage"), node("pre", pretty(asset)));
     container.append(details);
@@ -659,15 +705,40 @@ function renderRecipe(workstream) {
   const renderParameters = () => {
     parameterHost.replaceChildren();
     const method = methods.find((item) => item.id === $(`${prefix}-method`).value);
+    if (!method) {
+      parameterHost.append(node("p", "Choose a method supported by the selected runtime.", "field-help"));
+      return;
+    }
     for (const [name, schema] of Object.entries(method.parameters_schema?.properties || {})) schemaField(parameterHost, `${prefix}-parameter-${name}`, name, schema);
   };
+  $(`${prefix}-method`).required = true;
   $(`${prefix}-method`).addEventListener("change", renderParameters);
   renderParameters();
+  if (workstream === "fine_tune") {
+    const runtimes = state.workspace.training_runtimes || [];
+    const runtimeSelect = field(form, `${prefix}-runtime`, "Training runtime", { options: [
+      ["", "Save an unconnected plan"],
+      ...runtimes.map((runtime) => [runtime.id, `${runtime.name || runtime.id}${runtime.ready ? "" : " · not ready"}`]),
+    ], help: "Only an operator-installed, qualified runtime can execute a plan. The exact resolved recipe and limits are reviewed before execution." });
+    for (const option of runtimeSelect.options) {
+      if (option.value && !runtimes.find((runtime) => runtime.id === option.value)?.ready) option.disabled = true;
+    }
+    runtimeSelect.addEventListener("change", () => {
+      const runtime = runtimes.find((item) => item.id === runtimeSelect.value);
+      const methodSelect = $(`${prefix}-method`);
+      for (const option of methodSelect.options) option.disabled = runtime !== undefined && !(runtime.methods || []).includes(option.value);
+      if (runtime && !(runtime.methods || []).includes(methodSelect.value)) {
+        methodSelect.value = "";
+        notify("Choose a method qualified for this runtime. No method was substituted automatically.");
+        renderParameters();
+      }
+    });
+  }
   form.append(node("p", "The selected gyms declare evaluation requirements; they are not a guarantee of preservation or improvement. Compatibility, budgets and qualification are checked again at dispatch.", "field-help"));
   const advanced = node("details"); advanced.append(node("summary", "Advanced: existing qualified proof adapter inputs"));
   field(advanced, `${prefix}-proof`, "Existing proof-spec artifact ID", { help: "Optional content-addressed input for an already qualified adapter. No code or executable paths are accepted." });
   field(advanced, `${prefix}-role`, "Candidate role in that proof specification");
-  field(advanced, `${prefix}-runtime`, "Qualified runtime profile ID", { help: "Entering a profile name does not qualify or enable it." });
+  if (workstream !== "fine_tune") field(advanced, `${prefix}-runtime`, "Qualified runtime profile ID", { help: "Entering a profile name does not qualify or enable it." });
   form.append(advanced);
   const save = node("button", "Save improvement plan", "primary"); save.type = "submit";
   const actions = node("div", undefined, "form-actions"); actions.append(save); form.append(actions);

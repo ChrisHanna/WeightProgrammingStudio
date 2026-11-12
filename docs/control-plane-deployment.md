@@ -110,6 +110,74 @@ override removes the host publication.
 
 ## Persistence, restart, and operator lifecycle
 
+### Opt-in existing WSL training runtime
+
+The initial local adapter is deliberately scoped to cached
+`Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca`, flat scalar JSON
+tasks, and its exact LoRA recipe. It is not generic GPU or model qualification.
+The installed AutoModel and PEFT-reload environments remain separate: AutoModel
+trains in its pinned interpreter; orchestration, materialization, export,
+identity and evaluation run in the pinned PEFT environment.
+
+Copy [local-runtime.example.json](../deploy/control-plane/local-runtime.example.json)
+to ignored `artifacts/control-plane-local/training-runtime/operator.json` and
+replace `USER` and paths for the operator-owned runtimes. Do not put credentials
+in that JSON. The CLI's `preflight` only inspects cached bytes, installed
+dependencies, GPU metadata and compatibility. Missing packages or cached weights
+are explicit failures; weights are never downloaded.
+
+Run from the source checkout in WSL with `PYTHONPATH` pointing at its `python`
+directory:
+
+```sh
+export PYTHONPATH="$PWD/python"
+/path/to/automodel/python -m neural_foundry.control_plane.local_runtime preflight \
+  --config artifacts/control-plane-local/training-runtime/operator.json
+```
+
+Qualification is a real model operation and needs explicit operator approval.
+The initial qualification requires exactly `--steps 2`,
+`--max-cuda-bytes 8589934592` and `--wall-seconds 600`. It uses new owned examples,
+not existing benchmark panels or sealed data. Successful qualification verifies
+complete training coverage, export/reload identity and owned-validation scoring;
+it makes **no model-quality or release claim**. A failed attempt remains consumed
+and preserved. Repair and a fresh attempt need explicit approval and a new root;
+never remove the started marker to retry silently.
+
+Only after qualification succeeds, make the non-secret promoted operator JSON
+readable by the container's UID 10001, with directory mode 0755 and JSON mode
+0644. Keep credential files private under the separate existing secrets
+directory. Activate the optional deployment:
+
+```sh
+sh deploy/control-plane/scripts/cp-local-runtime.sh up -d --wait postgres
+sh deploy/control-plane/scripts/cp-local-runtime.sh up --build -d --wait api worker
+python3 deploy/control-plane/scripts/local-training-worker.py \
+  --config artifacts/control-plane-local/training-runtime/operator.json \
+  --install-user-service
+python3 deploy/control-plane/scripts/smoke.py --allow-qualified-runtime
+```
+
+This mode explicitly publishes PostgreSQL on **127.0.0.1:55432 only** for the
+host worker; ordinary deployment still publishes no database port. Use the local
+wrapper consistently so subsequent `up` commands retain its bridge and metadata
+mount. The host worker uses the existing authenticated artifact API instead of
+copying or replacing the live artifact volume. Secrets enter its environment
+only at process launch, never command arguments or exports.
+
+The installed user service is `neural-foundry-local-training.service`; inspect
+it with `systemctl --user status` and stop/start it using that exact name.
+It starts with the WSL user manager, not necessarily at Windows boot. The
+installer refuses to overwrite an existing unit unless explicitly passed
+`--replace-user-service`, and only replaces its own launcher.
+
+**Compute & runtimes** shows a fresh host heartbeat and qualified model/method
+scope. Add the cached model reference, select the runtime in a fine-tuning plan,
+and generate its review without hand-authoring a proof artifact. Approval and
+Start remain separate. The host skips CPU/analysis work; the Docker worker skips
+host-only training work. Changed sources, interpreters, cached weights, recipe
+or limits invalidate admission rather than silently changing execution.
+
 PostgreSQL 18 persists its cluster beneath `/var/lib/postgresql` in named volume
 `nf-control-plane-dev_postgres`; artifact volume is
 `nf-control-plane-dev_artifacts`. Containers are disposable; these volumes are

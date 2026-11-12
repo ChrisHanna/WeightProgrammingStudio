@@ -56,11 +56,13 @@ DEFAULT_LIMITS = {"steps": 64, "episodes": 4, "wall_seconds": 20, "recorded_byte
 MAX_LIMITS = {"steps": 256, "episodes": 16, "wall_seconds": 20, "recorded_bytes": 262144}
 
 
-def limits(value: Any, *, defaults: bool = True) -> dict[str, int]:
-    keys(value, set(MAX_LIMITS), set())
-    result = dict(DEFAULT_LIMITS) if defaults else {}
+def limits(value: Any, *, defaults: bool = True,
+           ceilings: dict[str, int] | None = None) -> dict[str, int]:
+    maximum = ceilings if ceilings is not None else MAX_LIMITS
+    keys(value, set(maximum), set())
+    result = dict(ceilings if ceilings is not None else DEFAULT_LIMITS) if defaults else {}
     for key, number in value.items():
-        if type(number) is not int or not 1 <= number <= MAX_LIMITS[key]:
+        if type(number) is not int or not 1 <= number <= maximum[key]:
             fail("invalid_limits", "Limits must be positive bounded integers.")
         result[key] = number
     return result
@@ -110,8 +112,10 @@ def validate_spec(value: Any, registry: dict[str, dict[str, Any]]) -> dict[str, 
         deps = stage["depends_on"]
         if not isinstance(deps, list) or any(not isinstance(d, str) for d in deps) or len(set(deps)) != len(deps):
             fail("invalid_spec", "Dependencies must be distinct stage IDs.")
-        limits(stage["limits"])
         validate_config(stage["operation"], stage["config"])
+        profile = stage["config"].get("runtime_profile")
+        scoped = registry[stage["operation"]].get("runtime_limits", {}).get(profile)
+        limits(stage["limits"], ceilings=scoped)
     done: set[str] = set()
     while len(done) < len(ids):
         ready = {s["id"] for s in stages if s["id"] not in done and set(s["depends_on"]) <= done}
@@ -175,10 +179,15 @@ def validate_config(operation: str, config: Any) -> None:
         fail("invalid_config", "Fixture seeds must be bounded nonnegative integers.")
 
 
-def compile_plan(spec: dict[str, Any]) -> dict[str, Any]:
+def compile_plan(spec: dict[str, Any], *,
+                 runtime_descriptors: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     from .implementation import execution_implementation
 
-    stages = [{**s, "limits": limits(s["limits"])} for s in spec["stages"]]
+    descriptors = runtime_descriptors or {}
+    stages = [{**s, "limits": limits(s["limits"], ceilings=(
+        {"steps": 8, "episodes": 1, "wall_seconds": descriptors[s["config"]["runtime_profile"]]["limits"]["wall_seconds"],
+         "recorded_bytes": 262144} if s["operation"].startswith("proof.")
+        and s["config"]["runtime_profile"] in descriptors else None))} for s in spec["stages"]]
     software_only = all(s["operation"].startswith(("software.", "analysis.")) for s in stages)
     runtime_profile = ("cpu-recorded-analysis-v1" if all(s["operation"].startswith("analysis.") for s in stages)
                        else "cpu-software-fixture-v1" if software_only else "per-stage-qualified-profile")
@@ -187,6 +196,14 @@ def compile_plan(spec: dict[str, Any]) -> dict[str, Any]:
             "model_calls": False if software_only else "possible",
             "limits": {key: sum(s["limits"][key] for s in stages) for key in DEFAULT_LIMITS},
             "release_authorized": False, "execution_implementation": execution_implementation()}
+    if descriptors:
+        selected = {s["config"]["runtime_profile"] for s in stages if s["operation"].startswith("proof.")}
+        bound_profiles = selected & descriptors.keys()
+        if bound_profiles:
+            if any(not s["operation"].startswith("proof.")
+                   or s["config"]["runtime_profile"] not in bound_profiles for s in stages):
+                fail("mixed_runtime_plan", "Scoped host proof plans cannot mix software or legacy runtimes.")
+            plan["runtime_implementations"] = {name: digest(descriptors[name]) for name in sorted(bound_profiles)}
     for stage in stages:
         config, bound = stage["config"], stage["limits"]
         required_steps = config.get("steps", 8 if stage["operation"] == "software.training" else 1)

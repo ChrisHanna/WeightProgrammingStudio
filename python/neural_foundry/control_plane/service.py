@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .artifacts import ArtifactStore
+from .artifacts import ArtifactStorage, ArtifactStore, validate_artifact_id
 from .catalog import OPERATIONS, catalog_document
 from .models import (
     ControlPlaneError,
@@ -48,12 +48,16 @@ def _public_document(value: dict[str, Any]) -> dict[str, Any]:
 
 
 class ControlPlaneService:
-    def __init__(self, dsn: str, artifact_root: Path, *, lease_seconds: int = 30) -> None:
+    def __init__(self, dsn: str, artifact_root: Path, *, lease_seconds: int = 30,
+                 artifact_store: ArtifactStorage | None = None) -> None:
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
             fail("invalid_lease", "Lease must be between one and 3600 seconds.")
-        self.store, self.artifacts = Store(dsn), ArtifactStore(artifact_root)
+        self.store = Store(dsn)
+        self.artifacts: ArtifactStorage = artifact_store if artifact_store is not None else ArtifactStore(artifact_root)
         self.lease_seconds = lease_seconds
         self.runtime_profiles: dict[str, TrustedRuntimeProfile] = {}
+        from .local_runtime import install_configured_runtime
+        install_configured_runtime(self)
 
     def install_runtime_profile(self, profile: TrustedRuntimeProfile) -> None:
         """Trusted in-process deployment hook, deliberately absent from the HTTP facade."""
@@ -69,6 +73,11 @@ class ControlPlaneService:
             profiles = [p.id for p in self.runtime_profiles.values() if capability in p.deployment_capabilities]
             operations[operation]["enabled"] = bool(profiles)
             operations[operation]["qualified_profiles"] = profiles
+            operations[operation]["runtime_limits"] = {
+                p.id: {"steps": 8, "episodes": 1, "wall_seconds": p.descriptor["limits"]["wall_seconds"],
+                       "recorded_bytes": 262144}
+                for p in self.runtime_profiles.values() if p.descriptor
+                and capability in p.deployment_capabilities}
         return operations
 
     def catalog_document(self) -> dict[str, Any]:
@@ -116,6 +125,20 @@ class ControlPlaneService:
                 profiles = self._operations()[stage["operation"]]["qualified_profiles"]
                 if stage["config"]["runtime_profile"] not in profiles:
                     fail("runtime_not_authorized", "Stage runtime profile is not qualified for this capability.", 403)
+                profile = self.runtime_profiles[stage["config"]["runtime_profile"]]
+                if profile.descriptor:
+                    from .local_runtime import (
+                        read_config,
+                        stage_limits,
+                        validate_compiled_proof,
+                        validate_owned_assets,
+                    )
+                    proof = self.get_artifact(stage["config"]["artifact_id"])["document"]
+                    validate_compiled_proof(profile, proof, stage["limits"])
+                    validate_owned_assets(self, proof)
+                    config = read_config(Path(profile.operator_config))
+                    if stage["limits"] != stage_limits(config, proof, stage["operation"]):
+                        fail("runtime_budget_exceeded", "Requested limits differ from the exact scoped operation.", 409)
         with self.store.transaction() as conn:
             run_id = self._insert_run(conn, spec, actor=actor, idempotency_key=idempotency_key)
         return self.get_run(run_id)
@@ -178,7 +201,8 @@ class ControlPlaneService:
             if run["plan"] is None:
                 if run["state"] != "created":
                     fail("invalid_state", "Only a newly created run may be planned.", 409)
-                plan = compile_plan(run["spec"])
+                plan = compile_plan(run["spec"], runtime_descriptors={
+                    p.id: dict(p.descriptor) for p in self.runtime_profiles.values() if p.descriptor})
                 conn.execute("UPDATE cp_runs SET state='planned',plan=%s,updated_at=now() WHERE id=%s",
                              (json_value(plan), run_id))
                 self.store.event(conn, run_id, "run.planned", {"actor": actor, "plan_digest": plan["digest"]})
@@ -272,7 +296,7 @@ class ControlPlaneService:
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any]:
         # Validate before sending user data into storage queries.
-        self.artifacts._path(artifact_id)
+        validate_artifact_id(artifact_id)
         with self.store.transaction() as conn:
             row = conn.execute("SELECT metadata FROM cp_artifacts WHERE id=%s", (artifact_id,)).fetchone()
             if row is None:
@@ -307,10 +331,19 @@ class ControlPlaneService:
             runs = conn.execute("SELECT * FROM cp_runs WHERE state IN ('queued','running') "
                                 "ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 32").fetchall()
             for run in runs:
+                from .local_runtime import worker_can_claim
+                scoped = run["plan"].get("runtime_implementations", {})
+                # Placement is checked before global environment guards or lease mutation.
+                # A Docker CPU worker must not pause a host job, nor vice versa.
+                if not worker_can_claim(self.runtime_profiles, run["plan"]):
+                    continue
                 if self._expire(conn, run):
                     continue
                 approved_implementation = run["plan"].get("execution_implementation")
-                if approved_implementation != current_implementation:
+                runtime_changed = scoped and any(
+                    digest(self.runtime_profiles[name].descriptor) != expected
+                    for name, expected in scoped.items())
+                if runtime_changed or (not scoped and approved_implementation != current_implementation):
                     error = {"code": "implementation_changed",
                              "message": "Execution implementation differs from the approved plan; operator attention required."}
                     conn.execute("UPDATE cp_attempts SET state='needs_attention',finished_at=now(),error=%s "
@@ -442,8 +475,12 @@ class ControlPlaneService:
                 profile = self.runtime_profiles.get(config["runtime_profile"])
                 if profile is None:
                     fail("runtime_not_authorized", "Worker does not have the approved qualified runtime.", 403)
+                proof = self.get_artifact(config["artifact_id"])["document"]
+                if profile.descriptor:
+                    from .local_runtime import validate_owned_assets
+                    validate_owned_assets(self, proof)
                 result = dispatch(stage["operation"], profile,
-                                  document=self.get_artifact(config["artifact_id"])["document"],
+                                  document=proof,
                                   role=config["role"], run_id=claim["run_id"],
                                   plan_digest=claim["plan_digest"], approval=claim["approval"], limits=stage["limits"])
             elif stage["operation"] == "analysis.saved_json":
